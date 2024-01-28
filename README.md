@@ -18,14 +18,15 @@ To use Vanaddy, ensure you have Rust installed on your machine. You can install 
 
 After installing Rust, clone the repository and navigate to the project directory:
 
-```bash
+```
 git clone https://github.com/PipXBT/vanddy
-cd vanaddy```
-
-```bash
+```
+```
+cd vanaddy
+```
+```
 cargo build
 ```
-
-```bash
-cargo run
-``` 
+```
+cargo run 
+```
