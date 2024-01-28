@@ -30,3 +30,6 @@ cargo build
 ```
 cargo run 
 ```
+
+
+![Screen Recording 2024-01-28 at 3 49 34 pm](https://github.com/PipXBT/vanddy/assets/84630076/e3545aa9-024b-46d7-9fb9-1507967fa0d2)
