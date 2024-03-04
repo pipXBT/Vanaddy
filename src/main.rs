@@ -1,7 +1,7 @@
-use csv;
+use csv::WriterBuilder;
 use solana_sdk::signature::{Keypair, Signer};
 use std::{
-    fs::OpenOptions,
+    fs::File,
     io::{self, Write},
     path::Path,
     sync::{
@@ -17,7 +17,8 @@ fn main() -> io::Result<()> {
     let vanity_string = read_vanity_string()?;
     let case_sensitive = read_case_sensitivity()?;
     let max_threads = read_thread_count()?;
-    let csv_file_path = prepare_csv_file()?;
+    let csv_file_path = "vanity_wallets.csv".to_string(); // Example path
+    prepare_csv_file(&csv_file_path)?;
 
     let found_flag = Arc::new(AtomicBool::new(false));
     let wallet_count = Arc::new(Mutex::new(0u64));
@@ -31,16 +32,15 @@ fn main() -> io::Result<()> {
         Arc::clone(&wallet_count),
     );
 
-    join_threads(handles);
-    report_completion(start_time);
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    report_completion(start_time, Arc::clone(&wallet_count));
 
     Ok(())
 }
 
 fn display_banner() {
-    println!("")
-    println!("")
-    println!("") 
     println!("██╗   ██╗ █████╗ ███╗   ██╗ █████╗ ██████╗ ██████╗ ██╗   ██╗");
     println!("██║   ██║██╔══██╗████╗  ██║██╔══██╗██╔══██╗██╔══██╗╚██╗ ██╔╝");
     println!("██║   ██║███████║██╔██╗ ██║███████║██║  ██║██║  ██║ ╚████╔╝ ");
@@ -73,9 +73,8 @@ fn read_thread_count() -> io::Result<usize> {
 
 fn prepare_csv_file(path: &str) -> io::Result<()> {
     if !Path::new(path).exists() {
-        let mut wtr = Writer::from_path(path)?;
-        wtr.write_record(&["Public Key", "Note"])?;
-        wtr.flush()?;
+        let mut file = File::create(path)?;
+        writeln!(file, "Public Key,Note")?;
     }
     Ok(())
 }
@@ -96,14 +95,8 @@ fn spawn_threads(
             let wallet_count = Arc::clone(&wallet_count);
 
             thread::spawn(move || {
-                let mut wtr = WriterBuilder::new()
-                    .has_headers(false)
-                    .from_path(&csv_file_path)
-                    .unwrap();
-                loop {
-                    if found_flag.load(Ordering::SeqCst) {
-                        break;
-                    }
+                let mut wtr = WriterBuilder::new().from_path(&csv_file_path).unwrap();
+                while !found_flag.load(Ordering::SeqCst) {
                     let keypair = Keypair::new();
                     let public_key = keypair.pubkey().to_string();
                     if check_vanity_string(&public_key, &vanity_string, case_sensitive) {
@@ -114,7 +107,8 @@ fn spawn_threads(
                         println!("Found matching public key: {}", public_key);
                         break;
                     }
-                    *wallet_count.lock().unwrap() += 1;
+                    let mut count = wallet_count.lock().unwrap();
+                    *count += 1;
                 }
             })
         })
@@ -129,4 +123,10 @@ fn check_vanity_string(public_key: &str, vanity_string: &str, case_sensitive: bo
             .to_lowercase()
             .starts_with(&vanity_string.to_lowercase())
     }
+}
+
+fn report_completion(start_time: Instant, wallet_count: Arc<Mutex<u64>>) {
+    let duration = start_time.elapsed();
+    let count = wallet_count.lock().unwrap();
+    println!("Completed in {:?}. Wallets generated: {}", duration, count);
 }
