@@ -3,8 +3,6 @@
 Vanaddy is a Rust-based utility for generating Solana keypairs and finding an input vanity sting at the beginning of the addy.
 It process concurrently to efficiently search for public keys that match a user-defined vanity string.
 
-![Uploading Screen Recording 2024-04-19 at 5.11.42 PM.gif…]()
-
 
 ## Features
 
