@@ -11,7 +11,7 @@ It process concurrently to efficiently search for public keys that match a user-
 - **Multi-threading Support**: Utilizes multiple threads to speed up the search process, with the thread count definable by the user (approx. 1 billion addy's a day)
 - **CSV Logging**: Records found public keys in a CSV file for easy access and reference.
 
-- On an Apple silicon M1 machine 6 threads was approx 50% cpu load ,it will ask hoa many threads you want use.
+- On an Apple silicon M1 machine 6 threads was approx 50% cpu load.
 
 ## Installation
 
