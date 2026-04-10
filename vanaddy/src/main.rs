@@ -1,9 +1,9 @@
 use bip39::{Language, Mnemonic, MnemonicType};
 use csv::WriterBuilder;
+use ed25519_dalek::SigningKey;
 use rayon::prelude::*;
 use ring::hmac;
 use sha3::{Digest, Keccak256};
-use solana_sdk::signature::{keypair_from_seed, Signer};
 use std::{
     fs::OpenOptions,
     io::{self, Write},
@@ -315,13 +315,14 @@ impl Matcher {
 type MatchPayload = (String, String, String, String);
 
 /// Generate a Solana keypair returning raw pubkey bytes — only base58-encode on match.
-fn generate_solana_raw() -> ([u8; 32], [u8; 64], String) {
+fn generate_solana_raw() -> ([u8; 32], SigningKey, String) {
     let mnemonic = Mnemonic::new(MnemonicType::Words12, Language::English);
     let seed_bytes = derive_seed(&mnemonic);
-    let kp = keypair_from_seed(&seed_bytes[..32]).expect("valid seed");
-    let pubkey_bytes = kp.pubkey().to_bytes();
-    let kp_bytes = kp.to_bytes();
-    (pubkey_bytes, kp_bytes, mnemonic.phrase().to_string())
+    let mut key_bytes = [0u8; 32];
+    key_bytes.copy_from_slice(&seed_bytes[..32]);
+    let signing_key = SigningKey::from_bytes(&key_bytes);
+    let pubkey_bytes = signing_key.verifying_key().to_bytes();
+    (pubkey_bytes, signing_key, mnemonic.phrase().to_string())
 }
 
 fn search_solana_raw(
@@ -333,7 +334,7 @@ fn search_solana_raw(
     let has_raw_prefix = matcher.raw_prefix.is_some();
 
     while !stop.load(Ordering::Relaxed) {
-        let (pubkey_bytes, kp_bytes, phrase) = generate_solana_raw();
+        let (pubkey_bytes, signing_key, phrase) = generate_solana_raw();
         counter.fetch_add(1, Ordering::Relaxed);
 
         // Fast path: reject on raw prefix bytes before base58-encoding
@@ -344,7 +345,11 @@ fn search_solana_raw(
         // Only base58-encode when prefix matched (or no prefix to check)
         let addr = bs58::encode(&pubkey_bytes).into_string();
         if matcher.matches_str(&addr) {
-            let secret_hex = hex::encode(kp_bytes);
+            // Solana keypair format: 64 bytes = secret_key (32) || public_key (32)
+            let mut keypair_bytes = [0u8; 64];
+            keypair_bytes[..32].copy_from_slice(signing_key.as_bytes());
+            keypair_bytes[32..].copy_from_slice(&pubkey_bytes);
+            let secret_hex = hex::encode(keypair_bytes);
             let _ = tx.send(("Solana".to_string(), addr, secret_hex, phrase));
         }
     }
