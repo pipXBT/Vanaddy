@@ -174,6 +174,50 @@ struct Matcher {
     case_sensitive: bool,
     /// For Solana starts-with: pre-decoded base58 bytes for raw comparison
     raw_prefix: Option<Vec<u8>>,
+    /// For EVM: pre-decoded hex bytes for raw comparison (skips hex::encode in hot loop)
+    evm_prefix: Option<(Vec<u8>, Option<u8>)>, // (full_bytes, extra_high_nibble)
+    evm_suffix: Option<(Vec<u8>, Option<u8>)>, // (full_bytes, extra_low_nibble)
+}
+
+/// Parse a hex string into full bytes + optional trailing high nibble (for prefix matching).
+/// e.g. "dead" -> ([0xde, 0xad], None), "dea" -> ([0xde], Some(0x0a))
+fn hex_prefix_to_bytes(hex: &str) -> (Vec<u8>, Option<u8>) {
+    let hex_lower = hex.to_lowercase();
+    let nibbles: Vec<u8> = hex_lower
+        .chars()
+        .map(|c| c.to_digit(16).unwrap() as u8)
+        .collect();
+    let full_count = nibbles.len() / 2;
+    let mut bytes = Vec::with_capacity(full_count);
+    for i in 0..full_count {
+        bytes.push((nibbles[i * 2] << 4) | nibbles[i * 2 + 1]);
+    }
+    let extra = if nibbles.len() % 2 == 1 {
+        Some(nibbles[nibbles.len() - 1])
+    } else {
+        None
+    };
+    (bytes, extra)
+}
+
+/// Parse a hex string into full bytes + optional leading low nibble (for suffix matching).
+/// e.g. "beef" -> ([0xbe, 0xef], None), "def" -> ([0xef], Some(0x0d))
+fn hex_suffix_to_bytes(hex: &str) -> (Vec<u8>, Option<u8>) {
+    let hex_lower = hex.to_lowercase();
+    let nibbles: Vec<u8> = hex_lower
+        .chars()
+        .map(|c| c.to_digit(16).unwrap() as u8)
+        .collect();
+    let has_extra = nibbles.len() % 2 == 1;
+    let start = if has_extra { 1 } else { 0 };
+    let full_count = (nibbles.len() - start) / 2;
+    let mut bytes = Vec::with_capacity(full_count);
+    for i in 0..full_count {
+        let idx = start + i * 2;
+        bytes.push((nibbles[idx] << 4) | nibbles[idx + 1]);
+    }
+    let extra = if has_extra { Some(nibbles[0]) } else { None };
+    (bytes, extra)
 }
 
 impl Matcher {
@@ -193,12 +237,24 @@ impl Matcher {
             _ => None,
         };
 
+        let evm_prefix = match chain {
+            Chain::HyperEvm if !prefix.is_empty() => Some(hex_prefix_to_bytes(&prefix)),
+            _ => None,
+        };
+
+        let evm_suffix = match chain {
+            Chain::HyperEvm if !suffix.is_empty() => Some(hex_suffix_to_bytes(&suffix)),
+            _ => None,
+        };
+
         Matcher {
             prefix,
             suffix,
             position,
             case_sensitive,
             raw_prefix,
+            evm_prefix,
+            evm_suffix,
         }
     }
 
@@ -208,6 +264,42 @@ impl Matcher {
         } else {
             false
         }
+    }
+
+    /// Match EVM address bytes directly — no hex encoding needed.
+    fn matches_evm_raw(&self, addr_bytes: &[u8; 20]) -> bool {
+        let prefix_ok = if let Some((ref full, ref extra)) = self.evm_prefix {
+            if !addr_bytes[..full.len()].starts_with(full) {
+                return false;
+            }
+            if let Some(nibble) = extra {
+                if (addr_bytes[full.len()] >> 4) != *nibble {
+                    return false;
+                }
+            }
+            true
+        } else {
+            true
+        };
+
+        if !prefix_ok {
+            return false;
+        }
+
+        if let Some((ref full, ref extra)) = self.evm_suffix {
+            let start = 20 - full.len();
+            if &addr_bytes[start..] != full.as_slice() {
+                return false;
+            }
+            if let Some(nibble) = extra {
+                let idx = start - 1;
+                if (addr_bytes[idx] & 0x0f) != *nibble {
+                    return false;
+                }
+            }
+        }
+
+        true
     }
 
     fn suffix_matches_str(&self, address: &str) -> bool {
@@ -287,6 +379,41 @@ fn search_solana_raw(
                 }
                 let _ = tx.send(("Solana".to_string(), addr, secret_hex, phrase));
             }
+        }
+    }
+}
+
+/// Generate an EVM address as raw 20 bytes — only format to hex on match.
+fn generate_evm_raw() -> ([u8; 20], libsecp256k1::SecretKey, String) {
+    let mnemonic = Mnemonic::new(MnemonicType::Words12, Language::English);
+    let seed = Seed::new(&mnemonic, "");
+    let secret_key = bip32_derive_evm_key(seed.as_bytes());
+    let public_key = libsecp256k1::PublicKey::from_secret_key(&secret_key);
+    let pubkey_bytes = public_key.serialize();
+    let pubkey_uncompressed = &pubkey_bytes[1..];
+    let hash = Keccak256::digest(pubkey_uncompressed);
+
+    let mut addr = [0u8; 20];
+    addr.copy_from_slice(&hash[12..]);
+
+    (addr, secret_key, mnemonic.phrase().to_string())
+}
+
+fn search_evm_raw(
+    matcher: &Matcher,
+    stop: &AtomicBool,
+    counter: &AtomicU64,
+    tx: &mpsc::Sender<MatchPayload>,
+) {
+    while !stop.load(Ordering::Relaxed) {
+        let (addr_bytes, secret_key, phrase) = generate_evm_raw();
+        counter.fetch_add(1, Ordering::Relaxed);
+
+        if matcher.matches_evm_raw(&addr_bytes) {
+            // Only format to hex string on match
+            let addr = format!("0x{}", hex::encode(addr_bytes));
+            let secret_hex = hex::encode(secret_key.serialize());
+            let _ = tx.send(("HyperEVM".to_string(), addr, secret_hex, phrase));
         }
     }
 }
@@ -409,19 +536,49 @@ fn read_case_sensitivity() -> io::Result<bool> {
     Ok(read_line_trimmed()?.eq_ignore_ascii_case("yes"))
 }
 
+fn detect_optimal_threads() -> usize {
+    let physical = num_cpus::get_physical();
+    let logical = num_cpus::get();
+
+    // On Apple Silicon: physical == logical (no hyperthreading).
+    // Use all cores — the OS scheduler handles P/E core assignment.
+    // On x86 with hyperthreading: physical < logical.
+    // For crypto-heavy work, physical cores are usually optimal.
+    if logical > physical {
+        // Hyperthreaded (x86): use physical cores for compute-bound work
+        physical
+    } else {
+        // Apple Silicon or non-HT: use all cores
+        logical
+    }
+}
+
 fn read_thread_count() -> io::Result<usize> {
-    println!("\nThreads (1-64):");
+    let recommended = detect_optimal_threads();
+    let max_threads = num_cpus::get().max(1) * 2; // allow oversubscription up to 2x
+
+    println!(
+        "\nThreads (1-{}) [detected {} cores, recommended: {}]:",
+        max_threads, num_cpus::get(), recommended
+    );
+    println!("  Press Enter for recommended ({}), or type a number:", recommended);
     print!("> ");
     io::stdout().flush()?;
 
-    let count = read_line_trimmed()?
-        .parse::<usize>()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let input = read_line_trimmed()?;
 
-    if count == 0 || count > 64 {
+    let count = if input.is_empty() {
+        recommended
+    } else {
+        input
+            .parse::<usize>()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?
+    };
+
+    if count == 0 || count > max_threads {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "Must be 1-64",
+            format!("Must be 1-{}", max_threads),
         ));
     }
 
@@ -505,7 +662,8 @@ fn main() -> io::Result<()> {
         .expect("Failed to build Rayon thread pool");
 
     let matcher = Matcher::new(prefix, suffix, position, case_sensitive, chain);
-    let use_raw_path = matcher.raw_prefix.is_some();
+    let use_solana_raw = matcher.raw_prefix.is_some();
+    let use_evm_raw = matcher.evm_prefix.is_some() || matcher.evm_suffix.is_some();
 
     let stop = Arc::new(AtomicBool::new(false));
     let counter = Arc::new(AtomicU64::new(0));
@@ -553,8 +711,10 @@ fn main() -> io::Result<()> {
 
     // Run workers via Rayon
     (0..num_threads).into_par_iter().for_each(|_| {
-        if use_raw_path {
+        if use_solana_raw {
             search_solana_raw(&matcher, &stop, &counter, &tx, generator.as_ref());
+        } else if use_evm_raw {
+            search_evm_raw(&matcher, &stop, &counter, &tx);
         } else {
             search_generic(generator.as_ref(), &matcher, &stop, &counter, &tx);
         }
