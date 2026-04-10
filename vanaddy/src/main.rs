@@ -40,7 +40,7 @@ fn derive_seed(mnemonic: &Mnemonic) -> [u8; 64] {
 #[derive(Clone, Copy)]
 enum Chain {
     Solana,
-    HyperEvm,
+    Evm,
 }
 
 trait ChainInfo: Send + Sync {
@@ -200,12 +200,12 @@ impl Matcher {
         };
 
         let evm_prefix = match chain {
-            Chain::HyperEvm if !prefix.is_empty() => Some(hex_prefix_to_bytes(&prefix)),
+            Chain::Evm if !prefix.is_empty() => Some(hex_prefix_to_bytes(&prefix)),
             _ => None,
         };
 
         let evm_suffix = match chain {
-            Chain::HyperEvm if !suffix.is_empty() => Some(hex_suffix_to_bytes(&suffix)),
+            Chain::Evm if !suffix.is_empty() => Some(hex_suffix_to_bytes(&suffix)),
             _ => None,
         };
 
@@ -380,7 +380,7 @@ fn search_evm_raw(
             // Only format to hex string on match
             let addr = format!("0x{}", hex::encode(addr_bytes));
             let secret_hex = hex::encode(secret_key.serialize());
-            let _ = tx.send(("HyperEVM".to_string(), addr, secret_hex, phrase));
+            let _ = tx.send(("EVM".to_string(), addr, secret_hex, phrase));
         }
     }
 }
@@ -398,7 +398,7 @@ fn display_banner() {
     println!("╚██╗ ██╔╝██╔══██║██║╚██╗██║██╔══██║██║  ██║██║  ██║  ╚██╔╝  ");
     println!(" ╚████╔╝ ██║  ██║██║ ╚████║██║  ██║██████╔╝██████╔╝   ██║   ");
     println!("  ╚═══╝  ╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝╚═════╝ ╚═════╝    ╚═╝   ");
-    println!("\n                   v0.3 — Solana & HyperEVM");
+    println!("\n                     v0.4 — Solana & EVM");
     println!("==========================================================\n");
 }
 
@@ -411,13 +411,13 @@ fn read_line_trimmed() -> io::Result<String> {
 fn read_chain() -> io::Result<Chain> {
     println!("Select chain:");
     println!("  [1] Solana");
-    println!("  [2] HyperEVM");
+    println!("  [2] EVM (Ethereum, Base, Arbitrum, etc.)");
     print!("> ");
     io::stdout().flush()?;
 
     match read_line_trimmed()?.as_str() {
         "1" => Ok(Chain::Solana),
-        "2" => Ok(Chain::HyperEvm),
+        "2" => Ok(Chain::Evm),
         _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "Choose 1 or 2")),
     }
 }
@@ -444,7 +444,7 @@ fn read_match_position() -> io::Result<MatchPosition> {
 fn read_vanity_string(label: &str, chain: Chain, info: &dyn ChainInfo) -> io::Result<String> {
     let max_len = match chain {
         Chain::Solana => 9,
-        Chain::HyperEvm => 8,
+        Chain::Evm => 8,
     };
     let charset = info.valid_charset();
 
@@ -454,7 +454,7 @@ fn read_vanity_string(label: &str, chain: Chain, info: &dyn ChainInfo) -> io::Re
         max_len,
         match chain {
             Chain::Solana => "base58",
-            Chain::HyperEvm => "hex (0-9, a-f)",
+            Chain::Evm => "hex (0-9, a-f)",
         }
     );
     print!("> ");
@@ -584,7 +584,7 @@ fn main() -> io::Result<()> {
 
     let chain_info: Box<dyn ChainInfo> = match chain {
         Chain::Solana => Box::new(SolanaInfo),
-        Chain::HyperEvm => Box::new(EvmInfo),
+        Chain::Evm => Box::new(EvmInfo),
     };
 
     let (prefix, suffix) = match position {
@@ -661,7 +661,7 @@ fn main() -> io::Result<()> {
     (0..num_threads).into_par_iter().for_each(|_| {
         match chain {
             Chain::Solana => search_solana_raw(&matcher, &stop, &counter, &tx),
-            Chain::HyperEvm => search_evm_raw(&matcher, &stop, &counter, &tx),
+            Chain::Evm => search_evm_raw(&matcher, &stop, &counter, &tx),
         }
     });
 
