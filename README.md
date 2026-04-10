@@ -27,7 +27,7 @@ Requires [Rust](https://rustup.rs/).
 
 ```bash
 git clone https://github.com/pipXBT/Vanaddy.git
-cd Vanaddy/vanaddy
+cd Vanaddy
 cargo build --release
 ```
 
