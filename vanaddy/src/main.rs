@@ -870,6 +870,157 @@ fn render_detail_view(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(paragraph, area);
 }
 
+// ---------------------------------------------------------------------------
+// TUI event handling
+// ---------------------------------------------------------------------------
+
+fn handle_key_event(app: &mut App, key: event::KeyEvent) {
+    if key.kind != KeyEventKind::Press {
+        return;
+    }
+
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        if app.state == AppState::Searching {
+            app.stop_search();
+        } else {
+            app.should_quit = true;
+        }
+        return;
+    }
+
+    match app.state {
+        AppState::Configuring => handle_configuring_key(app, key),
+        AppState::Searching => handle_searching_key(app, key),
+    }
+}
+
+fn handle_configuring_key(app: &mut App, key: event::KeyEvent) {
+    match key.code {
+        KeyCode::Char('q') if !app.is_text_field() => {
+            app.should_quit = true;
+        }
+
+        KeyCode::Tab => {
+            app.active_field = (app.active_field + 1) % app.field_count();
+            app.error_message = None;
+        }
+        KeyCode::BackTab => {
+            if app.active_field == 0 {
+                app.active_field = app.field_count() - 1;
+            } else {
+                app.active_field -= 1;
+            }
+            app.error_message = None;
+        }
+
+        KeyCode::Enter => {
+            match app.validate() {
+                Ok(()) => app.start_search(),
+                Err(e) => app.error_message = Some(e),
+            }
+        }
+
+        _ => handle_field_input(app, key),
+    }
+}
+
+fn handle_field_input(app: &mut App, key: event::KeyEvent) {
+    let both = matches!(app.match_position, MatchPosition::StartsAndEndsWith);
+
+    match app.active_field {
+        // Chain
+        0 => match key.code {
+            KeyCode::Char('1') => app.chain = Chain::Solana,
+            KeyCode::Char('2') => app.chain = Chain::Evm,
+            _ => {}
+        },
+
+        // Match position
+        1 => match key.code {
+            KeyCode::Char('1') => app.match_position = MatchPosition::StartsWith,
+            KeyCode::Char('2') => app.match_position = MatchPosition::EndsWith,
+            KeyCode::Char('3') => app.match_position = MatchPosition::StartsAndEndsWith,
+            _ => {}
+        },
+
+        // Vanity prefix (or single vanity string for StartsWith/EndsWith)
+        2 => match key.code {
+            KeyCode::Char(c) if app.valid_charset().contains(c) => {
+                if matches!(app.match_position, MatchPosition::EndsWith) {
+                    if app.vanity_suffix.len() < app.max_vanity_len() {
+                        app.vanity_suffix.push(c);
+                    }
+                } else if app.vanity_prefix.len() < app.max_vanity_len() {
+                    app.vanity_prefix.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                if matches!(app.match_position, MatchPosition::EndsWith) {
+                    app.vanity_suffix.pop();
+                } else {
+                    app.vanity_prefix.pop();
+                }
+            }
+            _ => {}
+        },
+
+        // Suffix (only when StartsAndEndsWith, field index 3)
+        3 if both => match key.code {
+            KeyCode::Char(c) if app.valid_charset().contains(c) => {
+                if app.vanity_suffix.len() < app.max_vanity_len() {
+                    app.vanity_suffix.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                app.vanity_suffix.pop();
+            }
+            _ => {}
+        },
+
+        // Case sensitivity
+        f if f == (if both { 4 } else { 3 }) => match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => app.case_sensitive = true,
+            KeyCode::Char('n') | KeyCode::Char('N') => app.case_sensitive = false,
+            _ => {}
+        },
+
+        // Thread count (always last field)
+        f if f == app.field_count() - 1 => match key.code {
+            KeyCode::Char(c) if c.is_ascii_digit() => {
+                if app.thread_count.len() < 3 {
+                    app.thread_count.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                app.thread_count.pop();
+            }
+            _ => {}
+        },
+
+        _ => {}
+    }
+}
+
+fn handle_searching_key(app: &mut App, key: event::KeyEvent) {
+    match key.code {
+        KeyCode::Char('q') => {
+            app.stop_search();
+            app.should_quit = true;
+        }
+        KeyCode::Up => {
+            if app.selected_match > 0 {
+                app.selected_match -= 1;
+            }
+        }
+        KeyCode::Down => {
+            if app.selected_match + 1 < app.matches.len() {
+                app.selected_match += 1;
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Generate a Solana keypair returning raw pubkey bytes — only base58-encode on match.
 fn generate_solana_raw() -> ([u8; 32], SigningKey, String) {
     let mnemonic = Mnemonic::new(MnemonicType::Words12, Language::English);
