@@ -1,13 +1,13 @@
-use bip39::{Language, Mnemonic, MnemonicType, Seed};
+use bip39::{Language, Mnemonic, MnemonicType};
 use csv::WriterBuilder;
-use hmac::{Hmac, Mac, NewMac};
 use rayon::prelude::*;
-use sha2::Sha512;
+use ring::hmac;
 use sha3::{Digest, Keccak256};
 use solana_sdk::signature::{keypair_from_seed, Signer};
 use std::{
     fs::OpenOptions,
     io::{self, Write},
+    num::NonZeroU32,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc,
@@ -16,7 +16,22 @@ use std::{
     time::{Duration, Instant},
 };
 
-type HmacSha512 = Hmac<Sha512>;
+/// BIP-39 seed derivation using ring's ARM64-optimized PBKDF2-HMAC-SHA512.
+/// Replaces tiny-bip39's Seed::new() which uses a slower pure-Rust PBKDF2.
+fn derive_seed(mnemonic: &Mnemonic) -> [u8; 64] {
+    const PBKDF2_ROUNDS: u32 = 2048;
+    let password = mnemonic.phrase().as_bytes();
+    let salt = b"mnemonic"; // no passphrase
+    let mut seed = [0u8; 64];
+    ring::pbkdf2::derive(
+        ring::pbkdf2::PBKDF2_HMAC_SHA512,
+        NonZeroU32::new(PBKDF2_ROUNDS).unwrap(),
+        salt,
+        password,
+        &mut seed,
+    );
+    seed
+}
 
 // ---------------------------------------------------------------------------
 // Chain abstraction
@@ -28,43 +43,19 @@ enum Chain {
     HyperEvm,
 }
 
-/// (address, secret_key_hex, mnemonic_phrase)
-type KeyResult = (String, String, String);
-
-trait KeyGenerator: Send + Sync {
-    fn generate(&self) -> KeyResult;
+trait ChainInfo: Send + Sync {
     fn valid_charset(&self) -> &'static str;
-    fn chain_label(&self) -> &'static str;
 }
 
 // ---------------------------------------------------------------------------
 // Solana: mnemonic -> BIP-39 seed -> first 32 bytes as Ed25519 key
 // ---------------------------------------------------------------------------
 
-struct SolanaGenerator;
+struct SolanaInfo;
 
-impl KeyGenerator for SolanaGenerator {
-    fn generate(&self) -> KeyResult {
-        let mnemonic = Mnemonic::new(MnemonicType::Words12, Language::English);
-        let seed = Seed::new(&mnemonic, "");
-        let seed_bytes = seed.as_bytes();
-
-        // Solana uses the first 32 bytes of the BIP-39 seed as the Ed25519 private key.
-        // This matches `solana-keygen` behavior.
-        let kp = keypair_from_seed(&seed_bytes[..32]).expect("valid seed");
-        let addr = kp.pubkey().to_string();
-        let secret_hex = hex::encode(kp.to_bytes());
-        let phrase = mnemonic.phrase().to_string();
-
-        (addr, secret_hex, phrase)
-    }
-
+impl ChainInfo for SolanaInfo {
     fn valid_charset(&self) -> &'static str {
         "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-    }
-
-    fn chain_label(&self) -> &'static str {
-        "Solana"
     }
 }
 
@@ -72,87 +63,55 @@ impl KeyGenerator for SolanaGenerator {
 // EVM: mnemonic -> BIP-39 seed -> BIP-32 derive m/44'/60'/0'/0/0 -> secp256k1
 // ---------------------------------------------------------------------------
 
-struct EvmGenerator;
+struct EvmInfo;
 
 /// BIP-32 child key derivation for secp256k1 (hardened and normal).
 fn bip32_derive_evm_key(seed: &[u8]) -> libsecp256k1::SecretKey {
     // Master key: HMAC-SHA512("Bitcoin seed", seed)
-    let mut mac =
-        HmacSha512::new_varkey(b"Bitcoin seed").expect("HMAC can take key of any size");
-    mac.update(seed);
-    let result = mac.finalize().into_bytes();
-    let mut key = result[..32].to_vec();
-    let mut chain_code = result[32..].to_vec();
+    let master_key = hmac::Key::new(hmac::HMAC_SHA512, b"Bitcoin seed");
+    let result = hmac::sign(&master_key, seed);
+    let result = result.as_ref();
+    let mut key = [0u8; 32];
+    let mut chain_code = [0u8; 32];
+    key.copy_from_slice(&result[..32]);
+    chain_code.copy_from_slice(&result[32..]);
 
     // Derive path: m/44'/60'/0'/0/0
-    // Hardened indices: 44' = 0x8000002C, 60' = 0x8000003C, 0' = 0x80000000
-    // Normal indices: 0, 0
     let path: [u32; 5] = [0x8000002C, 0x8000003C, 0x80000000, 0, 0];
 
     for &index in &path {
-        let mut mac =
-            HmacSha512::new_varkey(&chain_code).expect("HMAC can take key of any size");
+        let hmac_key = hmac::Key::new(hmac::HMAC_SHA512, &chain_code);
+        let parent = libsecp256k1::SecretKey::parse_slice(&key).expect("valid key");
 
-        if index >= 0x80000000 {
+        let result = if index >= 0x80000000 {
             // Hardened: 0x00 || key || index
-            mac.update(&[0u8]);
-            mac.update(&key);
+            let mut data = [0u8; 37]; // 1 + 32 + 4
+            data[1..33].copy_from_slice(&key);
+            data[33..].copy_from_slice(&index.to_be_bytes());
+            hmac::sign(&hmac_key, &data)
         } else {
             // Normal: compressed public key || index
-            let sk = libsecp256k1::SecretKey::parse_slice(&key).expect("valid key");
-            let pk = libsecp256k1::PublicKey::from_secret_key(&sk);
-            mac.update(&pk.serialize_compressed());
-        }
-        mac.update(&index.to_be_bytes());
+            let pk = libsecp256k1::PublicKey::from_secret_key(&parent);
+            let mut data = [0u8; 37]; // 33 + 4
+            data[..33].copy_from_slice(&pk.serialize_compressed());
+            data[33..].copy_from_slice(&index.to_be_bytes());
+            hmac::sign(&hmac_key, &data)
+        };
 
-        let result = mac.finalize().into_bytes();
-        // Child key = parse(IL) + parent_key (mod n)
-        let il = &result[..32];
-        let ir = &result[32..];
-
-        let mut child_key = [0u8; 32];
-        // Add IL to parent key modulo the curve order
-        let parent = libsecp256k1::SecretKey::parse_slice(&key).expect("valid key");
-        let il_key = libsecp256k1::SecretKey::parse_slice(il).expect("valid IL");
-        // tweak_add: child = parent + IL (mod n)
+        let result = result.as_ref();
+        let il_key = libsecp256k1::SecretKey::parse_slice(&result[..32]).expect("valid IL");
         let mut child = parent;
         child.tweak_add_assign(&il_key).expect("valid tweak");
-        child_key.copy_from_slice(&child.serialize());
-
-        key = child_key.to_vec();
-        chain_code = ir.to_vec();
+        key.copy_from_slice(&child.serialize());
+        chain_code.copy_from_slice(&result[32..]);
     }
 
     libsecp256k1::SecretKey::parse_slice(&key).expect("valid derived key")
 }
 
-impl KeyGenerator for EvmGenerator {
-    fn generate(&self) -> KeyResult {
-        let mnemonic = Mnemonic::new(MnemonicType::Words12, Language::English);
-        let seed = Seed::new(&mnemonic, "");
-
-        let secret_key = bip32_derive_evm_key(seed.as_bytes());
-        let public_key = libsecp256k1::PublicKey::from_secret_key(&secret_key);
-        // Uncompressed: 65 bytes (0x04 || x || y). Drop the 0x04 prefix.
-        let pubkey_bytes = public_key.serialize();
-        let pubkey_uncompressed = &pubkey_bytes[1..]; // 64 bytes
-
-        let hash = Keccak256::digest(pubkey_uncompressed);
-        let addr_bytes = &hash[12..]; // last 20 bytes
-        let addr = format!("0x{}", hex::encode(addr_bytes));
-
-        let secret_hex = hex::encode(secret_key.serialize());
-        let phrase = mnemonic.phrase().to_string();
-
-        (addr, secret_hex, phrase)
-    }
-
+impl ChainInfo for EvmInfo {
     fn valid_charset(&self) -> &'static str {
         "0123456789abcdefABCDEF"
-    }
-
-    fn chain_label(&self) -> &'static str {
-        "HyperEVM"
     }
 }
 
@@ -172,6 +131,9 @@ struct Matcher {
     suffix: String,
     position: MatchPosition,
     case_sensitive: bool,
+    /// Pre-lowercased for case-insensitive string matching (avoids alloc in hot loop)
+    prefix_lower: String,
+    suffix_lower: String,
     /// For Solana starts-with: pre-decoded base58 bytes for raw comparison
     raw_prefix: Option<Vec<u8>>,
     /// For EVM: pre-decoded hex bytes for raw comparison (skips hex::encode in hot loop)
@@ -247,11 +209,16 @@ impl Matcher {
             _ => None,
         };
 
+        let prefix_lower = prefix.to_lowercase();
+        let suffix_lower = suffix.to_lowercase();
+
         Matcher {
             prefix,
             suffix,
             position,
             case_sensitive,
+            prefix_lower,
+            suffix_lower,
             raw_prefix,
             evm_prefix,
             evm_suffix,
@@ -302,20 +269,6 @@ impl Matcher {
         true
     }
 
-    fn suffix_matches_str(&self, address: &str) -> bool {
-        let addr = if address.starts_with("0x") {
-            &address[2..]
-        } else {
-            address
-        };
-
-        if self.case_sensitive {
-            addr.ends_with(&self.suffix)
-        } else {
-            addr.to_lowercase().ends_with(&self.suffix.to_lowercase())
-        }
-    }
-
     fn matches_str(&self, address: &str) -> bool {
         let addr = if address.starts_with("0x") {
             &address[2..]
@@ -323,20 +276,23 @@ impl Matcher {
             address
         };
 
-        let (a, p, s) = if self.case_sensitive {
-            (addr.to_string(), self.prefix.clone(), self.suffix.clone())
+        if self.case_sensitive {
+            match self.position {
+                MatchPosition::StartsWith => addr.starts_with(&self.prefix),
+                MatchPosition::EndsWith => addr.ends_with(&self.suffix),
+                MatchPosition::StartsAndEndsWith => {
+                    addr.starts_with(&self.prefix) && addr.ends_with(&self.suffix)
+                }
+            }
         } else {
-            (
-                addr.to_lowercase(),
-                self.prefix.to_lowercase(),
-                self.suffix.to_lowercase(),
-            )
-        };
-
-        match self.position {
-            MatchPosition::StartsWith => a.starts_with(&p),
-            MatchPosition::EndsWith => a.ends_with(&s),
-            MatchPosition::StartsAndEndsWith => a.starts_with(&p) && a.ends_with(&s),
+            let a = addr.to_lowercase();
+            match self.position {
+                MatchPosition::StartsWith => a.starts_with(&self.prefix_lower),
+                MatchPosition::EndsWith => a.ends_with(&self.suffix_lower),
+                MatchPosition::StartsAndEndsWith => {
+                    a.starts_with(&self.prefix_lower) && a.ends_with(&self.suffix_lower)
+                }
+            }
         }
     }
 
@@ -358,27 +314,38 @@ impl Matcher {
 /// Channel payload: (chain_label, address, secret_hex, mnemonic)
 type MatchPayload = (String, String, String, String);
 
+/// Generate a Solana keypair returning raw pubkey bytes — only base58-encode on match.
+fn generate_solana_raw() -> ([u8; 32], [u8; 64], String) {
+    let mnemonic = Mnemonic::new(MnemonicType::Words12, Language::English);
+    let seed_bytes = derive_seed(&mnemonic);
+    let kp = keypair_from_seed(&seed_bytes[..32]).expect("valid seed");
+    let pubkey_bytes = kp.pubkey().to_bytes();
+    let kp_bytes = kp.to_bytes();
+    (pubkey_bytes, kp_bytes, mnemonic.phrase().to_string())
+}
+
 fn search_solana_raw(
     matcher: &Matcher,
     stop: &AtomicBool,
     counter: &AtomicU64,
     tx: &mpsc::Sender<MatchPayload>,
-    gen: &dyn KeyGenerator,
 ) {
-    let needs_suffix_check = matches!(matcher.position, MatchPosition::StartsAndEndsWith);
+    let has_raw_prefix = matcher.raw_prefix.is_some();
 
     while !stop.load(Ordering::Relaxed) {
-        let (addr, secret_hex, phrase) = gen.generate();
+        let (pubkey_bytes, kp_bytes, phrase) = generate_solana_raw();
         counter.fetch_add(1, Ordering::Relaxed);
 
-        // Decode address back to raw bytes for fast prefix check
-        if let Ok(raw_bytes) = bs58::decode(&addr).into_vec() {
-            if matcher.matches_raw(&raw_bytes) {
-                if needs_suffix_check && !matcher.suffix_matches_str(&addr) {
-                    continue;
-                }
-                let _ = tx.send(("Solana".to_string(), addr, secret_hex, phrase));
-            }
+        // Fast path: reject on raw prefix bytes before base58-encoding
+        if has_raw_prefix && !matcher.matches_raw(&pubkey_bytes) {
+            continue;
+        }
+
+        // Only base58-encode when prefix matched (or no prefix to check)
+        let addr = bs58::encode(&pubkey_bytes).into_string();
+        if matcher.matches_str(&addr) {
+            let secret_hex = hex::encode(kp_bytes);
+            let _ = tx.send(("Solana".to_string(), addr, secret_hex, phrase));
         }
     }
 }
@@ -386,8 +353,8 @@ fn search_solana_raw(
 /// Generate an EVM address as raw 20 bytes — only format to hex on match.
 fn generate_evm_raw() -> ([u8; 20], libsecp256k1::SecretKey, String) {
     let mnemonic = Mnemonic::new(MnemonicType::Words12, Language::English);
-    let seed = Seed::new(&mnemonic, "");
-    let secret_key = bip32_derive_evm_key(seed.as_bytes());
+    let seed_bytes = derive_seed(&mnemonic);
+    let secret_key = bip32_derive_evm_key(&seed_bytes);
     let public_key = libsecp256k1::PublicKey::from_secret_key(&secret_key);
     let pubkey_bytes = public_key.serialize();
     let pubkey_uncompressed = &pubkey_bytes[1..];
@@ -414,23 +381,6 @@ fn search_evm_raw(
             let addr = format!("0x{}", hex::encode(addr_bytes));
             let secret_hex = hex::encode(secret_key.serialize());
             let _ = tx.send(("HyperEVM".to_string(), addr, secret_hex, phrase));
-        }
-    }
-}
-
-fn search_generic(
-    gen: &dyn KeyGenerator,
-    matcher: &Matcher,
-    stop: &AtomicBool,
-    counter: &AtomicU64,
-    tx: &mpsc::Sender<MatchPayload>,
-) {
-    while !stop.load(Ordering::Relaxed) {
-        let (addr, secret_hex, phrase) = gen.generate();
-        counter.fetch_add(1, Ordering::Relaxed);
-
-        if matcher.matches_str(&addr) {
-            let _ = tx.send((gen.chain_label().to_string(), addr, secret_hex, phrase));
         }
     }
 }
@@ -491,12 +441,12 @@ fn read_match_position() -> io::Result<MatchPosition> {
     }
 }
 
-fn read_vanity_string(label: &str, chain: Chain, generator: &dyn KeyGenerator) -> io::Result<String> {
+fn read_vanity_string(label: &str, chain: Chain, info: &dyn ChainInfo) -> io::Result<String> {
     let max_len = match chain {
         Chain::Solana => 9,
         Chain::HyperEvm => 8,
     };
-    let charset = generator.valid_charset();
+    let charset = info.valid_charset();
 
     println!(
         "\nEnter vanity {} (1-{} chars, {} charset):",
@@ -632,23 +582,23 @@ fn main() -> io::Result<()> {
     let chain = read_chain()?;
     let position = read_match_position()?;
 
-    let generator: Box<dyn KeyGenerator> = match chain {
-        Chain::Solana => Box::new(SolanaGenerator),
-        Chain::HyperEvm => Box::new(EvmGenerator),
+    let chain_info: Box<dyn ChainInfo> = match chain {
+        Chain::Solana => Box::new(SolanaInfo),
+        Chain::HyperEvm => Box::new(EvmInfo),
     };
 
     let (prefix, suffix) = match position {
         MatchPosition::StartsWith => {
-            let p = read_vanity_string("prefix", chain, generator.as_ref())?;
+            let p = read_vanity_string("prefix", chain, chain_info.as_ref())?;
             (p, String::new())
         }
         MatchPosition::EndsWith => {
-            let s = read_vanity_string("suffix", chain, generator.as_ref())?;
+            let s = read_vanity_string("suffix", chain, chain_info.as_ref())?;
             (String::new(), s)
         }
         MatchPosition::StartsAndEndsWith => {
-            let p = read_vanity_string("prefix (start)", chain, generator.as_ref())?;
-            let s = read_vanity_string("suffix (end)", chain, generator.as_ref())?;
+            let p = read_vanity_string("prefix (start)", chain, chain_info.as_ref())?;
+            let s = read_vanity_string("suffix (end)", chain, chain_info.as_ref())?;
             (p, s)
         }
     };
@@ -662,8 +612,6 @@ fn main() -> io::Result<()> {
         .expect("Failed to build Rayon thread pool");
 
     let matcher = Matcher::new(prefix, suffix, position, case_sensitive, chain);
-    let use_solana_raw = matcher.raw_prefix.is_some();
-    let use_evm_raw = matcher.evm_prefix.is_some() || matcher.evm_suffix.is_some();
 
     let stop = Arc::new(AtomicBool::new(false));
     let counter = Arc::new(AtomicU64::new(0));
@@ -709,14 +657,11 @@ fn main() -> io::Result<()> {
         }
     });
 
-    // Run workers via Rayon
+    // Run workers via Rayon — each chain has its own optimized search path
     (0..num_threads).into_par_iter().for_each(|_| {
-        if use_solana_raw {
-            search_solana_raw(&matcher, &stop, &counter, &tx, generator.as_ref());
-        } else if use_evm_raw {
-            search_evm_raw(&matcher, &stop, &counter, &tx);
-        } else {
-            search_generic(generator.as_ref(), &matcher, &stop, &counter, &tx);
+        match chain {
+            Chain::Solana => search_solana_raw(&matcher, &stop, &counter, &tx),
+            Chain::HyperEvm => search_evm_raw(&matcher, &stop, &counter, &tx),
         }
     });
 
