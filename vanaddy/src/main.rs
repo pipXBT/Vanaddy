@@ -316,6 +316,9 @@ struct App {
     thread_count: String,
     error_message: Option<String>,
 
+    // Help overlay
+    show_help: bool,
+
     // Search state
     matches: Vec<MatchPayload>,
     selected_match: usize,
@@ -340,6 +343,7 @@ impl App {
             case_sensitive: false,
             thread_count: recommended_threads.to_string(),
             error_message: None,
+            show_help: false,
             matches: Vec::new(),
             selected_match: 0,
             counter: Arc::new(AtomicU64::new(0)),
@@ -521,6 +525,10 @@ fn ui(f: &mut Frame, app: &App) {
 
     render_left_panel(f, body_chunks[0], app);
     render_right_panel(f, body_chunks[1], app);
+
+    if app.show_help {
+        render_help_popup(f, size);
+    }
 }
 
 fn render_banner(f: &mut Frame, area: Rect) {
@@ -716,14 +724,58 @@ fn render_stats(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_key_hints(f: &mut Frame, area: Rect, app: &App) {
     let hints = match app.state {
-        AppState::Configuring => " Tab:Next  Enter:Start  q:Quit",
-        AppState::Searching => " Ctrl+C:Stop  q:Quit",
+        AppState::Configuring => " h:Help  Enter:Start  q:Quit",
+        AppState::Searching => " h:Help  Ctrl+C:Stop  q:Quit",
     };
     let paragraph = Paragraph::new(Line::from(Span::styled(
         hints,
         Style::default().fg(Color::DarkGray),
     )));
     f.render_widget(paragraph, area);
+}
+
+fn render_help_popup(f: &mut Frame, area: Rect) {
+    // Center a popup ~60x18
+    let popup_width = 56.min(area.width.saturating_sub(4));
+    let popup_height = 20.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    // Clear background
+    let clear = Block::default().style(Style::default().bg(Color::Black));
+    f.render_widget(clear, popup_area);
+
+    let lines = vec![
+        Line::from(Span::styled(" Navigation", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from("  Up/Down      Move between fields"),
+        Line::from("  Tab          Next field"),
+        Line::from("  Shift-Tab    Previous field"),
+        Line::from(""),
+        Line::from(Span::styled(" Field Input", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from("  Left/Right   Toggle options (chain, match, case)"),
+        Line::from("  1/2/3        Select option directly"),
+        Line::from("  y/n          Case sensitivity"),
+        Line::from("  Type         Text input (prefix, suffix, threads)"),
+        Line::from("  Backspace    Delete character"),
+        Line::from(""),
+        Line::from(Span::styled(" Actions", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from("  Enter        Start search"),
+        Line::from("  Ctrl+C       Stop search"),
+        Line::from("  q            Quit (not in text fields)"),
+        Line::from("  h            Toggle this help"),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Help ")
+        .style(Style::default().bg(Color::Black));
+    let paragraph = Paragraph::new(lines).block(block);
+    f.render_widget(paragraph, popup_area);
 }
 
 fn render_right_panel(f: &mut Frame, area: Rect, app: &App) {
@@ -845,6 +897,12 @@ fn handle_key_event(app: &mut App, key: event::KeyEvent) {
         return;
     }
 
+    // Help popup: dismiss with any key when open
+    if app.show_help {
+        app.show_help = false;
+        return;
+    }
+
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         if app.state == AppState::Searching {
             app.stop_search();
@@ -852,6 +910,14 @@ fn handle_key_event(app: &mut App, key: event::KeyEvent) {
             app.should_quit = true;
         }
         return;
+    }
+
+    // 'h' toggles help (when not in a text field during configuring)
+    if key.code == KeyCode::Char('h') {
+        if app.state == AppState::Searching || !app.is_text_field() {
+            app.show_help = true;
+            return;
+        }
     }
 
     match app.state {
@@ -866,11 +932,12 @@ fn handle_configuring_key(app: &mut App, key: event::KeyEvent) {
             app.should_quit = true;
         }
 
-        KeyCode::Tab => {
+        // Navigation: Tab/Down = next, BackTab/Up = previous
+        KeyCode::Tab | KeyCode::Down => {
             app.active_field = (app.active_field + 1) % app.field_count();
             app.error_message = None;
         }
-        KeyCode::BackTab => {
+        KeyCode::BackTab | KeyCode::Up => {
             if app.active_field == 0 {
                 app.active_field = app.field_count() - 1;
             } else {
@@ -894,18 +961,38 @@ fn handle_field_input(app: &mut App, key: event::KeyEvent) {
     let both = matches!(app.match_position, MatchPosition::StartsAndEndsWith);
 
     match app.active_field {
-        // Chain
+        // Chain (toggle with Left/Right or 1/2)
         0 => match key.code {
             KeyCode::Char('1') => app.chain = Chain::Solana,
             KeyCode::Char('2') => app.chain = Chain::Evm,
+            KeyCode::Left | KeyCode::Right => {
+                app.chain = match app.chain {
+                    Chain::Solana => Chain::Evm,
+                    Chain::Evm => Chain::Solana,
+                };
+            }
             _ => {}
         },
 
-        // Match position
+        // Match position (cycle with Left/Right or 1/2/3)
         1 => match key.code {
             KeyCode::Char('1') => app.match_position = MatchPosition::StartsWith,
             KeyCode::Char('2') => app.match_position = MatchPosition::EndsWith,
             KeyCode::Char('3') => app.match_position = MatchPosition::StartsAndEndsWith,
+            KeyCode::Right => {
+                app.match_position = match app.match_position {
+                    MatchPosition::StartsWith => MatchPosition::EndsWith,
+                    MatchPosition::EndsWith => MatchPosition::StartsAndEndsWith,
+                    MatchPosition::StartsAndEndsWith => MatchPosition::StartsWith,
+                };
+            }
+            KeyCode::Left => {
+                app.match_position = match app.match_position {
+                    MatchPosition::StartsWith => MatchPosition::StartsAndEndsWith,
+                    MatchPosition::EndsWith => MatchPosition::StartsWith,
+                    MatchPosition::StartsAndEndsWith => MatchPosition::EndsWith,
+                };
+            }
             _ => {}
         },
 
@@ -943,10 +1030,11 @@ fn handle_field_input(app: &mut App, key: event::KeyEvent) {
             _ => {}
         },
 
-        // Case sensitivity
+        // Case sensitivity (toggle with Left/Right or y/n)
         f if f == (if both { 4 } else { 3 }) => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => app.case_sensitive = true,
             KeyCode::Char('n') | KeyCode::Char('N') => app.case_sensitive = false,
+            KeyCode::Left | KeyCode::Right => app.case_sensitive = !app.case_sensitive,
             _ => {}
         },
 
