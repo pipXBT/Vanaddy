@@ -16,7 +16,8 @@ EVM addresses are chain-agnostic — the same vanity address works on Ethereum, 
 - **Multi-threaded**: Rayon work-stealing thread pool with auto-detected optimal core count
 - **Optimized PBKDF2**: Uses `ring` crate with ARM64 NEON assembly (Apple Silicon) for ~1.5-2x faster seed derivation
 - **Raw byte matching**: Solana compares raw pubkey bytes (skips base58 encoding); EVM compares Keccak hash bytes directly (skips hex encoding) — string formatting only happens on match
-- **Graceful shutdown**: Press Ctrl+C at any time — all matches found so far are saved
+- **Full TUI**: Ratatui-powered terminal UI with config form, live stats dashboard, scrollable match table, and detail view — all at 10fps
+- **Graceful shutdown**: Press Ctrl+C to stop search and return to config, q to quit — all matches saved
 - **Continuous search**: Finds multiple matching addresses until you stop
 - **CSV output**: Appends results to `vanity_wallets.csv` with chain, address, private key, and seed phrase
 
@@ -36,33 +37,41 @@ cargo build --release
 ./target/release/vanaddy
 ```
 
-The interactive prompt will guide you through:
+The TUI launches with a config form on the left and results panel on the right:
 
 ```
-Select chain:
-  [1] Solana
-  [2] EVM (Ethereum, Base, Arbitrum, etc.)
+┌──────────────────── Vanaddy ─────────────────────┐
+│         VANADDY v0.5 — Solana & EVM              │
+├──────────┬───────────────────────────────────────┤
+│ Config   │ Matches                               │
+│          │ #  Chain   Address                    │
+│ Chain:   │ 1  Solana  ABcF7k...xyz               │
+│ [Solana] │ 2  Solana  ABcD9m...qrs               │
+│ Match:   │───────────────────────────────────────│
+│ [Starts] │ Detail                                │
+│ Prefix:  │ Address: ABcF7k9...full...xyz         │
+│ ABC      │ Key:     a1b2c3...                    │
+│ Case:[No]│ Phrase:  word1 word2 ... word12        │
+│ Threads: │                                       │
+│ 8        │                                       │
+│──────────│                                       │
+│ Stats    │                                       │
+│ Checked: │                                       │
+│ 1.2M     │                                       │
+│ Rate:    │                                       │
+│ 160K/s   │                                       │
+├──────────┴───────────────────────────────────────┤
 
-Match position:
-  [1] Starts with
-  [2] Ends with
-  [3] Starts and ends with
-
-Enter vanity prefix (1-9 chars, base58 charset):
-> ABC
-
-Case-sensitive? (yes/no):
-> no
-
-Threads (1-16) [detected 8 cores, recommended: 8]:
-  Press Enter for recommended (8), or type a number:
-> 
-
-Searching for addresses that starts with 'ABC' (case-insensitive)... Press Ctrl+C to stop.
-
-  Checked: 1284031 | Matches: 1 | Rate: 160503/s | Elapsed: 8s
-  >> MATCH FOUND: ABcF7k...xyz [Solana]
 ```
+
+**Keybindings:**
+- **Tab / Shift-Tab**: Navigate between fields
+- **1/2/3**: Select chain, match position
+- **y/n**: Toggle case sensitivity
+- **Enter**: Start searching
+- **Ctrl+C**: Stop search (return to config)
+- **Up/Down**: Browse found matches
+- **q**: Quit
 
 Results are saved to `vanity_wallets.csv`:
 

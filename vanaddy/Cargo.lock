@@ -1185,7 +1185,7 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "vanaddy"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bs58",
  "crossterm",
@@ -1194,7 +1194,6 @@ dependencies = [
  "hex",
  "libsecp256k1",
  "num_cpus",
- "rand",
  "ratatui",
  "rayon",
  "ring",

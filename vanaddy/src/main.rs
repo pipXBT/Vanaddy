@@ -533,7 +533,7 @@ fn render_banner(f: &mut Frame, area: Rect) {
         Line::from("  ╚═══╝  ╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝╚═════╝ ╚═════╝    ╚═╝   "),
         Line::from(""),
         Line::from(Span::styled(
-            "v0.4 — Solana & EVM Vanity Address Generator",
+            "v0.5 — Solana & EVM Vanity Address Generator",
             Style::default().fg(Color::Cyan),
         )),
     ];
