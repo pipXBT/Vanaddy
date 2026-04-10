@@ -51,7 +51,7 @@ The TUI launches with a config form on the left and results panel on the right:
 │ [Starts] │ Detail                                │
 │ Prefix:  │ Address: ABcF7k9...full...xyz         │
 │ ABC      │ Key:     a1b2c3...                    │
-│ Case:[No]│ Phrase:  word1 word2 ... word12        │
+│ Case:[No]│ Phrase:  word1 word2 ... word12       │
 │ Threads: │                                       │
 │ 8        │                                       │
 │──────────│                                       │
@@ -128,3 +128,8 @@ Each additional character in your vanity string makes the search exponentially h
 ## License
 
 MIT
+
+## Ratatui UI
+
+<img width="1084" height="1162" alt="Screenshot 2026-04-11 at 4 08 22 am" src="https://github.com/user-attachments/assets/cbb77e73-f775-4f6c-b158-07072459b7af" />
+
