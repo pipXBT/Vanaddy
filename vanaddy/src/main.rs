@@ -18,13 +18,12 @@ use ring::hmac;
 use sha3::{Digest, Keccak256};
 use std::{
     fs::OpenOptions,
-    io::{self, stdout, Write},
+    io::{self, stdout},
     num::NonZeroU32,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc,
     },
-    thread,
     time::{Duration, Instant},
 };
 
@@ -55,27 +54,9 @@ enum Chain {
     Evm,
 }
 
-trait ChainInfo: Send + Sync {
-    fn valid_charset(&self) -> &'static str;
-}
-
-// ---------------------------------------------------------------------------
-// Solana: mnemonic -> BIP-39 seed -> first 32 bytes as Ed25519 key
-// ---------------------------------------------------------------------------
-
-struct SolanaInfo;
-
-impl ChainInfo for SolanaInfo {
-    fn valid_charset(&self) -> &'static str {
-        "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-    }
-}
-
 // ---------------------------------------------------------------------------
 // EVM: mnemonic -> BIP-39 seed -> BIP-32 derive m/44'/60'/0'/0/0 -> secp256k1
 // ---------------------------------------------------------------------------
-
-struct EvmInfo;
 
 /// BIP-32 child key derivation for secp256k1 (hardened and normal).
 fn bip32_derive_evm_key(seed: &[u8]) -> libsecp256k1::SecretKey {
@@ -119,12 +100,6 @@ fn bip32_derive_evm_key(seed: &[u8]) -> libsecp256k1::SecretKey {
     }
 
     libsecp256k1::SecretKey::parse_slice(&key).expect("valid derived key")
-}
-
-impl ChainInfo for EvmInfo {
-    fn valid_charset(&self) -> &'static str {
-        "0123456789abcdefABCDEF"
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -308,15 +283,6 @@ impl Matcher {
         }
     }
 
-    fn description(&self) -> String {
-        match self.position {
-            MatchPosition::StartsWith => format!("starts with '{}'", self.prefix),
-            MatchPosition::EndsWith => format!("ends with '{}'", self.suffix),
-            MatchPosition::StartsAndEndsWith => {
-                format!("starts with '{}' and ends with '{}'", self.prefix, self.suffix)
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1097,107 +1063,6 @@ fn search_evm_raw(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Interactive prompts
-// ---------------------------------------------------------------------------
-
-fn display_banner() {
-    println!("\n\n\n");
-    println!("==========================================================\n");
-    println!("██╗   ██╗ █████╗ ███╗   ██╗ █████╗ ██████╗ ██████╗ ██╗   ██╗");
-    println!("██║   ██║██╔══██╗████╗  ██║██╔══██╗██╔══██╗██╔══██╗╚██╗ ██╔╝");
-    println!("██║   ██║███████║██╔██╗ ██║███████║██║  ██║██║  ██║ ╚████╔╝ ");
-    println!("╚██╗ ██╔╝██╔══██║██║╚██╗██║██╔══██║██║  ██║██║  ██║  ╚██╔╝  ");
-    println!(" ╚████╔╝ ██║  ██║██║ ╚████║██║  ██║██████╔╝██████╔╝   ██║   ");
-    println!("  ╚═══╝  ╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝╚═════╝ ╚═════╝    ╚═╝   ");
-    println!("\n                     v0.4 — Solana & EVM");
-    println!("==========================================================\n");
-}
-
-fn read_line_trimmed() -> io::Result<String> {
-    let mut buf = String::new();
-    io::stdin().read_line(&mut buf)?;
-    Ok(buf.trim().to_owned())
-}
-
-fn read_chain() -> io::Result<Chain> {
-    println!("Select chain:");
-    println!("  [1] Solana");
-    println!("  [2] EVM (Ethereum, Base, Arbitrum, etc.)");
-    print!("> ");
-    io::stdout().flush()?;
-
-    match read_line_trimmed()?.as_str() {
-        "1" => Ok(Chain::Solana),
-        "2" => Ok(Chain::Evm),
-        _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "Choose 1 or 2")),
-    }
-}
-
-fn read_match_position() -> io::Result<MatchPosition> {
-    println!("\nMatch position:");
-    println!("  [1] Starts with");
-    println!("  [2] Ends with");
-    println!("  [3] Starts and ends with");
-    print!("> ");
-    io::stdout().flush()?;
-
-    match read_line_trimmed()?.as_str() {
-        "1" => Ok(MatchPosition::StartsWith),
-        "2" => Ok(MatchPosition::EndsWith),
-        "3" => Ok(MatchPosition::StartsAndEndsWith),
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Choose 1, 2, or 3",
-        )),
-    }
-}
-
-fn read_vanity_string(label: &str, chain: Chain, info: &dyn ChainInfo) -> io::Result<String> {
-    let max_len = match chain {
-        Chain::Solana => 9,
-        Chain::Evm => 8,
-    };
-    let charset = info.valid_charset();
-
-    println!(
-        "\nEnter vanity {} (1-{} chars, {} charset):",
-        label,
-        max_len,
-        match chain {
-            Chain::Solana => "base58",
-            Chain::Evm => "hex (0-9, a-f)",
-        }
-    );
-    print!("> ");
-    io::stdout().flush()?;
-
-    let input = read_line_trimmed()?;
-
-    if input.is_empty() || input.len() > max_len {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("Must be 1-{} characters", max_len),
-        ));
-    }
-
-    if let Some(c) = input.chars().find(|c| !charset.contains(*c)) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("'{}' is not valid for this chain's address format", c),
-        ));
-    }
-
-    Ok(input)
-}
-
-fn read_case_sensitivity() -> io::Result<bool> {
-    println!("\nCase-sensitive? (yes/no):");
-    print!("> ");
-    io::stdout().flush()?;
-    Ok(read_line_trimmed()?.eq_ignore_ascii_case("yes"))
-}
-
 fn detect_optimal_threads() -> usize {
     let physical = num_cpus::get_physical();
     let logical = num_cpus::get();
@@ -1215,183 +1080,54 @@ fn detect_optimal_threads() -> usize {
     }
 }
 
-fn read_thread_count() -> io::Result<usize> {
-    let recommended = detect_optimal_threads();
-    let max_threads = num_cpus::get().max(1) * 2; // allow oversubscription up to 2x
-
-    println!(
-        "\nThreads (1-{}) [detected {} cores, recommended: {}]:",
-        max_threads, num_cpus::get(), recommended
-    );
-    println!("  Press Enter for recommended ({}), or type a number:", recommended);
-    print!("> ");
-    io::stdout().flush()?;
-
-    let input = read_line_trimmed()?;
-
-    let count = if input.is_empty() {
-        recommended
-    } else {
-        input
-            .parse::<usize>()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?
-    };
-
-    if count == 0 || count > max_threads {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("Must be 1-{}", max_threads),
-        ));
-    }
-
-    Ok(count)
-}
-
-// ---------------------------------------------------------------------------
-// CSV writer
-// ---------------------------------------------------------------------------
-
-fn start_csv_writer(
-    rx: mpsc::Receiver<MatchPayload>,
-    match_count: Arc<AtomicU64>,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("vanity_wallets.csv")
-            .expect("Failed to open vanity_wallets.csv");
-
-        let needs_header = file.metadata().map(|m| m.len() == 0).unwrap_or(true);
-
-        let mut wtr = WriterBuilder::new()
-            .has_headers(false)
-            .from_writer(file);
-
-        if needs_header {
-            wtr.write_record(["Chain", "Address", "Private Key (hex)", "Seed Phrase"])
-                .unwrap();
-            wtr.flush().unwrap();
-        }
-
-        while let Ok((chain, address, secret_hex, phrase)) = rx.recv() {
-            wtr.write_record(&[&chain, &address, &secret_hex, &phrase])
-                .unwrap();
-            wtr.flush().unwrap();
-            match_count.fetch_add(1, Ordering::Relaxed);
-            println!("\n  >> MATCH FOUND: {} [{}]", address, chain);
-        }
-    })
-}
-
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 fn main() -> io::Result<()> {
-    display_banner();
+    enable_raw_mode()?;
+    stdout().execute(EnterAlternateScreen)?;
+    let backend = ratatui::backend::CrosstermBackend::new(stdout());
+    let mut terminal = Terminal::new(backend)?;
 
-    let chain = read_chain()?;
-    let position = read_match_position()?;
+    let mut app = App::new();
 
-    let chain_info: Box<dyn ChainInfo> = match chain {
-        Chain::Solana => Box::new(SolanaInfo),
-        Chain::Evm => Box::new(EvmInfo),
-    };
+    let tick_rate = Duration::from_millis(100);
 
-    let (prefix, suffix) = match position {
-        MatchPosition::StartsWith => {
-            let p = read_vanity_string("prefix", chain, chain_info.as_ref())?;
-            (p, String::new())
+    loop {
+        terminal.draw(|f| ui(f, &app))?;
+
+        if event::poll(tick_rate)? {
+            if let Event::Key(key) = event::read()? {
+                handle_key_event(&mut app, key);
+            }
         }
-        MatchPosition::EndsWith => {
-            let s = read_vanity_string("suffix", chain, chain_info.as_ref())?;
-            (String::new(), s)
+
+        app.drain_matches();
+
+        if app.should_quit {
+            app.stop.store(true, Ordering::Relaxed);
+            break;
         }
-        MatchPosition::StartsAndEndsWith => {
-            let p = read_vanity_string("prefix (start)", chain, chain_info.as_ref())?;
-            let s = read_vanity_string("suffix (end)", chain, chain_info.as_ref())?;
-            (p, s)
-        }
-    };
-
-    let case_sensitive = read_case_sensitivity()?;
-    let num_threads = read_thread_count()?;
-
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(num_threads)
-        .build_global()
-        .expect("Failed to build Rayon thread pool");
-
-    let matcher = Matcher::new(prefix, suffix, position, case_sensitive, chain);
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let counter = Arc::new(AtomicU64::new(0));
-    let match_count = Arc::new(AtomicU64::new(0));
-
-    let stop_signal = stop.clone();
-    ctrlc::set_handler(move || {
-        stop_signal.store(true, Ordering::Relaxed);
-    })
-    .expect("Failed to set Ctrl+C handler");
-
-    let (tx, rx) = mpsc::channel();
-    let writer_handle = start_csv_writer(rx, match_count.clone());
-
-    let start_time = Instant::now();
-
-    println!(
-        "\nSearching for addresses that {} ({})... Press Ctrl+C to stop.\n",
-        matcher.description(),
-        if case_sensitive {
-            "case-sensitive"
-        } else {
-            "case-insensitive"
-        }
-    );
-
-    // Progress display thread
-    let progress_stop = stop.clone();
-    let progress_counter = counter.clone();
-    let progress_matches = match_count.clone();
-    let progress_handle = thread::spawn(move || {
-        while !progress_stop.load(Ordering::Relaxed) {
-            let count = progress_counter.load(Ordering::Relaxed);
-            let matches = progress_matches.load(Ordering::Relaxed);
-            let elapsed = start_time.elapsed().as_secs();
-            let rate = if elapsed > 0 { count / elapsed } else { 0 };
-            print!(
-                "\r  Checked: {} | Matches: {} | Rate: {}/s | Elapsed: {}s   ",
-                count, matches, rate, elapsed
-            );
-            io::stdout().flush().unwrap();
-            thread::sleep(Duration::from_millis(200));
-        }
-    });
-
-    // Run workers via Rayon — each chain has its own optimized search path
-    (0..num_threads).into_par_iter().for_each(|_| {
-        match chain {
-            Chain::Solana => search_solana_raw(&matcher, &stop, &counter, &tx),
-            Chain::Evm => search_evm_raw(&matcher, &stop, &counter, &tx),
-        }
-    });
-
-    drop(tx);
-    let _ = writer_handle.join();
-    let _ = progress_handle.join();
-
-    let total = counter.load(Ordering::Relaxed);
-    let matches = match_count.load(Ordering::Relaxed);
-    let elapsed = start_time.elapsed();
-    println!("\n\n==========================================================");
-    println!("  Wallets checked : {}", total);
-    println!("  Matches found   : {}", matches);
-    println!("  Elapsed time    : {:.2?}", elapsed);
-    if matches > 0 {
-        println!("  Saved to        : vanity_wallets.csv");
     }
-    println!("==========================================================\n");
+
+    disable_raw_mode()?;
+    stdout().execute(LeaveAlternateScreen)?;
+
+    let total = app.counter.load(Ordering::Relaxed);
+    let matches = app.matches.len();
+    if total > 0 {
+        println!("\n==========================================================");
+        println!("  Wallets checked : {}", total);
+        println!("  Matches found   : {}", matches);
+        if let Some(start) = app.start_time {
+            println!("  Elapsed time    : {:.2?}", start.elapsed());
+        }
+        if matches > 0 {
+            println!("  Saved to        : vanity_wallets.csv");
+        }
+        println!("==========================================================\n");
+    }
 
     Ok(())
 }
