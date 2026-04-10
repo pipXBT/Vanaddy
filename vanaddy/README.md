@@ -65,13 +65,19 @@ The TUI launches with a config form on the left and results panel on the right:
 ```
 
 **Keybindings:**
-- **Tab / Shift-Tab**: Navigate between fields
-- **1/2/3**: Select chain, match position
-- **y/n**: Toggle case sensitivity
-- **Enter**: Start searching
-- **Ctrl+C**: Stop search (return to config)
-- **Up/Down**: Browse found matches
-- **q**: Quit
+
+| Key | Action |
+|-----|--------|
+| **Up/Down** | Move between fields |
+| **Left/Right** | Toggle options (chain, match position, case) |
+| **Tab / Shift-Tab** | Next/previous field |
+| **1/2/3** | Select option directly |
+| **y/n** | Case sensitivity |
+| **Enter** | Start search |
+| **Ctrl+C** | Stop search (return to config) |
+| **Up/Down** | Browse found matches (during search) |
+| **h** | Show/dismiss help popup |
+| **q** | Quit (not in text input fields) |
 
 Results are saved to `vanity_wallets.csv`:
 
@@ -107,7 +113,7 @@ Each additional character in your vanity string makes the search exponentially h
 
 - Seed phrases and private keys are written to a local CSV file only
 - No network requests are made — all key generation is local
-- Uses OS CSPRNG (via `rand`) for entropy
+- Uses OS CSPRNG for entropy
 - BIP-39/BIP-32/BIP-44 derivation matches industry-standard wallet implementations
 
 **Keep your `vanity_wallets.csv` file secure.** Anyone with the seed phrase or private key has full control of the wallet.
