@@ -1,11 +1,9 @@
-use bip39::{Language, Mnemonic, MnemonicType};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
 use csv::WriterBuilder;
-use ed25519_dalek::SigningKey;
 use rayon::prelude::*;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -14,7 +12,6 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap},
     Frame, Terminal,
 };
-use sha3::{Digest, Keccak256};
 use std::{
     fs::OpenOptions,
     io::{self, stdout},
@@ -25,28 +22,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-mod seed;
-mod bip32;
-mod matcher;
-use seed::derive_seed;
+pub mod seed;
+pub mod bip32;
+pub mod matcher;
+pub mod chains;
 use matcher::{Matcher, MatchPosition};
-
-// ---------------------------------------------------------------------------
-// Chain abstraction
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy)]
-enum Chain {
-    Solana,
-    Evm,
-}
-
-// ---------------------------------------------------------------------------
-// Search functions
-// ---------------------------------------------------------------------------
-
-/// Channel payload: (chain_label, address, secret_hex, mnemonic)
-type MatchPayload = (String, String, String, String);
+use chains::{ChainKind, MatchPayload};
 
 // ---------------------------------------------------------------------------
 // TUI state
@@ -64,7 +45,7 @@ struct App {
 
     // Form fields
     active_field: usize,
-    chain: Chain,
+    chain: ChainKind,
     match_position: MatchPosition,
     vanity_prefix: String,
     vanity_suffix: String,
@@ -92,7 +73,7 @@ impl App {
             state: AppState::Configuring,
             should_quit: false,
             active_field: 0,
-            chain: Chain::Solana,
+            chain: ChainKind::Solana,
             match_position: MatchPosition::StartsWith,
             vanity_prefix: String::new(),
             vanity_suffix: String::new(),
@@ -128,17 +109,11 @@ impl App {
     }
 
     fn valid_charset(&self) -> &'static str {
-        match self.chain {
-            Chain::Solana => "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz",
-            Chain::Evm => "0123456789abcdefABCDEF",
-        }
+        self.chain.charset()
     }
 
     fn max_vanity_len(&self) -> usize {
-        match self.chain {
-            Chain::Solana => 9,
-            Chain::Evm => 8,
-        }
+        self.chain.max_vanity()
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -227,10 +202,7 @@ impl App {
 
         pool.spawn(move || {
             (0..num_threads).into_par_iter().for_each(|_| {
-                match chain {
-                    Chain::Solana => search_solana_raw(&matcher, &stop, &counter, &tx),
-                    Chain::Evm => search_evm_raw(&matcher, &stop, &counter, &tx),
-                }
+                chain.search(&matcher, &stop, &counter, &tx);
             });
             drop(tx);
         });
@@ -343,10 +315,7 @@ fn render_config_form(f: &mut Frame, area: Rect, app: &App) {
         }
     };
 
-    let chain_str = match app.chain {
-        Chain::Solana => "Solana",
-        Chain::Evm => "EVM",
-    };
+    let chain_str = app.chain.label();
 
     let position_str = match app.match_position {
         MatchPosition::StartsWith => "Starts with",
@@ -719,12 +688,12 @@ fn handle_field_input(app: &mut App, key: event::KeyEvent) {
     match app.active_field {
         // Chain (toggle with Left/Right or 1/2)
         0 => match key.code {
-            KeyCode::Char('1') => app.chain = Chain::Solana,
-            KeyCode::Char('2') => app.chain = Chain::Evm,
+            KeyCode::Char('1') => app.chain = ChainKind::Solana,
+            KeyCode::Char('2') => app.chain = ChainKind::Evm,
             KeyCode::Left | KeyCode::Right => {
                 app.chain = match app.chain {
-                    Chain::Solana => Chain::Evm,
-                    Chain::Evm => Chain::Solana,
+                    ChainKind::Solana => ChainKind::Evm,
+                    ChainKind::Evm => ChainKind::Solana,
                 };
             }
             _ => {}
@@ -828,82 +797,6 @@ fn handle_searching_key(app: &mut App, key: event::KeyEvent) {
             }
         }
         _ => {}
-    }
-}
-
-/// Generate a Solana keypair returning raw pubkey bytes — only base58-encode on match.
-pub fn generate_solana_raw() -> ([u8; 32], SigningKey, String) {
-    let mnemonic = Mnemonic::new(MnemonicType::Words12, Language::English);
-    let seed_bytes = derive_seed(&mnemonic);
-    let mut key_bytes = [0u8; 32];
-    key_bytes.copy_from_slice(&seed_bytes[..32]);
-    let signing_key = SigningKey::from_bytes(&key_bytes);
-    let pubkey_bytes = signing_key.verifying_key().to_bytes();
-    (pubkey_bytes, signing_key, mnemonic.phrase().to_string())
-}
-
-fn search_solana_raw(
-    matcher: &Matcher,
-    stop: &AtomicBool,
-    counter: &AtomicU64,
-    tx: &mpsc::Sender<MatchPayload>,
-) {
-    let has_raw_prefix = matcher.raw_prefix.is_some();
-
-    while !stop.load(Ordering::Relaxed) {
-        let (pubkey_bytes, signing_key, phrase) = generate_solana_raw();
-        counter.fetch_add(1, Ordering::Relaxed);
-
-        // Fast path: reject on raw prefix bytes before base58-encoding
-        if has_raw_prefix && !matcher.matches_raw(&pubkey_bytes) {
-            continue;
-        }
-
-        // Only base58-encode when prefix matched (or no prefix to check)
-        let addr = bs58::encode(&pubkey_bytes).into_string();
-        if matcher.matches_str(&addr) {
-            // Solana keypair format: 64 bytes = secret_key (32) || public_key (32)
-            let mut keypair_bytes = [0u8; 64];
-            keypair_bytes[..32].copy_from_slice(signing_key.as_bytes());
-            keypair_bytes[32..].copy_from_slice(&pubkey_bytes);
-            let secret_hex = hex::encode(keypair_bytes);
-            let _ = tx.send(("Solana".to_string(), addr, secret_hex, phrase));
-        }
-    }
-}
-
-/// Generate an EVM address as raw 20 bytes — only format to hex on match.
-pub fn generate_evm_raw() -> ([u8; 20], libsecp256k1::SecretKey, String) {
-    let mnemonic = Mnemonic::new(MnemonicType::Words12, Language::English);
-    let seed_bytes = derive_seed(&mnemonic);
-    let secret_key = bip32::bip32_derive_secp256k1(&seed_bytes, &bip32::EVM_PATH);
-    let public_key = libsecp256k1::PublicKey::from_secret_key(&secret_key);
-    let pubkey_bytes = public_key.serialize();
-    let pubkey_uncompressed = &pubkey_bytes[1..];
-    let hash = Keccak256::digest(pubkey_uncompressed);
-
-    let mut addr = [0u8; 20];
-    addr.copy_from_slice(&hash[12..]);
-
-    (addr, secret_key, mnemonic.phrase().to_string())
-}
-
-fn search_evm_raw(
-    matcher: &Matcher,
-    stop: &AtomicBool,
-    counter: &AtomicU64,
-    tx: &mpsc::Sender<MatchPayload>,
-) {
-    while !stop.load(Ordering::Relaxed) {
-        let (addr_bytes, secret_key, phrase) = generate_evm_raw();
-        counter.fetch_add(1, Ordering::Relaxed);
-
-        if matcher.matches_evm_raw(&addr_bytes) {
-            // Only format to hex string on match
-            let addr = format!("0x{}", hex::encode(addr_bytes));
-            let secret_hex = hex::encode(secret_key.serialize());
-            let _ = tx.send(("EVM".to_string(), addr, secret_hex, phrase));
-        }
     }
 }
 

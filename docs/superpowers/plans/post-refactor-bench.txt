@@ -1,0 +1,301 @@
+warning: unused import: `super::*`
+  --> benches/../src/seed.rs:23:9
+   |
+23 |     use super::*;
+   |         ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused imports: `Language` and `Mnemonic`
+  --> benches/../src/seed.rs:24:17
+   |
+24 |     use bip39::{Language, Mnemonic};
+   |                 ^^^^^^^^  ^^^^^^^^
+
+warning: unused import: `super::*`
+   --> benches/../src/matcher.rs:184:9
+    |
+184 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `super::*`
+  --> benches/../src/chains/solana.rs:55:9
+   |
+55 |     use super::*;
+   |         ^^^^^^^^
+
+warning: unused imports: `Language` and `Mnemonic`
+  --> benches/../src/chains/solana.rs:56:17
+   |
+56 |     use bip39::{Language, Mnemonic};
+   |                 ^^^^^^^^  ^^^^^^^^
+
+warning: enum `AppState` is never used
+  --> benches/../src/main.rs:37:6
+   |
+37 | enum AppState {
+   |      ^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: struct `App` is never constructed
+  --> benches/../src/main.rs:42:8
+   |
+42 | struct App {
+   |        ^^^
+
+warning: multiple associated items are never used
+   --> benches/../src/main.rs:70:8
+    |
+ 69 | impl App {
+    | -------- associated items in this implementation
+ 70 |     fn new() -> Self {
+    |        ^^^
+...
+ 94 |     fn field_count(&self) -> usize {
+    |        ^^^^^^^^^^^
+...
+102 |     fn is_text_field(&self) -> bool {
+    |        ^^^^^^^^^^^^^
+...
+111 |     fn valid_charset(&self) -> &'static str {
+    |        ^^^^^^^^^^^^^
+...
+115 |     fn max_vanity_len(&self) -> usize {
+    |        ^^^^^^^^^^^^^^
+...
+119 |     fn validate(&self) -> Result<(), String> {
+    |        ^^^^^^^^
+...
+158 |     fn start_search(&mut self) {
+    |        ^^^^^^^^^^^^
+...
+211 |     fn stop_search(&mut self) {
+    |        ^^^^^^^^^^^
+...
+217 |     fn drain_matches(&mut self) {
+    |        ^^^^^^^^^^^^^
+
+warning: function `ui` is never used
+   --> benches/../src/main.rs:239:4
+    |
+239 | fn ui(f: &mut Frame, app: &App) {
+    |    ^^
+
+warning: function `render_banner` is never used
+   --> benches/../src/main.rs:262:4
+    |
+262 | fn render_banner(f: &mut Frame, area: Rect) {
+    |    ^^^^^^^^^^^^^
+
+warning: function `render_left_panel` is never used
+   --> benches/../src/main.rs:287:4
+    |
+287 | fn render_left_panel(f: &mut Frame, area: Rect, app: &App) {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: function `render_config_form` is never used
+   --> benches/../src/main.rs:302:4
+    |
+302 | fn render_config_form(f: &mut Frame, area: Rect, app: &App) {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `render_stats` is never used
+   --> benches/../src/main.rs:413:4
+    |
+413 | fn render_stats(f: &mut Frame, area: Rect, app: &App) {
+    |    ^^^^^^^^^^^^
+
+warning: function `render_key_hints` is never used
+   --> benches/../src/main.rs:450:4
+    |
+450 | fn render_key_hints(f: &mut Frame, area: Rect, app: &App) {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `render_help_popup` is never used
+   --> benches/../src/main.rs:462:4
+    |
+462 | fn render_help_popup(f: &mut Frame, area: Rect) {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: function `render_right_panel` is never used
+   --> benches/../src/main.rs:506:4
+    |
+506 | fn render_right_panel(f: &mut Frame, area: Rect, app: &App) {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `render_match_table` is never used
+   --> benches/../src/main.rs:530:4
+    |
+530 | fn render_match_table(f: &mut Frame, area: Rect, app: &App) {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `render_detail_view` is never used
+   --> benches/../src/main.rs:574:4
+    |
+574 | fn render_detail_view(f: &mut Frame, area: Rect, app: &App) {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `handle_key_event` is never used
+   --> benches/../src/main.rs:620:4
+    |
+620 | fn handle_key_event(app: &mut App, key: event::KeyEvent) {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `handle_configuring_key` is never used
+   --> benches/../src/main.rs:654:4
+    |
+654 | fn handle_configuring_key(app: &mut App, key: event::KeyEvent) {
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handle_field_input` is never used
+   --> benches/../src/main.rs:685:4
+    |
+685 | fn handle_field_input(app: &mut App, key: event::KeyEvent) {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `handle_searching_key` is never used
+   --> benches/../src/main.rs:783:4
+    |
+783 | fn handle_searching_key(app: &mut App, key: event::KeyEvent) {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `detect_optimal_threads` is never used
+   --> benches/../src/main.rs:803:4
+    |
+803 | fn detect_optimal_threads() -> usize {
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `main` is never used
+   --> benches/../src/main.rs:824:4
+    |
+824 | fn main() -> io::Result<()> {
+    |    ^^^^
+
+warning: constant `BTC_BIP84_PATH` is never used
+  --> benches/../src/bip32.rs:46:11
+   |
+46 | pub const BTC_BIP84_PATH: [u32; 5] = [0x80000054, 0x80000000, 0x80000000, 0, 0];
+   |           ^^^^^^^^^^^^^^
+
+warning: enum `MatchPosition` is never used
+ --> benches/../src/matcher.rs:4:10
+  |
+4 | pub enum MatchPosition {
+  |          ^^^^^^^^^^^^^
+
+warning: struct `Matcher` is never constructed
+  --> benches/../src/matcher.rs:10:12
+   |
+10 | pub struct Matcher {
+   |            ^^^^^^^
+
+warning: function `hex_prefix_to_bytes` is never used
+  --> benches/../src/matcher.rs:27:4
+   |
+27 | fn hex_prefix_to_bytes(hex: &str) -> (Vec<u8>, Option<u8>) {
+   |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `hex_suffix_to_bytes` is never used
+  --> benches/../src/matcher.rs:48:4
+   |
+48 | fn hex_suffix_to_bytes(hex: &str) -> (Vec<u8>, Option<u8>) {
+   |    ^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `matches_raw`, `matches_evm_raw`, and `matches_str` are never used
+   --> benches/../src/matcher.rs:67:12
+    |
+ 66 | impl Matcher {
+    | ------------ associated items in this implementation
+ 67 |     pub fn new(
+    |            ^^^
+...
+109 |     pub fn matches_raw(&self, pubkey_bytes: &[u8]) -> bool {
+    |            ^^^^^^^^^^^
+...
+118 |     pub fn matches_evm_raw(&self, addr_bytes: &[u8; 20]) -> bool {
+    |            ^^^^^^^^^^^^^^^
+...
+153 |     pub fn matches_str(&self, address: &str) -> bool {
+    |            ^^^^^^^^^^^
+
+warning: type alias `MatchPayload` is never used
+  --> benches/../src/chains/mod.rs:10:10
+   |
+10 | pub type MatchPayload = (String, String, String, String);
+   |          ^^^^^^^^^^^^
+
+warning: associated items `LABEL`, `CHARSET`, `MAX_VANITY`, `encode_address`, `encode_secret`, and `matches_raw` are never used
+  --> benches/../src/chains/mod.rs:13:11
+   |
+12 | pub trait Chain: Send + Sync + 'static {
+   |           ----- associated items in this trait
+13 |     const LABEL: &'static str;
+   |           ^^^^^
+14 |     const CHARSET: &'static str;
+   |           ^^^^^^^
+15 |     const MAX_VANITY: usize;
+   |           ^^^^^^^^^^
+...
+21 |     fn encode_address(bytes: &Self::AddressBytes) -> String;
+   |        ^^^^^^^^^^^^^^
+22 |     fn encode_secret(raw: &Self::SecretRaw) -> String;
+   |        ^^^^^^^^^^^^^
+23 |     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool;
+   |        ^^^^^^^^^^^
+
+warning: enum `ChainKind` is never used
+  --> benches/../src/chains/mod.rs:29:10
+   |
+29 | pub enum ChainKind {
+   |          ^^^^^^^^^
+
+warning: methods `label`, `charset`, `max_vanity`, and `search` are never used
+  --> benches/../src/chains/mod.rs:35:12
+   |
+34 | impl ChainKind {
+   | -------------- methods in this implementation
+35 |     pub fn label(self) -> &'static str {
+   |            ^^^^^
+...
+41 |     pub fn charset(self) -> &'static str {
+   |            ^^^^^^^
+...
+47 |     pub fn max_vanity(self) -> usize {
+   |            ^^^^^^^^^^
+...
+53 |     pub fn search(
+   |            ^^^^^^
+
+warning: function `search` is never used
+  --> benches/../src/chains/mod.rs:68:8
+   |
+68 | pub fn search<C: Chain>(
+   |        ^^^^^^
+
+warning: `vanaddy` (bench "generation") generated 35 warnings (run `cargo fix --bench "generation"` to apply 5 suggestions)
+    Finished `bench` profile [optimized] target(s) in 0.64s
+     Running benches/generation.rs (target/release/deps/generation-01f84e36ea94d8bb)
+Gnuplot not found, using plotters backend
+Benchmarking solana_generate
+Benchmarking solana_generate: Warming up for 3.0000 s
+Benchmarking solana_generate: Collecting 100 samples in estimated 7.4769 s (10k iterations)
+Benchmarking solana_generate: Analyzing
+solana_generate         time:   [795.08 µs 848.78 µs 920.73 µs]
+                        change: [-51.405% -46.252% -39.839%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 12 outliers among 100 measurements (12.00%)
+  6 (6.00%) high mild
+  6 (6.00%) high severe
+
+Benchmarking evm_generate
+Benchmarking evm_generate: Warming up for 3.0000 s
+Benchmarking evm_generate: Collecting 100 samples in estimated 8.9424 s (10k iterations)
+Benchmarking evm_generate: Analyzing
+evm_generate            time:   [873.85 µs 917.34 µs 966.93 µs]
+                        change: [-66.452% -63.225% -59.667%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+

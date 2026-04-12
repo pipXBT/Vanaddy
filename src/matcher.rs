@@ -1,4 +1,4 @@
-use crate::Chain;
+use super::chains::ChainKind;
 
 #[derive(Clone, Copy)]
 pub enum MatchPosition {
@@ -69,10 +69,10 @@ impl Matcher {
         suffix: String,
         position: MatchPosition,
         case_sensitive: bool,
-        chain: Chain,
+        chain: ChainKind,
     ) -> Self {
         let raw_prefix = match (chain, position) {
-            (Chain::Solana, MatchPosition::StartsWith | MatchPosition::StartsAndEndsWith)
+            (ChainKind::Solana, MatchPosition::StartsWith | MatchPosition::StartsAndEndsWith)
                 if case_sensitive && !prefix.is_empty() =>
             {
                 bs58::decode(&prefix).into_vec().ok()
@@ -81,12 +81,12 @@ impl Matcher {
         };
 
         let evm_prefix = match chain {
-            Chain::Evm if !prefix.is_empty() => Some(hex_prefix_to_bytes(&prefix)),
+            ChainKind::Evm if !prefix.is_empty() => Some(hex_prefix_to_bytes(&prefix)),
             _ => None,
         };
 
         let evm_suffix = match chain {
-            Chain::Evm if !suffix.is_empty() => Some(hex_suffix_to_bytes(&suffix)),
+            ChainKind::Evm if !suffix.is_empty() => Some(hex_suffix_to_bytes(&suffix)),
             _ => None,
         };
 
@@ -182,11 +182,10 @@ impl Matcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Chain;
 
     #[test]
     fn evm_matches_raw_prefix() {
-        let m = Matcher::new("dead".into(), "".into(), MatchPosition::StartsWith, false, Chain::Evm);
+        let m = Matcher::new("dead".into(), "".into(), MatchPosition::StartsWith, false, ChainKind::Evm);
         let mut addr = [0u8; 20];
         addr[0] = 0xde;
         addr[1] = 0xad;
@@ -195,7 +194,7 @@ mod tests {
 
     #[test]
     fn evm_odd_nibble_prefix() {
-        let m = Matcher::new("dea".into(), "".into(), MatchPosition::StartsWith, false, Chain::Evm);
+        let m = Matcher::new("dea".into(), "".into(), MatchPosition::StartsWith, false, ChainKind::Evm);
         let mut addr = [0u8; 20];
         addr[0] = 0xde;
         addr[1] = 0xa5;
@@ -206,7 +205,7 @@ mod tests {
 
     #[test]
     fn evm_suffix_odd_nibble() {
-        let m = Matcher::new("".into(), "beef".into(), MatchPosition::EndsWith, false, Chain::Evm);
+        let m = Matcher::new("".into(), "beef".into(), MatchPosition::EndsWith, false, ChainKind::Evm);
         let mut addr = [0u8; 20];
         addr[18] = 0xbe;
         addr[19] = 0xef;
