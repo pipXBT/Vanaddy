@@ -63,7 +63,7 @@ fn render_left_panel(f: &mut Frame, area: Rect, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(10),
-            Constraint::Length(7),
+            Constraint::Length(9),
             Constraint::Length(3),
         ])
         .split(area);
@@ -208,13 +208,16 @@ fn render_stats(f: &mut Frame, area: Rect, app: &App) {
         (0, 0, 0, 0)
     };
 
-    let lines = vec![
+    let expected = app.expected_attempts();
+    let eta_seconds = app.projected_seconds();
+
+    let mut lines = vec![
         Line::from(Span::styled(
-            format!(" Checked:  {}", checked),
+            format!(" Checked:  {}", format_count(checked)),
             Style::default().fg(Color::White),
         )),
         Line::from(Span::styled(
-            format!(" Rate:     {}/s", rate),
+            format!(" Rate:     {}/s", format_count(rate)),
             Style::default().fg(Color::White),
         )),
         Line::from(Span::styled(
@@ -226,6 +229,19 @@ fn render_stats(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::White),
         )),
     ];
+
+    if let Some(attempts) = expected {
+        lines.push(Line::from(Span::styled(
+            format!(" Expected: 1 in {}", format_count(attempts)),
+            Style::default().fg(Color::Cyan),
+        )));
+    }
+    if let Some(secs) = eta_seconds {
+        lines.push(Line::from(Span::styled(
+            format!(" ETA:      {}", format_duration(secs)),
+            Style::default().fg(Color::Cyan),
+        )));
+    }
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -405,4 +421,87 @@ fn render_detail_view(f: &mut Frame, area: Rect, app: &App) {
 
     let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
     f.render_widget(paragraph, area);
+}
+
+/// Format large counts as "12.3K", "4.5M", "1.2B" for compact display.
+fn format_count(n: u64) -> String {
+    if n < 1_000 {
+        n.to_string()
+    } else if n < 1_000_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else if n < 1_000_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n < 1_000_000_000_000 {
+        format!("{:.1}B", n as f64 / 1_000_000_000.0)
+    } else {
+        format!("{:.1}T", n as f64 / 1_000_000_000_000.0)
+    }
+}
+
+/// Format a duration in seconds into a human-readable approximation.
+fn format_duration(secs: f64) -> String {
+    if !secs.is_finite() || secs < 0.0 {
+        return "—".to_string();
+    }
+    if secs < 1.0 {
+        "< 1s".to_string()
+    } else if secs < 60.0 {
+        format!("{}s", secs as u64)
+    } else if secs < 3600.0 {
+        format!("{}m {}s", (secs / 60.0) as u64, (secs % 60.0) as u64)
+    } else if secs < 86_400.0 {
+        format!("{}h {}m", (secs / 3600.0) as u64, ((secs % 3600.0) / 60.0) as u64)
+    } else if secs < 86_400.0 * 365.0 {
+        format!("{}d {}h", (secs / 86_400.0) as u64, ((secs % 86_400.0) / 3600.0) as u64)
+    } else {
+        let years = secs / (86_400.0 * 365.0);
+        if years < 100.0 {
+            format!("{:.1}y", years)
+        } else {
+            ">100y".to_string()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_count_small() {
+        assert_eq!(format_count(0), "0");
+        assert_eq!(format_count(999), "999");
+    }
+
+    #[test]
+    fn format_count_thousands() {
+        assert_eq!(format_count(1_500), "1.5K");
+        assert_eq!(format_count(999_999), "1000.0K");
+    }
+
+    #[test]
+    fn format_count_millions() {
+        assert_eq!(format_count(12_300_000), "12.3M");
+    }
+
+    #[test]
+    fn format_duration_seconds() {
+        assert_eq!(format_duration(0.5), "< 1s");
+        assert_eq!(format_duration(45.0), "45s");
+    }
+
+    #[test]
+    fn format_duration_minutes() {
+        assert_eq!(format_duration(125.0), "2m 5s");
+    }
+
+    #[test]
+    fn format_duration_hours() {
+        assert_eq!(format_duration(3665.0), "1h 1m");
+    }
+
+    #[test]
+    fn format_duration_days() {
+        assert_eq!(format_duration(90_000.0), "1d 1h");
+    }
 }

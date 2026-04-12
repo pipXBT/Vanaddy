@@ -104,6 +104,78 @@ impl App {
         self.chain.max_vanity()
     }
 
+    /// Total number of vanity characters the user is searching for
+    /// (prefix + suffix, depending on match position).
+    pub fn total_vanity_chars(&self) -> usize {
+        match self.match_position {
+            MatchPosition::StartsWith => self.vanity_prefix.chars().count(),
+            MatchPosition::EndsWith => self.vanity_prefix.chars().count(),
+            MatchPosition::StartsAndEndsWith => {
+                self.vanity_prefix.chars().count() + self.vanity_suffix.chars().count()
+            }
+        }
+    }
+
+    /// Effective alphabet size for probability calculations. Case-insensitive
+    /// searches match against a smaller effective alphabet because a single
+    /// typed char matches both upper and lower variants in the address.
+    pub fn effective_alphabet_size(&self) -> u64 {
+        match self.chain {
+            // Base58 alphabet: 58 chars case-sensitive. Case-insensitive folds
+            // letters to ~24 unique + 9 digits = 33 effective chars.
+            ChainKind::Solana | ChainKind::Monero => if self.case_sensitive { 58 } else { 33 },
+            // EVM hex: 16 values per position. Case-sensitive uses EIP-55 where
+            // each letter position must match both value (1/16) and case (1/2) →
+            // effective 32 for letters. Digits unchanged (1/10 → 1/16). Approximate
+            // uniformly as 32 for case-sensitive EVM.
+            ChainKind::Evm => if self.case_sensitive { 32 } else { 16 },
+            // Bech32 is lowercase-only (32 alphabet). Case toggle has no effect.
+            ChainKind::Bitcoin => 32,
+            // Base64url: A-Z a-z 0-9 - _ = 64 case-sensitive. Insensitive folds
+            // letters to 26 unique + 10 digits + 2 symbols = 38.
+            ChainKind::Ton => if self.case_sensitive { 64 } else { 38 },
+        }
+    }
+
+    /// Expected number of generated addresses before a match (geometric mean).
+    /// Returns None if no vanity is set (trivial).
+    pub fn expected_attempts(&self) -> Option<u64> {
+        let n = self.total_vanity_chars();
+        if n == 0 {
+            return None;
+        }
+        let alphabet = self.effective_alphabet_size() as f64;
+        let expected = alphabet.powi(n as i32);
+        Some(expected as u64)
+    }
+
+    /// Rough per-thread throughput estimate (attempts/sec), used for ETA when
+    /// the user hasn't started a search yet. Numbers are from Task 13 benches.
+    fn single_thread_rate(&self) -> f64 {
+        match self.chain {
+            ChainKind::Solana => 1_750.0, // ~570 µs/gen
+            ChainKind::Evm => 1_525.0,    // ~655 µs/gen
+            ChainKind::Bitcoin => 1_550.0, // ~645 µs/gen
+            ChainKind::Ton => 19.6,       // ~51 ms/gen — intrinsically slow
+            ChainKind::Monero => 28_600.0, // ~35 µs/gen
+        }
+    }
+
+    /// Projected seconds until a match. Uses live rate if searching,
+    /// otherwise estimates from chain throughput × thread count.
+    pub fn projected_seconds(&self) -> Option<f64> {
+        let expected = self.expected_attempts()? as f64;
+        let rate = if let Some(start) = self.start_time {
+            let secs = start.elapsed().as_secs_f64().max(0.5);
+            let count = self.counter.load(Ordering::Relaxed) as f64;
+            (count / secs).max(1.0)
+        } else {
+            let threads = self.thread_count.parse::<u64>().unwrap_or(1).max(1) as f64;
+            self.single_thread_rate() * threads
+        };
+        Some(expected / rate)
+    }
+
     pub fn validate(&mut self) -> Result<(), String> {
         let charset = self.valid_charset();
         let max_len = self.max_vanity_len();
