@@ -4,6 +4,7 @@ pub mod monero;
 mod monero_wordlist;
 pub mod solana;
 pub mod ton;
+pub mod ton_cell;
 mod ton_mnemonic;
 
 use super::matcher::Matcher;
