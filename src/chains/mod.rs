@@ -84,7 +84,6 @@ impl ChainKind {
     }
 }
 
-#[inline]
 pub fn search<C: Chain>(
     matcher: &Matcher,
     stop: &AtomicBool,

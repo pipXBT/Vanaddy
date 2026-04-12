@@ -34,6 +34,8 @@ pub struct App {
     pub vanity_suffix: String,
     pub case_sensitive: bool,
     pub thread_count: String,
+    /// Validated thread count, populated by validate() before start_search.
+    pub validated_thread_count: usize,
     pub error_message: Option<String>,
 
     // Help overlay
@@ -62,6 +64,7 @@ impl App {
             vanity_suffix: String::new(),
             case_sensitive: false,
             thread_count: recommended_threads.to_string(),
+            validated_thread_count: 0,
             error_message: None,
             show_help: false,
             matches: Vec::new(),
@@ -99,7 +102,7 @@ impl App {
         self.chain.max_vanity()
     }
 
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&mut self) -> Result<(), String> {
         let charset = self.valid_charset();
         let max_len = self.max_vanity_len();
 
@@ -134,12 +137,13 @@ impl App {
         if count == 0 || count > max_threads {
             return Err(format!("Threads must be 1-{}", max_threads));
         }
+        self.validated_thread_count = count;
 
         Ok(())
     }
 
     pub fn start_search(&mut self) {
-        let num_threads: usize = self.thread_count.parse().unwrap();
+        let num_threads = self.validated_thread_count;
         self.error_message = None;
         self.matches.clear();
         self.selected_match = 0;
