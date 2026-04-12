@@ -1,6 +1,7 @@
 pub mod bitcoin;
 pub mod evm;
 pub mod solana;
+pub mod ton;
 
 use super::matcher::Matcher;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -31,6 +32,7 @@ pub enum ChainKind {
     Solana,
     Evm,
     Bitcoin,
+    Ton,
 }
 
 impl ChainKind {
@@ -39,6 +41,7 @@ impl ChainKind {
             Self::Solana => solana::Solana::LABEL,
             Self::Evm => evm::Evm::LABEL,
             Self::Bitcoin => bitcoin::Bitcoin::LABEL,
+            Self::Ton => ton::Ton::LABEL,
         }
     }
     pub fn charset(self) -> &'static str {
@@ -46,6 +49,7 @@ impl ChainKind {
             Self::Solana => solana::Solana::CHARSET,
             Self::Evm => evm::Evm::CHARSET,
             Self::Bitcoin => bitcoin::Bitcoin::CHARSET,
+            Self::Ton => ton::Ton::CHARSET,
         }
     }
     pub fn max_vanity(self) -> usize {
@@ -53,6 +57,7 @@ impl ChainKind {
             Self::Solana => solana::Solana::MAX_VANITY,
             Self::Evm => evm::Evm::MAX_VANITY,
             Self::Bitcoin => bitcoin::Bitcoin::MAX_VANITY,
+            Self::Ton => ton::Ton::MAX_VANITY,
         }
     }
     pub fn search(
@@ -66,6 +71,7 @@ impl ChainKind {
             Self::Solana => search::<solana::Solana>(matcher, stop, counter, tx),
             Self::Evm => search::<evm::Evm>(matcher, stop, counter, tx),
             Self::Bitcoin => search::<bitcoin::Bitcoin>(matcher, stop, counter, tx),
+            Self::Ton => search::<ton::Ton>(matcher, stop, counter, tx),
         }
     }
 }

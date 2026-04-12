@@ -305,23 +305,26 @@ fn handle_field_input(app: &mut App, key: event::KeyEvent) {
     let both = matches!(app.match_position, MatchPosition::StartsAndEndsWith);
 
     match app.active_field {
-        // Chain (cycle with Left/Right or 1/2/3)
+        // Chain (cycle with Left/Right or 1/2/3/4)
         0 => match key.code {
             KeyCode::Char('1') => app.chain = ChainKind::Solana,
             KeyCode::Char('2') => app.chain = ChainKind::Evm,
             KeyCode::Char('3') => app.chain = ChainKind::Bitcoin,
+            KeyCode::Char('4') => app.chain = ChainKind::Ton,
             KeyCode::Left => {
                 app.chain = match app.chain {
-                    ChainKind::Solana => ChainKind::Bitcoin,
+                    ChainKind::Solana => ChainKind::Ton,
                     ChainKind::Evm => ChainKind::Solana,
                     ChainKind::Bitcoin => ChainKind::Evm,
+                    ChainKind::Ton => ChainKind::Bitcoin,
                 };
             }
             KeyCode::Right => {
                 app.chain = match app.chain {
                     ChainKind::Solana => ChainKind::Evm,
                     ChainKind::Evm => ChainKind::Bitcoin,
-                    ChainKind::Bitcoin => ChainKind::Solana,
+                    ChainKind::Bitcoin => ChainKind::Ton,
+                    ChainKind::Ton => ChainKind::Solana,
                 };
             }
             _ => {}
