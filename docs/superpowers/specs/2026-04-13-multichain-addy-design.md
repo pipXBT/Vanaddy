@@ -161,6 +161,7 @@ The `match` is **outside** the hot loop — once per thread spawn. Inside the lo
 - Banner subtitle: `"v0.6 — Multi-Chain Vanity Address Generator"`
 - Help popup: add "Supported Chains" section listing each chain's charset and max vanity length
 - Results table: Chain column widens from 8 to 10 chars to fit "Bitcoin"/"Monero"
+- Bitcoin-specific hint: "Bitcoin addresses always start with bc1q; vanity begins after that prefix"
 - TON-specific hint rendered when TON selected: "TON addresses always start with EQ; vanity begins at char 3"
 - Monero-specific hint: "Monero addresses always start with 4; vanity begins at char 2"
 
