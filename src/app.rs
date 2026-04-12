@@ -403,15 +403,27 @@ fn handle_field_input(app: &mut App, key: event::KeyEvent) {
         // Vanity prefix (or single vanity string for StartsWith/EndsWith)
         2 => match key.code {
             KeyCode::Char(c) if app.valid_charset().contains(c) => {
+                app.error_message = None;
                 if matches!(app.match_position, MatchPosition::EndsWith) {
                     if app.vanity_suffix.len() < app.max_vanity_len() {
                         app.vanity_suffix.push(c);
+                    } else {
+                        app.error_message = Some(format!("Max {} chars", app.max_vanity_len()));
                     }
                 } else if app.vanity_prefix.len() < app.max_vanity_len() {
                     app.vanity_prefix.push(c);
+                } else {
+                    app.error_message = Some(format!("Max {} chars", app.max_vanity_len()));
                 }
             }
+            KeyCode::Char(c) => {
+                app.error_message = Some(format!(
+                    "'{}' not valid for {} — allowed: {}",
+                    c, app.chain.label(), app.valid_charset()
+                ));
+            }
             KeyCode::Backspace => {
+                app.error_message = None;
                 if matches!(app.match_position, MatchPosition::EndsWith) {
                     app.vanity_suffix.pop();
                 } else {
@@ -424,11 +436,21 @@ fn handle_field_input(app: &mut App, key: event::KeyEvent) {
         // Suffix (only when StartsAndEndsWith, field index 3)
         3 if both => match key.code {
             KeyCode::Char(c) if app.valid_charset().contains(c) => {
+                app.error_message = None;
                 if app.vanity_suffix.len() < app.max_vanity_len() {
                     app.vanity_suffix.push(c);
+                } else {
+                    app.error_message = Some(format!("Max {} chars", app.max_vanity_len()));
                 }
             }
+            KeyCode::Char(c) => {
+                app.error_message = Some(format!(
+                    "'{}' not valid for {} — allowed: {}",
+                    c, app.chain.label(), app.valid_charset()
+                ));
+            }
             KeyCode::Backspace => {
+                app.error_message = None;
                 app.vanity_suffix.pop();
             }
             _ => {}
