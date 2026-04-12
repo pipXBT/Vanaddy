@@ -39,14 +39,42 @@ impl Chain for Solana {
     }
 
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool {
-        // Fast-path: if the matcher has decoded raw prefix bytes, match on those.
-        // Otherwise, encode and match the string.
-        if matcher.raw_prefix.is_some() {
-            matcher.matches_raw(bytes)
-        } else {
-            let addr = bs58::encode(bytes).into_string();
-            matcher.matches_str(&addr)
+        // Fast-path: reject on raw prefix bytes before Base58-encoding.
+        if let Some(ref raw) = matcher.raw_prefix {
+            if !bytes.starts_with(raw) {
+                return false;
+            }
         }
+
+        let addr = bs58::encode(bytes).into_string();
+        // Solana has no fixed leading chars — vanity applies to the whole address.
+        let vanity_target: &str = &addr;
+
+        // Prefix check
+        if !matcher.prefix.is_empty() {
+            let prefix_ok = if matcher.case_sensitive {
+                vanity_target.starts_with(&matcher.prefix)
+            } else {
+                vanity_target.to_lowercase().starts_with(&matcher.prefix_lower)
+            };
+            if !prefix_ok {
+                return false;
+            }
+        }
+
+        // Suffix check
+        if !matcher.suffix.is_empty() {
+            let suffix_ok = if matcher.case_sensitive {
+                addr.ends_with(&matcher.suffix)
+            } else {
+                addr.to_lowercase().ends_with(&matcher.suffix_lower)
+            };
+            if !suffix_ok {
+                return false;
+            }
+        }
+
+        true
     }
 }
 
@@ -77,5 +105,47 @@ mod tests {
         // Format sanity
         assert!(addr.len() >= 32 && addr.len() <= 44);
         assert!(addr.chars().all(|c| Solana::CHARSET.contains(c)));
+    }
+
+    #[test]
+    fn solana_starts_and_ends_with_both_required() {
+        use super::super::super::matcher::{Matcher, MatchPosition};
+        use super::super::ChainKind;
+
+        // Derive the canonical pinned address as a reliable test payload.
+        let m = Mnemonic::from_phrase(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            Language::English,
+        ).unwrap();
+        let seed = derive_seed(&m);
+        let key = slip10_derive_ed25519(&seed, &PHANTOM_SOLANA_PATH);
+        let sk = SigningKey::from_bytes(&key);
+        let pubkey: [u8; 32] = sk.verifying_key().to_bytes();
+        let addr = bs58::encode(&pubkey).into_string();
+
+        let actual_prefix = &addr[..3];
+        let actual_suffix = &addr[addr.len() - 3..];
+
+        // Use case_sensitive=false so raw_prefix fast-path is skipped (it decodes
+        // base58 byte-wise which isn't a clean string-prefix match). The matches_raw
+        // path then goes through the full encode + string compare.
+        let wrong_suffix = if actual_suffix == "zzz" { "aaa" } else { "zzz" };
+        let matcher = Matcher::new(
+            actual_prefix.to_string(),
+            wrong_suffix.to_string(),
+            MatchPosition::StartsAndEndsWith,
+            false,
+            ChainKind::Solana,
+        );
+        assert!(!Solana::matches_raw(&matcher, &pubkey), "must reject wrong suffix");
+
+        let matcher = Matcher::new(
+            actual_prefix.to_string(),
+            actual_suffix.to_string(),
+            MatchPosition::StartsAndEndsWith,
+            false,
+            ChainKind::Solana,
+        );
+        assert!(Solana::matches_raw(&matcher, &pubkey), "must accept both correct");
     }
 }

@@ -102,14 +102,36 @@ impl Chain for Ton {
     }
 
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool {
-        // Encoded TON address is 48 chars; first 2 are fixed "EQ" for bounceable mainnet.
-        // Match user's vanity against encoded[2..].
         let encoded = Ton::encode_address(bytes);
-        if let Some(ref want) = matcher.ton_prefix {
-            encoded.len() >= 2 + want.len() && encoded[2..].starts_with(want.as_str())
-        } else {
-            matcher.matches_str(&encoded)
+        // TON vanity applies after "EQ" (or "UQ") — 2 chars.
+        const FIXED_PREFIX_LEN: usize = 2;
+        let vanity_target = if encoded.len() > FIXED_PREFIX_LEN { &encoded[FIXED_PREFIX_LEN..] } else { "" };
+
+        // Prefix check
+        if !matcher.prefix.is_empty() {
+            let prefix_ok = if matcher.case_sensitive {
+                vanity_target.starts_with(&matcher.prefix)
+            } else {
+                vanity_target.to_lowercase().starts_with(&matcher.prefix_lower)
+            };
+            if !prefix_ok {
+                return false;
+            }
         }
+
+        // Suffix check
+        if !matcher.suffix.is_empty() {
+            let suffix_ok = if matcher.case_sensitive {
+                encoded.ends_with(&matcher.suffix)
+            } else {
+                encoded.to_lowercase().ends_with(&matcher.suffix_lower)
+            };
+            if !suffix_ok {
+                return false;
+            }
+        }
+
+        true
     }
 }
 
@@ -137,6 +159,49 @@ mod tests {
         let encoded = Ton::encode_address(&addr);
         assert_eq!(encoded.len(), 48, "TON addresses must be 48 chars, got: {}", encoded);
         assert!(encoded.starts_with("EQ"), "bounceable mainnet must start with EQ, got: {}", encoded);
+    }
+
+    #[test]
+    fn ton_starts_and_ends_with_both_required() {
+        use super::super::super::matcher::{Matcher, MatchPosition};
+        use super::super::ChainKind;
+
+        let (_phrase, sk) = super::super::ton_mnemonic::generate_ton_wallet();
+        let pubkey = sk.verifying_key().to_bytes();
+        let account = account_id_from_pubkey(&pubkey);
+
+        let mut addr = [0u8; 36];
+        addr[0] = 0x11;
+        addr[1] = 0x00;
+        addr[2..34].copy_from_slice(&account);
+        let crc = crc16_xmodem(&addr[..34]);
+        addr[34] = (crc >> 8) as u8;
+        addr[35] = crc as u8;
+
+        let encoded = Ton::encode_address(&addr);
+        // encoded starts with "EQ" — vanity target begins after that.
+        let vanity_target = &encoded[2..];
+        let actual_prefix = &vanity_target[..3];
+        let actual_suffix = &encoded[encoded.len() - 3..];
+
+        let wrong_suffix = if actual_suffix == "zzz" { "aaa" } else { "zzz" };
+        let m = Matcher::new(
+            actual_prefix.to_string(),
+            wrong_suffix.to_string(),
+            MatchPosition::StartsAndEndsWith,
+            true,
+            ChainKind::Ton,
+        );
+        assert!(!Ton::matches_raw(&m, &addr), "must reject wrong suffix");
+
+        let m = Matcher::new(
+            actual_prefix.to_string(),
+            actual_suffix.to_string(),
+            MatchPosition::StartsAndEndsWith,
+            true,
+            ChainKind::Ton,
+        );
+        assert!(Ton::matches_raw(&m, &addr), "must accept both correct");
     }
 
     #[test]

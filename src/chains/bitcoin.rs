@@ -49,10 +49,7 @@ impl Chain for Bitcoin {
     }
 
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool {
-        // Fast-path: compare the HASH160 bytes' 5-bit representation against the
-        // user's vanity (pre-computed as 5-bit groups at Matcher construction).
-        // The user's vanity applies AFTER the fixed "bc1q" prefix, so we compare
-        // directly against the 5-bit groups of the HASH160 bytes.
+        // Fast-path: compare 5-bit expansion of HASH160 against user's Bech32 prefix.
         if let Some(ref expected) = matcher.bech32_prefix_5bit {
             let data_5bit = bytes.as_ref().to_base32();
             if data_5bit.len() < expected.len() {
@@ -63,11 +60,40 @@ impl Chain for Bitcoin {
                     return false;
                 }
             }
-            true
-        } else {
-            let addr = Bitcoin::encode_address(bytes);
-            matcher.matches_str(&addr)
         }
+
+        // Full encode for prefix + suffix string checks.
+        let addr = Bitcoin::encode_address(bytes);
+        // Bitcoin vanity applies after "bc1q" (4 chars).
+        const FIXED_PREFIX_LEN: usize = 4;
+        let vanity_target = if addr.len() > FIXED_PREFIX_LEN { &addr[FIXED_PREFIX_LEN..] } else { "" };
+
+        // Prefix check (bech32 is lowercase-only, so case sensitivity is effectively a no-op,
+        // but apply the pattern uniformly for consistency).
+        if !matcher.prefix.is_empty() {
+            let prefix_ok = if matcher.case_sensitive {
+                vanity_target.starts_with(&matcher.prefix)
+            } else {
+                vanity_target.to_lowercase().starts_with(&matcher.prefix_lower)
+            };
+            if !prefix_ok {
+                return false;
+            }
+        }
+
+        // Suffix check
+        if !matcher.suffix.is_empty() {
+            let suffix_ok = if matcher.case_sensitive {
+                addr.ends_with(&matcher.suffix)
+            } else {
+                addr.to_lowercase().ends_with(&matcher.suffix_lower)
+            };
+            if !suffix_ok {
+                return false;
+            }
+        }
+
+        true
     }
 }
 
@@ -91,5 +117,45 @@ mod tests {
         let hash = hash160(&pk.serialize_compressed());
         let addr = Bitcoin::encode_address(&hash);
         assert_eq!(addr, "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu");
+    }
+
+    #[test]
+    fn bitcoin_starts_and_ends_with_both_required() {
+        use super::super::super::matcher::{Matcher, MatchPosition};
+        use super::super::ChainKind;
+
+        let m = Mnemonic::from_phrase(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            Language::English,
+        ).unwrap();
+        let seed = derive_seed(&m);
+        let sk = bip32_derive_secp256k1(&seed, &BTC_BIP84_PATH);
+        let pk = libsecp256k1::PublicKey::from_secret_key(&sk);
+        let hash = hash160(&pk.serialize_compressed());
+        let addr = Bitcoin::encode_address(&hash);
+        // addr = "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+        // after "bc1q": "cr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+        let vanity_target = &addr[4..];
+        let actual_prefix = &vanity_target[..3]; // "cr8"
+        let actual_suffix = &addr[addr.len() - 3..]; // "fyu"
+
+        let wrong_suffix = if actual_suffix == "zzz" { "aaa" } else { "zzz" };
+        let matcher = Matcher::new(
+            actual_prefix.to_string(),
+            wrong_suffix.to_string(),
+            MatchPosition::StartsAndEndsWith,
+            true,
+            ChainKind::Bitcoin,
+        );
+        assert!(!Bitcoin::matches_raw(&matcher, &hash), "must reject wrong suffix");
+
+        let matcher = Matcher::new(
+            actual_prefix.to_string(),
+            actual_suffix.to_string(),
+            MatchPosition::StartsAndEndsWith,
+            true,
+            ChainKind::Bitcoin,
+        );
+        assert!(Bitcoin::matches_raw(&matcher, &hash), "must accept both correct");
     }
 }

@@ -150,12 +150,35 @@ impl Chain for Monero {
 
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool {
         let addr = Monero::encode_address(bytes);
-        if let Some(ref want) = matcher.monero_prefix {
-            // Vanity applies after fixed leading '4'
-            addr.len() >= 1 + want.len() && addr[1..].starts_with(want.as_str())
-        } else {
-            matcher.matches_str(&addr)
+        // Monero vanity applies after leading "4" (1 char).
+        const FIXED_PREFIX_LEN: usize = 1;
+        let vanity_target = if addr.len() > FIXED_PREFIX_LEN { &addr[FIXED_PREFIX_LEN..] } else { "" };
+
+        // Prefix check
+        if !matcher.prefix.is_empty() {
+            let prefix_ok = if matcher.case_sensitive {
+                vanity_target.starts_with(&matcher.prefix)
+            } else {
+                vanity_target.to_lowercase().starts_with(&matcher.prefix_lower)
+            };
+            if !prefix_ok {
+                return false;
+            }
         }
+
+        // Suffix check
+        if !matcher.suffix.is_empty() {
+            let suffix_ok = if matcher.case_sensitive {
+                addr.ends_with(&matcher.suffix)
+            } else {
+                addr.to_lowercase().ends_with(&matcher.suffix_lower)
+            };
+            if !suffix_ok {
+                return false;
+            }
+        }
+
+        true
     }
 }
 
@@ -218,6 +241,81 @@ mod tests {
         for w in phrase.split_whitespace() {
             assert_eq!(w, MONERO_WORDLIST[0]);
         }
+    }
+
+    #[test]
+    fn monero_starts_and_ends_with_both_required() {
+        use super::super::super::matcher::{Matcher, MatchPosition};
+        use super::super::ChainKind;
+
+        let (_keypair, spend_pub, view_pub) = super::generate_keys();
+        let mut payload = [0u8; 65];
+        payload[0] = super::NETWORK_BYTE_MAINNET;
+        payload[1..33].copy_from_slice(&spend_pub);
+        payload[33..65].copy_from_slice(&view_pub);
+
+        let addr = Monero::encode_address(&payload);
+        let actual_prefix = &addr[1..3];
+        let actual_suffix = &addr[addr.len() - 3..];
+
+        let wrong_suffix = if actual_suffix == "zzz" { "aaa" } else { "zzz" };
+        let m = Matcher::new(
+            actual_prefix.to_string(),
+            wrong_suffix.to_string(),
+            MatchPosition::StartsAndEndsWith,
+            true,
+            ChainKind::Monero,
+        );
+        assert!(!Monero::matches_raw(&m, &payload), "must reject wrong suffix");
+
+        let m = Matcher::new(
+            actual_prefix.to_string(),
+            actual_suffix.to_string(),
+            MatchPosition::StartsAndEndsWith,
+            true,
+            ChainKind::Monero,
+        );
+        assert!(Monero::matches_raw(&m, &payload), "must accept both correct");
+    }
+
+    #[test]
+    fn monero_case_insensitive_suffix_match() {
+        use super::super::super::matcher::{Matcher, MatchPosition};
+        use super::super::ChainKind;
+
+        let (_, spend_pub, view_pub) = super::generate_keys();
+        let mut payload = [0u8; 65];
+        payload[0] = super::NETWORK_BYTE_MAINNET;
+        payload[1..33].copy_from_slice(&spend_pub);
+        payload[33..65].copy_from_slice(&view_pub);
+        let addr = Monero::encode_address(&payload);
+        let actual_suffix_upper = addr[addr.len() - 3..].to_uppercase();
+
+        // User types suffix in uppercase; case_sensitive=false → should still match
+        let m = Matcher::new(
+            String::new(),
+            actual_suffix_upper,
+            MatchPosition::EndsWith,
+            false, // case_sensitive=false
+            ChainKind::Monero,
+        );
+        assert!(Monero::matches_raw(&m, &payload));
+    }
+
+    #[test]
+    fn monero_user_reported_scenario_8888_prefix_888_suffix() {
+        use super::super::super::matcher::{Matcher, MatchPosition};
+        use super::super::ChainKind;
+
+        let m = Matcher::new(
+            "8888".to_string(),
+            "888".to_string(),
+            MatchPosition::StartsAndEndsWith,
+            true,
+            ChainKind::Monero,
+        );
+        assert_eq!(m.prefix, "8888");
+        assert_eq!(m.suffix, "888");
     }
 
     #[test]
