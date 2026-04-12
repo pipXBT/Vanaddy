@@ -328,6 +328,27 @@ mod tests {
     }
 
     #[test]
+    fn monero_base58_known_vectors() {
+        // Empty input
+        assert_eq!(monero_base58_encode(&[]), "");
+
+        // 1-byte block: 0x00 → 2 chars
+        // Published vector: byte 0x00 base58-encoded in Monero's 8-byte-block scheme
+        // produces "11" (the alphabet's index 0 is '1').
+        assert_eq!(monero_base58_encode(&[0x00]), "11");
+
+        // 8-byte full block of 0xFF = u64::MAX
+        // = 18446744073709551615 in decimal
+        // base58-encoded in 11 chars.
+        // Expected value captured via first run + verification.
+        let all_ff = [0xffu8; 8];
+        let encoded = monero_base58_encode(&all_ff);
+        assert_eq!(encoded.len(), 11);
+        // Pin the exact value — ran once, got "jpXCZedGfVQ"
+        assert_eq!(encoded, "jpXCZedGfVQ");
+    }
+
+    #[test]
     fn keccak256_empty_vector() {
         // Monero Keccak-256 of empty input. Reference: original Keccak (pre-FIPS-202), which is
         // what Monero uses, hashes "" to c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470
