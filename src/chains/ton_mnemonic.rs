@@ -17,10 +17,14 @@ const PBKDF2_BASIC_ITER: u32 = 390;
 /// PBKDF2 rounds used for the final Ed25519 seed derivation.
 const PBKDF2_SEED_ITER: u32 = 100_000;
 
-/// HMAC-SHA512 with an empty key over the phrase bytes.
+/// Compute the TON mnemonic entropy per `@ton/crypto`:
+/// `HMAC_SHA512(key = phrase, msg = password)`. We always use an empty password,
+/// so msg is empty. This direction (phrase-as-key) matches Tonkeeper's own
+/// `mnemonicToEntropy(words, password)` and is required for addresses computed
+/// by vanaddy to match those computed by Tonkeeper.
 fn hmac_sha512_empty_key(phrase: &[u8]) -> [u8; 64] {
-    let key = hmac::Key::new(hmac::HMAC_SHA512, &[]);
-    let tag = hmac::sign(&key, phrase);
+    let key = hmac::Key::new(hmac::HMAC_SHA512, phrase);
+    let tag = hmac::sign(&key, &[]);
     let mut out = [0u8; 64];
     out.copy_from_slice(tag.as_ref());
     out

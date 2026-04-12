@@ -96,7 +96,9 @@ impl Cell {
 }
 
 /// Wallet-v3r2 code cell — a well-known constant. Hash matches @ton/crypto's
-/// compiled v3r2 code BOC; max_depth is the depth of that BOC's root cell.
+/// compiled v3r2 code BOC. `max_depth = 0` because the compiled v3r2 code
+/// BOC is a single cell with no outgoing refs; verified empirically against
+/// Tonkeeper's computed v3r2 address for a known mnemonic.
 pub const WALLET_V3R2_CODE: CellRef = CellRef {
     hash: [
         0x84, 0xda, 0xfa, 0x44, 0x9f, 0x98, 0xa6, 0x98,
@@ -104,7 +106,7 @@ pub const WALLET_V3R2_CODE: CellRef = CellRef {
         0xc0, 0xf7, 0x6d, 0xc4, 0x52, 0x40, 0x02, 0xa5,
         0xd0, 0x91, 0x8b, 0x9a, 0x75, 0xd2, 0xd5, 0x99,
     ],
-    max_depth: 8,
+    max_depth: 0,
 };
 
 /// Wallet-v3r2 data cell: seqno(u32=0) || subwallet_id(u32) || pubkey(u256).
@@ -182,8 +184,8 @@ mod tests {
         let s = wallet_v3r2_state_init(&pk, 698983191);
         assert_eq!(s.bit_len, 5);
         assert_eq!(s.refs.len(), 2);
-        // max_depth = max(code.max_depth, data.max_depth) + 1
-        assert_eq!(s.max_depth(), 9); // max(8, 0) + 1
+        // max_depth = max(code.max_depth=0, data.max_depth=0) + 1 = 1
+        assert_eq!(s.max_depth(), 1);
     }
 
     /// Self-pinned hash of the v3r2 data cell (all-zero pubkey, default subwallet).
@@ -210,7 +212,7 @@ mod tests {
         let state = wallet_v3r2_state_init(&pubkey, 698983191);
         let hash = state.hash();
         let expected = hex::decode(
-            "b521ab63806f03569b1eb4a825cf0efa7519e77bfe83dbc6b1f6978632af8d23",
+            "a0e5f653bed80ca00f12a09e86034d50f1235f43e5f9e5782438c88489938ff1",
         )
         .unwrap();
         assert_eq!(&hash[..], &expected[..]);

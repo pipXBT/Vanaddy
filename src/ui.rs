@@ -171,7 +171,7 @@ fn render_config_form(f: &mut Frame, area: Rect, app: &App) {
     let hint = match app.chain {
         ChainKind::Solana | ChainKind::Evm => None,
         ChainKind::Bitcoin => Some("Bitcoin: vanity applies after 'bc1q'"),
-        ChainKind::Ton => Some("TON: vanity applies after 'EQ' (chars 3+)"),
+        ChainKind::Ton => Some("TON: vanity applies after 'UQ' (chars 3+) — wallet-v3r2, Tonkeeper-compatible"),
         ChainKind::Monero => Some("Monero: vanity applies after leading '4'"),
     };
     if let Some(h) = hint {
