@@ -16,8 +16,6 @@ pub struct Matcher {
     /// Pre-lowercased for case-insensitive string matching (avoids alloc in hot loop)
     pub(crate) prefix_lower: String,
     pub(crate) suffix_lower: String,
-    /// For Solana starts-with: pre-decoded base58 bytes for raw comparison
-    pub(crate) raw_prefix: Option<Vec<u8>>,
     /// For EVM: pre-decoded hex bytes for raw comparison (skips hex::encode in hot loop)
     pub(crate) evm_prefix: Option<(Vec<u8>, Option<u8>)>, // (full_bytes, extra_high_nibble)
     pub(crate) evm_suffix: Option<(Vec<u8>, Option<u8>)>, // (full_bytes, extra_low_nibble)
@@ -74,15 +72,6 @@ impl Matcher {
         case_sensitive: bool,
         chain: ChainKind,
     ) -> Self {
-        let raw_prefix = match (chain, position) {
-            (ChainKind::Solana, MatchPosition::StartsWith | MatchPosition::StartsAndEndsWith)
-                if case_sensitive && !prefix.is_empty() =>
-            {
-                bs58::decode(&prefix).into_vec().ok()
-            }
-            _ => None,
-        };
-
         let evm_prefix = match chain {
             ChainKind::Evm if !prefix.is_empty() => Some(hex_prefix_to_bytes(&prefix)),
             _ => None,
@@ -119,18 +108,9 @@ impl Matcher {
             case_sensitive,
             prefix_lower,
             suffix_lower,
-            raw_prefix,
             evm_prefix,
             evm_suffix,
             bech32_prefix_5bit,
-        }
-    }
-
-    pub fn matches_raw(&self, pubkey_bytes: &[u8]) -> bool {
-        if let Some(ref prefix) = self.raw_prefix {
-            pubkey_bytes.starts_with(prefix)
-        } else {
-            false
         }
     }
 

@@ -39,37 +39,32 @@ impl Chain for Solana {
     }
 
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool {
-        // Fast-path: reject on raw prefix bytes before Base58-encoding.
-        if let Some(ref raw) = matcher.raw_prefix {
-            if !bytes.starts_with(raw) {
-                return false;
-            }
-        }
-
         let addr = bs58::encode(bytes).into_string();
-        // Solana has no fixed leading chars — vanity applies to the whole address.
-        let vanity_target: &str = &addr;
 
-        // Prefix check
+        // Prefix check (no fixed leading chars for Solana)
         if !matcher.prefix.is_empty() {
-            let prefix_ok = if matcher.case_sensitive {
-                vanity_target.starts_with(&matcher.prefix)
+            let ok = if matcher.case_sensitive {
+                addr.starts_with(&matcher.prefix)
             } else {
-                vanity_target.to_lowercase().starts_with(&matcher.prefix_lower)
+                addr.as_bytes().len() >= matcher.prefix.len()
+                    && addr.as_bytes()[..matcher.prefix.len()]
+                        .eq_ignore_ascii_case(matcher.prefix.as_bytes())
             };
-            if !prefix_ok {
+            if !ok {
                 return false;
             }
         }
 
         // Suffix check
         if !matcher.suffix.is_empty() {
-            let suffix_ok = if matcher.case_sensitive {
+            let ok = if matcher.case_sensitive {
                 addr.ends_with(&matcher.suffix)
             } else {
-                addr.to_lowercase().ends_with(&matcher.suffix_lower)
+                let start = addr.len().saturating_sub(matcher.suffix.len());
+                addr.as_bytes()[start..]
+                    .eq_ignore_ascii_case(matcher.suffix.as_bytes())
             };
-            if !suffix_ok {
+            if !ok {
                 return false;
             }
         }
@@ -147,5 +142,30 @@ mod tests {
             ChainKind::Solana,
         );
         assert!(Solana::matches_raw(&matcher, &pubkey), "must accept both correct");
+    }
+
+    #[test]
+    fn solana_case_sensitive_prefix_matches() {
+        use super::super::super::matcher::{Matcher, MatchPosition};
+        use super::super::ChainKind;
+
+        // Generate a fresh Solana address; take its actual first 3 chars as prefix.
+        // With case-sensitive matching, the matcher must accept this exact address.
+        let (pubkey_bytes, _sk, _phrase) = Solana::generate();
+        let addr = bs58::encode(&pubkey_bytes).into_string();
+        let actual_prefix = addr.chars().take(3).collect::<String>();
+
+        let m = Matcher::new(
+            actual_prefix.clone(),
+            String::new(),
+            MatchPosition::StartsWith,
+            true, // case_sensitive = true — this triggers the broken raw_prefix path today
+            ChainKind::Solana,
+        );
+        assert!(
+            Solana::matches_raw(&m, &pubkey_bytes),
+            "case-sensitive prefix '{}' must match its own address '{}'",
+            actual_prefix, addr
+        );
     }
 }
