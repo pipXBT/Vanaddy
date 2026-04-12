@@ -3,6 +3,7 @@ pub mod bip32;
 pub mod chains;
 pub mod matcher;
 pub mod seed;
+pub mod slip10;
 pub mod ui;
 
 use self::app::App;

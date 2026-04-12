@@ -1,6 +1,7 @@
 use super::Chain;
 use super::super::matcher::Matcher;
 use super::super::seed::derive_seed;
+use super::super::slip10::{slip10_derive_ed25519, PHANTOM_SOLANA_PATH};
 use bip39::{Language, Mnemonic, MnemonicType};
 use ed25519_dalek::SigningKey;
 
@@ -18,8 +19,7 @@ impl Chain for Solana {
     fn generate() -> (Self::AddressBytes, Self::SecretRaw, String) {
         let mnemonic = Mnemonic::new(MnemonicType::Words12, Language::English);
         let seed_bytes = derive_seed(&mnemonic);
-        let mut key_bytes = [0u8; 32];
-        key_bytes.copy_from_slice(&seed_bytes[..32]);
+        let key_bytes = slip10_derive_ed25519(&seed_bytes, &PHANTOM_SOLANA_PATH);
         let signing_key = SigningKey::from_bytes(&key_bytes);
         let pubkey_bytes = signing_key.verifying_key().to_bytes();
         (pubkey_bytes, signing_key, mnemonic.phrase().to_string())
@@ -55,20 +55,26 @@ mod tests {
     use super::*;
     use bip39::{Language, Mnemonic};
 
-    /// Sanity check: derivation from canonical phrase produces a valid Base58 pubkey.
-    /// This test doesn't pin a specific address; it verifies the code path works.
+    /// Pinned Phantom derivation test: if this breaks, the derivation has changed.
+    /// Derives from the canonical BIP-39 test phrase via SLIP-0010 Ed25519 at
+    /// m/44'/501'/0'/0' (Phantom's default Solana path).
     #[test]
-    fn solana_derivation_from_canonical_phrase() {
+    fn solana_phantom_derivation_from_canonical_phrase() {
         let m = Mnemonic::from_phrase(
             "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
             Language::English,
         ).unwrap();
-        let seed_bytes = derive_seed(&m);
-        let mut key_bytes = [0u8; 32];
-        key_bytes.copy_from_slice(&seed_bytes[..32]);
-        let signing_key = SigningKey::from_bytes(&key_bytes);
-        let pubkey = signing_key.verifying_key().to_bytes();
+        let seed = derive_seed(&m);
+        let key = slip10_derive_ed25519(&seed, &PHANTOM_SOLANA_PATH);
+        let sk = SigningKey::from_bytes(&key);
+        let pubkey = sk.verifying_key().to_bytes();
         let addr = bs58::encode(&pubkey).into_string();
+
+        // Pinned: matches Phantom wallet import of "abandon...about" phrase
+        // at m/44'/501'/0'/0'.
+        assert_eq!(addr, "HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk");
+
+        // Format sanity
         assert!(addr.len() >= 32 && addr.len() <= 44);
         assert!(addr.chars().all(|c| Solana::CHARSET.contains(c)));
     }
