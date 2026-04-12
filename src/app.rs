@@ -171,11 +171,27 @@ impl App {
 
         // Ensure CSV has header
         {
-            let file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("vanity_wallets.csv")
-                .expect("Failed to open vanity_wallets.csv");
+            let file = {
+                let mut opts = OpenOptions::new();
+                opts.create(true).append(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    opts.mode(0o600);
+                }
+                opts.open("vanity_wallets.csv")
+                    .expect("Failed to open vanity_wallets.csv")
+            };
+            // `mode()` only applies at creation time. For pre-existing files, force 0600.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(metadata) = file.metadata() {
+                    let mut perms = metadata.permissions();
+                    perms.set_mode(0o600);
+                    let _ = std::fs::set_permissions("vanity_wallets.csv", perms);
+                }
+            }
             let needs_header = file.metadata().map(|m| m.len() == 0).unwrap_or(true);
             if needs_header {
                 let mut wtr = WriterBuilder::new().has_headers(false).from_writer(file);
@@ -212,7 +228,26 @@ impl App {
             while let Ok(payload) = rx.try_recv() {
                 self.match_count.fetch_add(1, Ordering::Relaxed);
 
-                if let Ok(file) = OpenOptions::new().create(true).append(true).open("vanity_wallets.csv") {
+                let open_result = {
+                    let mut opts = OpenOptions::new();
+                    opts.create(true).append(true);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        opts.mode(0o600);
+                    }
+                    opts.open("vanity_wallets.csv")
+                };
+                if let Ok(file) = open_result {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        if let Ok(metadata) = file.metadata() {
+                            let mut perms = metadata.permissions();
+                            perms.set_mode(0o600);
+                            let _ = std::fs::set_permissions("vanity_wallets.csv", perms);
+                        }
+                    }
                     let mut wtr = WriterBuilder::new().has_headers(false).from_writer(file);
                     let _ = wtr.write_record(&[&payload.0, &payload.1, &payload.2, &payload.3]);
                     let _ = wtr.flush();

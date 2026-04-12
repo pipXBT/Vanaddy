@@ -59,6 +59,9 @@ fn main() -> io::Result<()> {
         }
         if matches > 0 {
             println!("  Saved to        : vanity_wallets.csv");
+            println!("  SECURITY WARNING: CSV contains plaintext seed phrases.");
+            println!("                    File is chmod 0600 (owner-only). Move to");
+            println!("                    an encrypted location and delete the original.");
         }
         println!("==========================================================\n");
     }
