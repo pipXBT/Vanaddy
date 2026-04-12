@@ -5,6 +5,7 @@ use curve25519_dalek::scalar::Scalar;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use tiny_keccak::{Hasher, Keccak};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::monero_wordlist::MONERO_WORDLIST;
 
@@ -23,7 +24,7 @@ fn keccak256(data: &[u8]) -> [u8; 32] {
 }
 
 /// Raw Monero keypair: spend_sec, spend_pub, view_sec, view_pub.
-#[derive(Clone)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct MoneroKeypair {
     pub spend_sec: [u8; 32],
     pub view_sec: [u8; 32],
@@ -36,11 +37,13 @@ fn generate_keys() -> (MoneroKeypair, [u8; 32], [u8; 32]) {
     let mut spend_raw = [0u8; 32];
     OsRng.fill_bytes(&mut spend_raw);
     let spend_scalar = Scalar::from_bytes_mod_order(spend_raw);
+    spend_raw.zeroize();
     let spend_sec = spend_scalar.to_bytes();
     let spend_pub = (&spend_scalar * ED25519_BASEPOINT_TABLE).compress().to_bytes();
 
-    let view_raw = keccak256(&spend_sec);
+    let mut view_raw = keccak256(&spend_sec);
     let view_scalar = Scalar::from_bytes_mod_order(view_raw);
+    view_raw.zeroize();
     let view_sec = view_scalar.to_bytes();
     let view_pub = (&view_scalar * ED25519_BASEPOINT_TABLE).compress().to_bytes();
 
