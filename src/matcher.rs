@@ -140,6 +140,7 @@ impl Matcher {
                 return false;
             }
             if let Some(nibble) = extra {
+                debug_assert!(start > 0, "EVM suffix of 20 bytes + extra nibble is invalid (would exceed address length)");
                 let idx = start - 1;
                 if (addr_bytes[idx] & 0x0f) != *nibble {
                     return false;
