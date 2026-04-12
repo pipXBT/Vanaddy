@@ -14,7 +14,6 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap},
     Frame, Terminal,
 };
-use ring::hmac;
 use sha3::{Digest, Keccak256};
 use std::{
     fs::OpenOptions,
@@ -27,6 +26,7 @@ use std::{
 };
 
 mod seed;
+mod bip32;
 use seed::derive_seed;
 
 // ---------------------------------------------------------------------------
@@ -37,54 +37,6 @@ use seed::derive_seed;
 enum Chain {
     Solana,
     Evm,
-}
-
-// ---------------------------------------------------------------------------
-// EVM: mnemonic -> BIP-39 seed -> BIP-32 derive m/44'/60'/0'/0/0 -> secp256k1
-// ---------------------------------------------------------------------------
-
-/// BIP-32 child key derivation for secp256k1 (hardened and normal).
-pub fn bip32_derive_evm_key(seed: &[u8]) -> libsecp256k1::SecretKey {
-    // Master key: HMAC-SHA512("Bitcoin seed", seed)
-    let master_key = hmac::Key::new(hmac::HMAC_SHA512, b"Bitcoin seed");
-    let result = hmac::sign(&master_key, seed);
-    let result = result.as_ref();
-    let mut key = [0u8; 32];
-    let mut chain_code = [0u8; 32];
-    key.copy_from_slice(&result[..32]);
-    chain_code.copy_from_slice(&result[32..]);
-
-    // Derive path: m/44'/60'/0'/0/0
-    let path: [u32; 5] = [0x8000002C, 0x8000003C, 0x80000000, 0, 0];
-
-    for &index in &path {
-        let hmac_key = hmac::Key::new(hmac::HMAC_SHA512, &chain_code);
-        let parent = libsecp256k1::SecretKey::parse_slice(&key).expect("valid key");
-
-        let result = if index >= 0x80000000 {
-            // Hardened: 0x00 || key || index
-            let mut data = [0u8; 37]; // 1 + 32 + 4
-            data[1..33].copy_from_slice(&key);
-            data[33..].copy_from_slice(&index.to_be_bytes());
-            hmac::sign(&hmac_key, &data)
-        } else {
-            // Normal: compressed public key || index
-            let pk = libsecp256k1::PublicKey::from_secret_key(&parent);
-            let mut data = [0u8; 37]; // 33 + 4
-            data[..33].copy_from_slice(&pk.serialize_compressed());
-            data[33..].copy_from_slice(&index.to_be_bytes());
-            hmac::sign(&hmac_key, &data)
-        };
-
-        let result = result.as_ref();
-        let il_key = libsecp256k1::SecretKey::parse_slice(&result[..32]).expect("valid IL");
-        let mut child = parent;
-        child.tweak_add_assign(&il_key).expect("valid tweak");
-        key.copy_from_slice(&child.serialize());
-        chain_code.copy_from_slice(&result[32..]);
-    }
-
-    libsecp256k1::SecretKey::parse_slice(&key).expect("valid derived key")
 }
 
 // ---------------------------------------------------------------------------
@@ -1105,7 +1057,7 @@ fn search_solana_raw(
 pub fn generate_evm_raw() -> ([u8; 20], libsecp256k1::SecretKey, String) {
     let mnemonic = Mnemonic::new(MnemonicType::Words12, Language::English);
     let seed_bytes = derive_seed(&mnemonic);
-    let secret_key = bip32_derive_evm_key(&seed_bytes);
+    let secret_key = bip32::bip32_derive_secp256k1(&seed_bytes, &bip32::EVM_PATH);
     let public_key = libsecp256k1::PublicKey::from_secret_key(&secret_key);
     let pubkey_bytes = public_key.serialize();
     let pubkey_uncompressed = &pubkey_bytes[1..];
