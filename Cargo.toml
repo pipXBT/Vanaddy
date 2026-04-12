@@ -23,6 +23,7 @@ base64 = "0.22"
 curve25519-dalek = "4"
 tiny-keccak = { version = "2", features = ["keccak"] }
 rand = "0.8"
+crc32fast = "1.4"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

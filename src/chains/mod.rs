@@ -1,6 +1,7 @@
 pub mod bitcoin;
 pub mod evm;
 pub mod monero;
+mod monero_wordlist;
 pub mod solana;
 pub mod ton;
 

@@ -6,6 +6,8 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use tiny_keccak::{Hasher, Keccak};
 
+use super::monero_wordlist::MONERO_WORDLIST;
+
 pub struct Monero;
 
 const NETWORK_BYTE_MAINNET: u8 = 0x12;
@@ -43,6 +45,39 @@ fn generate_keys() -> (MoneroKeypair, [u8; 32], [u8; 32]) {
     let view_pub = (&view_scalar * ED25519_BASEPOINT_TABLE).compress().to_bytes();
 
     (MoneroKeypair { spend_sec, view_sec }, spend_pub, view_pub)
+}
+
+/// Encode a Monero spend key as a 25-word Electrum-style mnemonic.
+/// Compatible with monero-wallet-cli --restore-deterministic-wallet.
+pub fn monero_seed_phrase(spend_sec: &[u8; 32]) -> String {
+    const N: u32 = 1626;
+    const PREFIX_LEN: usize = 3;
+
+    let mut words: Vec<&'static str> = Vec::with_capacity(25);
+
+    for i in 0..8 {
+        let chunk = &spend_sec[i * 4..i * 4 + 4];
+        let x = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        let w1 = x % N;
+        let w2 = (x / N + w1) % N;
+        let w3 = (x / N / N + w2) % N;
+        words.push(MONERO_WORDLIST[w1 as usize]);
+        words.push(MONERO_WORDLIST[w2 as usize]);
+        words.push(MONERO_WORDLIST[w3 as usize]);
+    }
+
+    // Checksum: CRC32 over concatenation of first PREFIX_LEN chars of each word.
+    // All Monero English words are ASCII and length >= 4, so byte-slicing is safe.
+    let mut trimmed = String::with_capacity(24 * PREFIX_LEN);
+    for w in &words {
+        trimmed.push_str(&w[..PREFIX_LEN.min(w.len())]);
+    }
+
+    let cksum = crc32fast::hash(trimmed.as_bytes());
+    let checksum_idx = (cksum as usize) % 24;
+    words.push(words[checksum_idx]);
+
+    words.join(" ")
 }
 
 /// Monero Base58 encodes in 8-byte blocks → 11 chars each (last block may be shorter).
@@ -91,8 +126,8 @@ impl Chain for Monero {
         payload[1..33].copy_from_slice(&spend_pub);
         payload[33..65].copy_from_slice(&view_pub);
 
-        // Monero doesn't use BIP-39 — mnemonic field left empty.
-        (payload, keypair, String::new())
+        let phrase = monero_seed_phrase(&keypair.spend_sec);
+        (payload, keypair, phrase)
     }
 
     fn encode_address(bytes: &Self::AddressBytes) -> String {
@@ -142,6 +177,47 @@ mod tests {
         let secret = Monero::encode_secret(&keypair);
         assert!(secret.contains(':'));
         assert_eq!(secret.len(), 64 + 1 + 64, "spend_hex:view_hex = 64+1+64 chars");
+    }
+
+    #[test]
+    fn monero_seed_phrase_has_25_words() {
+        let spend_sec = [0u8; 32];
+        let phrase = monero_seed_phrase(&spend_sec);
+        let words: Vec<&str> = phrase.split_whitespace().collect();
+        assert_eq!(words.len(), 25, "Monero mnemonic must be 25 words");
+        for w in &words {
+            assert!(MONERO_WORDLIST.contains(w), "word '{}' not in wordlist", w);
+        }
+    }
+
+    #[test]
+    fn monero_seed_phrase_deterministic() {
+        let spend_sec = [0xABu8; 32];
+        let p1 = monero_seed_phrase(&spend_sec);
+        let p2 = monero_seed_phrase(&spend_sec);
+        assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn monero_seed_phrase_varies() {
+        let p1 = monero_seed_phrase(&[0u8; 32]);
+        let p2 = monero_seed_phrase(&[0xFFu8; 32]);
+        assert_ne!(p1, p2);
+    }
+
+    /// Pin the output for all-zero spend key so future changes are caught.
+    #[test]
+    fn monero_seed_phrase_all_zeros_pinned() {
+        let phrase = monero_seed_phrase(&[0u8; 32]);
+        assert_eq!(phrase.split_whitespace().count(), 25);
+        let first_word = phrase.split_whitespace().next().unwrap();
+        assert_eq!(first_word, MONERO_WORDLIST[0]);
+        // All 8 u32 chunks are zero → every (w1,w2,w3) = (0,0,0),
+        // so all 24 words are MONERO_WORDLIST[0], and the checksum
+        // word (indexed 0..24) is also MONERO_WORDLIST[0].
+        for w in phrase.split_whitespace() {
+            assert_eq!(w, MONERO_WORDLIST[0]);
+        }
     }
 
     #[test]
