@@ -18,6 +18,28 @@ fn hash160(pubkey_compressed: &[u8]) -> [u8; 20] {
     out
 }
 
+/// Expand 20 bytes (160 bits) into 32 5-bit groups, big-endian.
+/// Zero-allocation replacement for `bytes.to_base32()`.
+fn expand_5bit(bytes: &[u8; 20]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    let mut acc: u16 = 0;
+    let mut bits: u8 = 0;
+    let mut i = 0;
+    for &b in bytes {
+        acc = (acc << 8) | b as u16;
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out[i] = ((acc >> bits) & 0x1f) as u8;
+            i += 1;
+        }
+    }
+    // 160 bits / 5 = 32 groups exactly; no trailing bits left.
+    debug_assert_eq!(bits, 0);
+    debug_assert_eq!(i, 32);
+    out
+}
+
 impl Chain for Bitcoin {
     const LABEL: &'static str = "Bitcoin";
     // Bech32 alphabet (lowercase only)
@@ -51,12 +73,12 @@ impl Chain for Bitcoin {
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool {
         // Fast-path: compare 5-bit expansion of HASH160 against user's Bech32 prefix.
         if let Some(ref expected) = matcher.bech32_prefix_5bit {
-            let data_5bit = bytes.as_ref().to_base32();
+            let data_5bit = expand_5bit(bytes);
             if data_5bit.len() < expected.len() {
                 return false;
             }
             for (a, b) in data_5bit.iter().zip(expected.iter()) {
-                if a.to_u8() != b.to_u8() {
+                if *a != b.to_u8() {
                     return false;
                 }
             }
@@ -156,5 +178,21 @@ mod tests {
             ChainKind::Bitcoin,
         );
         assert!(Bitcoin::matches_raw(&matcher, &hash), "must accept both correct");
+    }
+
+    #[test]
+    fn expand_5bit_matches_bech32_to_base32() {
+        // Cross-check our stack-buffer expansion against the bech32 crate's output.
+        let hash = [
+            0x75, 0x1e, 0x76, 0xe8, 0x19, 0x91, 0x96, 0xd4,
+            0x54, 0x94, 0x1c, 0x45, 0xd1, 0xb3, 0xa3, 0x23,
+            0xf1, 0x43, 0x3b, 0xd6,
+        ];
+        let ours = expand_5bit(&hash);
+        let theirs = hash.as_ref().to_base32();
+        assert_eq!(ours.len(), theirs.len());
+        for (a, b) in ours.iter().zip(theirs.iter()) {
+            assert_eq!(*a, b.to_u8());
+        }
     }
 }
