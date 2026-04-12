@@ -1,5 +1,6 @@
 pub mod bitcoin;
 pub mod evm;
+pub mod monero;
 pub mod solana;
 pub mod ton;
 
@@ -33,6 +34,7 @@ pub enum ChainKind {
     Evm,
     Bitcoin,
     Ton,
+    Monero,
 }
 
 impl ChainKind {
@@ -42,6 +44,7 @@ impl ChainKind {
             Self::Evm => evm::Evm::LABEL,
             Self::Bitcoin => bitcoin::Bitcoin::LABEL,
             Self::Ton => ton::Ton::LABEL,
+            Self::Monero => monero::Monero::LABEL,
         }
     }
     pub fn charset(self) -> &'static str {
@@ -50,6 +53,7 @@ impl ChainKind {
             Self::Evm => evm::Evm::CHARSET,
             Self::Bitcoin => bitcoin::Bitcoin::CHARSET,
             Self::Ton => ton::Ton::CHARSET,
+            Self::Monero => monero::Monero::CHARSET,
         }
     }
     pub fn max_vanity(self) -> usize {
@@ -58,6 +62,7 @@ impl ChainKind {
             Self::Evm => evm::Evm::MAX_VANITY,
             Self::Bitcoin => bitcoin::Bitcoin::MAX_VANITY,
             Self::Ton => ton::Ton::MAX_VANITY,
+            Self::Monero => monero::Monero::MAX_VANITY,
         }
     }
     pub fn search(
@@ -72,6 +77,7 @@ impl ChainKind {
             Self::Evm => search::<evm::Evm>(matcher, stop, counter, tx),
             Self::Bitcoin => search::<bitcoin::Bitcoin>(matcher, stop, counter, tx),
             Self::Ton => search::<ton::Ton>(matcher, stop, counter, tx),
+            Self::Monero => search::<monero::Monero>(matcher, stop, counter, tx),
         }
     }
 }

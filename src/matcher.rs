@@ -25,6 +25,8 @@ pub struct Matcher {
     pub(crate) bech32_prefix_5bit: Option<Vec<u5>>,
     /// For TON: base64url prefix applied after fixed "EQ" (first 2 chars)
     pub(crate) ton_prefix: Option<String>,
+    /// For Monero: base58 prefix applied after the fixed leading '4'
+    pub(crate) monero_prefix: Option<String>,
 }
 
 /// Parse a hex string into full bytes + optional trailing high nibble (for prefix matching).
@@ -116,6 +118,11 @@ impl Matcher {
             _ => None,
         };
 
+        let monero_prefix = match chain {
+            ChainKind::Monero if !prefix.is_empty() => Some(prefix.clone()),
+            _ => None,
+        };
+
         let prefix_lower = prefix.to_lowercase();
         let suffix_lower = suffix.to_lowercase();
 
@@ -131,6 +138,7 @@ impl Matcher {
             evm_suffix,
             bech32_prefix_5bit,
             ton_prefix,
+            monero_prefix,
         }
     }
 
