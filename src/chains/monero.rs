@@ -150,30 +150,36 @@ impl Chain for Monero {
 
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool {
         let addr = Monero::encode_address(bytes);
-        // Monero vanity applies after leading "4" (1 char).
+        // Monero vanity applies after leading "4" (1 char)
         const FIXED_PREFIX_LEN: usize = 1;
-        let vanity_target = if addr.len() > FIXED_PREFIX_LEN { &addr[FIXED_PREFIX_LEN..] } else { "" };
+        let vanity_target = if addr.len() > FIXED_PREFIX_LEN {
+            &addr[FIXED_PREFIX_LEN..]
+        } else {
+            ""
+        };
 
-        // Prefix check
         if !matcher.prefix.is_empty() {
-            let prefix_ok = if matcher.case_sensitive {
+            let ok = if matcher.case_sensitive {
                 vanity_target.starts_with(&matcher.prefix)
             } else {
-                vanity_target.to_lowercase().starts_with(&matcher.prefix_lower)
+                vanity_target.as_bytes().len() >= matcher.prefix.len()
+                    && vanity_target.as_bytes()[..matcher.prefix.len()]
+                        .eq_ignore_ascii_case(matcher.prefix.as_bytes())
             };
-            if !prefix_ok {
+            if !ok {
                 return false;
             }
         }
 
-        // Suffix check
         if !matcher.suffix.is_empty() {
-            let suffix_ok = if matcher.case_sensitive {
+            let ok = if matcher.case_sensitive {
                 addr.ends_with(&matcher.suffix)
             } else {
-                addr.to_lowercase().ends_with(&matcher.suffix_lower)
+                let addr_bytes = addr.as_bytes();
+                let start = addr_bytes.len().saturating_sub(matcher.suffix.len());
+                addr_bytes[start..].eq_ignore_ascii_case(matcher.suffix.as_bytes())
             };
-            if !suffix_ok {
+            if !ok {
                 return false;
             }
         }

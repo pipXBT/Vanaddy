@@ -66,29 +66,28 @@ impl Chain for Bitcoin {
         let addr = Bitcoin::encode_address(bytes);
         // Bitcoin vanity applies after "bc1q" (4 chars).
         const FIXED_PREFIX_LEN: usize = 4;
-        let vanity_target = if addr.len() > FIXED_PREFIX_LEN { &addr[FIXED_PREFIX_LEN..] } else { "" };
+        let vanity_target = if addr.len() > FIXED_PREFIX_LEN {
+            &addr[FIXED_PREFIX_LEN..]
+        } else {
+            ""
+        };
 
-        // Prefix check (bech32 is lowercase-only, so case sensitivity is effectively a no-op,
-        // but apply the pattern uniformly for consistency).
+        // Prefix check (Bech32 is lowercase-only, so case-sensitive == case-insensitive)
         if !matcher.prefix.is_empty() {
-            let prefix_ok = if matcher.case_sensitive {
-                vanity_target.starts_with(&matcher.prefix)
-            } else {
-                vanity_target.to_lowercase().starts_with(&matcher.prefix_lower)
-            };
-            if !prefix_ok {
+            let ok = vanity_target.as_bytes().len() >= matcher.prefix.len()
+                && vanity_target.as_bytes()[..matcher.prefix.len()]
+                    .eq_ignore_ascii_case(matcher.prefix.as_bytes());
+            if !ok {
                 return false;
             }
         }
 
         // Suffix check
         if !matcher.suffix.is_empty() {
-            let suffix_ok = if matcher.case_sensitive {
-                addr.ends_with(&matcher.suffix)
-            } else {
-                addr.to_lowercase().ends_with(&matcher.suffix_lower)
-            };
-            if !suffix_ok {
+            let addr_bytes = addr.as_bytes();
+            let start = addr_bytes.len().saturating_sub(matcher.suffix.len());
+            let ok = addr_bytes[start..].eq_ignore_ascii_case(matcher.suffix.as_bytes());
+            if !ok {
                 return false;
             }
         }

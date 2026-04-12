@@ -103,30 +103,36 @@ impl Chain for Ton {
 
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool {
         let encoded = Ton::encode_address(bytes);
-        // TON vanity applies after "EQ" (or "UQ") — 2 chars.
+        // TON vanity applies after "EQ" — 2 chars
         const FIXED_PREFIX_LEN: usize = 2;
-        let vanity_target = if encoded.len() > FIXED_PREFIX_LEN { &encoded[FIXED_PREFIX_LEN..] } else { "" };
+        let vanity_target = if encoded.len() > FIXED_PREFIX_LEN {
+            &encoded[FIXED_PREFIX_LEN..]
+        } else {
+            ""
+        };
 
-        // Prefix check
         if !matcher.prefix.is_empty() {
-            let prefix_ok = if matcher.case_sensitive {
+            let ok = if matcher.case_sensitive {
                 vanity_target.starts_with(&matcher.prefix)
             } else {
-                vanity_target.to_lowercase().starts_with(&matcher.prefix_lower)
+                vanity_target.as_bytes().len() >= matcher.prefix.len()
+                    && vanity_target.as_bytes()[..matcher.prefix.len()]
+                        .eq_ignore_ascii_case(matcher.prefix.as_bytes())
             };
-            if !prefix_ok {
+            if !ok {
                 return false;
             }
         }
 
-        // Suffix check
         if !matcher.suffix.is_empty() {
-            let suffix_ok = if matcher.case_sensitive {
+            let ok = if matcher.case_sensitive {
                 encoded.ends_with(&matcher.suffix)
             } else {
-                encoded.to_lowercase().ends_with(&matcher.suffix_lower)
+                let encoded_bytes = encoded.as_bytes();
+                let start = encoded_bytes.len().saturating_sub(matcher.suffix.len());
+                encoded_bytes[start..].eq_ignore_ascii_case(matcher.suffix.as_bytes())
             };
-            if !suffix_ok {
+            if !ok {
                 return false;
             }
         }
