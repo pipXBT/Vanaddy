@@ -1,8 +1,7 @@
 use super::super::matcher::Matcher;
-use super::super::seed::derive_seed;
+use super::ton_mnemonic::generate_ton_wallet;
 use super::Chain;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use bip39::{Language, Mnemonic, MnemonicType};
 use ed25519_dalek::SigningKey;
 use sha2::{Digest, Sha256};
 
@@ -67,20 +66,18 @@ impl Chain for Ton {
     // Base64url alphabet (A-Z a-z 0-9 - _)
     const CHARSET: &'static str =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    // User's vanity applies starting at char 3 (first 2 chars are fixed "EQ").
-    // 6 matchable chars = 64^6 ≈ 68 billion tries for exact match.
-    const MAX_VANITY: usize = 6;
+    // Reduced from 6: TON's native mnemonic is ~100x slower than other chains due to
+    // 100,000 PBKDF2-HMAC-SHA512 iterations per valid wallet (plus a ~1/256 acceptance
+    // filter). A 4-char vanity is the practical maximum; 5+ chars would take days to
+    // months at realistic multi-threaded throughput (~100 wallets/sec).
+    const MAX_VANITY: usize = 4;
 
     /// 36 bytes: tag(1) || workchain(1) || account_id(32) || crc16(2)
     type AddressBytes = [u8; 36];
     type SecretRaw = SigningKey;
 
     fn generate() -> (Self::AddressBytes, Self::SecretRaw, String) {
-        let mnemonic = Mnemonic::new(MnemonicType::Words12, Language::English);
-        let seed_bytes = derive_seed(&mnemonic);
-        let mut key_bytes = [0u8; 32];
-        key_bytes.copy_from_slice(&seed_bytes[..32]);
-        let signing_key = SigningKey::from_bytes(&key_bytes);
+        let (phrase, signing_key) = generate_ton_wallet();
         let pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
 
         let account = account_id_from_pubkey(&pubkey);
@@ -93,7 +90,7 @@ impl Chain for Ton {
         addr[34] = (crc >> 8) as u8;
         addr[35] = crc as u8;
 
-        (addr, signing_key, mnemonic.phrase().to_string())
+        (addr, signing_key, phrase)
     }
 
     fn encode_address(bytes: &Self::AddressBytes) -> String {
@@ -119,19 +116,14 @@ impl Chain for Ton {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bip39::{Language, Mnemonic};
 
     #[test]
     fn ton_address_starts_with_eq_and_is_48_chars() {
-        let m = Mnemonic::from_phrase(
-            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-            Language::English,
-        ).unwrap();
-        let seed = derive_seed(&m);
-        let mut key_bytes = [0u8; 32];
-        key_bytes.copy_from_slice(&seed[..32]);
-        let signing_key = SigningKey::from_bytes(&key_bytes);
-        let pubkey = signing_key.verifying_key().to_bytes();
+        // TON's native mnemonic uses randomness with a ~1/256 rejection rate,
+        // so we can't pin to a canonical phrase. Generate a fresh wallet and
+        // verify format invariants.
+        let (_phrase, sk) = super::super::ton_mnemonic::generate_ton_wallet();
+        let pubkey = sk.verifying_key().to_bytes();
         let account = account_id_from_pubkey(&pubkey);
 
         let mut addr = [0u8; 36];

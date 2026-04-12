@@ -4,6 +4,7 @@ pub mod monero;
 mod monero_wordlist;
 pub mod solana;
 pub mod ton;
+mod ton_mnemonic;
 
 use super::matcher::Matcher;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
