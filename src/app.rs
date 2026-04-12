@@ -49,6 +49,7 @@ pub struct App {
     pub start_time: Option<Instant>,
     pub stop: Arc<AtomicBool>,
     pub rx: Option<mpsc::Receiver<MatchPayload>>,
+    pub thread_pool: Option<rayon::ThreadPool>,
 }
 
 impl App {
@@ -74,6 +75,7 @@ impl App {
             start_time: None,
             stop: Arc::new(AtomicBool::new(false)),
             rx: None,
+            thread_pool: None,
         }
     }
 
@@ -193,11 +195,15 @@ impl App {
             });
             drop(tx);
         });
+
+        self.thread_pool = Some(pool);
     }
 
     pub fn stop_search(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         self.rx = None;
+        // Drops the pool handle; workers will exit on the next stop check.
+        self.thread_pool = None;
         self.state = AppState::Configuring;
     }
 
@@ -435,5 +441,36 @@ fn handle_searching_key(app: &mut App, key: event::KeyEvent) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn start_stop_restart_does_not_leak_threads() {
+        let mut app = App::new();
+        app.chain = crate::chains::ChainKind::Evm;
+        // Extremely unlikely prefix so search will genuinely run for the duration.
+        app.vanity_prefix = "aaaaaaaa".into();
+        app.thread_count = "2".into();
+        app.validate().unwrap();
+
+        app.start_search();
+        thread::sleep(Duration::from_millis(50));
+        app.stop_search();
+
+        // Second cycle
+        app.validate().unwrap();
+        app.start_search();
+        thread::sleep(Duration::from_millis(50));
+        app.stop_search();
+
+        assert!(app.thread_pool.is_none());
+        assert!(app.stop.load(Ordering::Relaxed));
     }
 }
