@@ -1687,3 +1687,35 @@ git commit -m "docs: record outcome of fix-everything cycle"
 2. **Placeholders:** None. Every step contains real code or an exact command.
 3. **Type consistency:** `MoneroKeypair` fields unchanged from prior tasks; `ChainKind` enum unchanged; `Matcher` struct fields pruned consistently (`raw_prefix`, `prefix_lower`/`suffix_lower` candidates for removal).
 4. **TON round-trip test vector:** The published vector in Task 10 is the critical correctness check. If it fails, debugging guidance is provided.
+
+---
+
+## Outcome
+
+All tasks complete. Test count grew from 26 -> 40. No known critical or important issues remain.
+
+### Perf (final means, criterion 95% CI)
+
+| Chain    | Mean      | Notes                                          |
+|----------|-----------|------------------------------------------------|
+| Solana   | 570.61 us | SLIP-0010 at m/44'/501'/0'/0' (Phantom-compat) |
+| EVM      | 655.68 us | Keccak256 + optional EIP-55 for case-sensitive |
+| Bitcoin  | 645.42 us | BIP-84 Bech32 with stack-buffer 5-bit fast-path |
+| TON      | 50.98 ms  | Native 24-word, wallet-v3r2 (Tonkeeper-compat)  |
+| Monero   | 35.15 us  | Electrum 25-word, reduced scalar + Keccak       |
+
+### Correctness milestones
+
+- Solana derivation matches Phantom (SLIP-0010 test vectors pinned)
+- Bitcoin derivation matches BIP-84 canonical vector
+- EVM case-sensitive matches EIP-55 (canonical vectors pinned)
+- TON derivation and cell-hashing matches Tonkeeper (user-provided v3r2 vector)
+- Monero Keccak matches the original (non-FIPS-202) variant
+- Monero Base58 encoding pinned
+
+### Security posture
+
+- CSV is chmod 0600 (owner-only) and user is warned at quit about plaintext
+- MoneroKeypair secret material zeroized on drop
+- EVM / Solana / Bitcoin secrets rely on libsecp256k1 / ed25519-dalek's internal zeroize
+

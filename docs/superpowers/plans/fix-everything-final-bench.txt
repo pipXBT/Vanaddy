@@ -1,0 +1,447 @@
+   Compiling serde_core v1.0.228
+   Compiling serde v1.0.228
+   Compiling memchr v2.7.1
+   Compiling zerocopy v0.8.27
+   Compiling zerocopy-derive v0.8.27
+   Compiling autocfg v1.5.0
+   Compiling zmij v1.0.21
+   Compiling serde_json v1.0.149
+   Compiling num-traits v0.2.19
+   Compiling ciborium-io v0.2.2
+   Compiling plotters-backend v0.3.7
+   Compiling clap_lex v1.1.0
+   Compiling anstyle v1.0.14
+   Compiling regex-syntax v0.8.10
+   Compiling clap_builder v4.6.0
+   Compiling plotters-svg v0.3.7
+   Compiling csv-core v0.1.11
+   Compiling itertools v0.10.5
+   Compiling same-file v1.0.6
+   Compiling cast v0.3.0
+   Compiling walkdir v2.5.0
+   Compiling is-terminal v0.4.17
+   Compiling anes v0.1.6
+   Compiling oorandom v11.1.5
+   Compiling regex-automata v0.4.14
+   Compiling plotters v0.3.7
+   Compiling criterion-plot v0.5.0
+   Compiling clap v4.6.0
+   Compiling half v2.7.1
+   Compiling ciborium-ll v0.2.2
+   Compiling libsecp256k1 v0.6.0
+   Compiling regex v1.12.3
+   Compiling ciborium v0.2.2
+   Compiling tinytemplate v1.2.1
+   Compiling csv v1.3.0
+   Compiling criterion v0.5.1
+   Compiling vanaddy v0.6.0 (/Users/shawnhopkinson/PipXBT_Repo)
+warning: unused import: `super::*`
+   --> benches/../src/app.rs:484:9
+    |
+484 |     use super::*;
+    |         ^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `std::sync::atomic::Ordering`
+   --> benches/../src/app.rs:485:9
+    |
+485 |     use std::sync::atomic::Ordering;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::thread`
+   --> benches/../src/app.rs:486:9
+    |
+486 |     use std::thread;
+    |         ^^^^^^^^^^^
+
+warning: unused import: `std::time::Duration`
+   --> benches/../src/app.rs:487:9
+    |
+487 |     use std::time::Duration;
+    |         ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+   --> benches/../src/chains/bitcoin.rs:123:9
+    |
+123 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused imports: `Language` and `Mnemonic`
+   --> benches/../src/chains/bitcoin.rs:124:17
+    |
+124 |     use bip39::{Language, Mnemonic};
+    |                 ^^^^^^^^  ^^^^^^^^
+
+warning: unused import: `super::*`
+  --> benches/../src/chains/evm.rs:96:9
+   |
+96 |     use super::*;
+   |         ^^^^^^^^
+
+warning: unused import: `super::*`
+   --> benches/../src/chains/monero.rs:196:9
+    |
+196 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `super::*`
+  --> benches/../src/chains/solana.rs:78:9
+   |
+78 |     use super::*;
+   |         ^^^^^^^^
+
+warning: unused imports: `Language` and `Mnemonic`
+  --> benches/../src/chains/solana.rs:79:17
+   |
+79 |     use bip39::{Language, Mnemonic};
+   |                 ^^^^^^^^  ^^^^^^^^
+
+warning: unused import: `super::*`
+   --> benches/../src/chains/ton.rs:125:9
+    |
+125 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `super::*`
+   --> benches/../src/chains/ton_cell.rs:142:9
+    |
+142 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `super::*`
+   --> benches/../src/chains/ton_mnemonic.rs:101:9
+    |
+101 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `super::*`
+   --> benches/../src/matcher.rs:185:9
+    |
+185 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `super::*`
+  --> benches/../src/seed.rs:23:9
+   |
+23 |     use super::*;
+   |         ^^^^^^^^
+
+warning: unused imports: `Language` and `Mnemonic`
+  --> benches/../src/seed.rs:24:17
+   |
+24 |     use bip39::{Language, Mnemonic};
+   |                 ^^^^^^^^  ^^^^^^^^
+
+warning: unused import: `super::*`
+  --> benches/../src/slip10.rs:42:9
+   |
+42 |     use super::*;
+   |         ^^^^^^^^
+
+warning: function `main` is never used
+  --> benches/../src/main.rs:22:4
+   |
+22 | fn main() -> io::Result<()> {
+   |    ^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: enum `AppState` is never used
+  --> benches/../src/app.rs:20:10
+   |
+20 | pub enum AppState {
+   |          ^^^^^^^^
+
+warning: struct `App` is never constructed
+  --> benches/../src/app.rs:25:12
+   |
+25 | pub struct App {
+   |            ^^^
+
+warning: multiple associated items are never used
+   --> benches/../src/app.rs:56:12
+    |
+ 55 | impl App {
+    | -------- associated items in this implementation
+ 56 |     pub fn new() -> Self {
+    |            ^^^
+...
+ 82 |     pub fn field_count(&self) -> usize {
+    |            ^^^^^^^^^^^
+...
+ 90 |     pub fn is_text_field(&self) -> bool {
+    |            ^^^^^^^^^^^^^
+...
+ 99 |     pub fn valid_charset(&self) -> &'static str {
+    |            ^^^^^^^^^^^^^
+...
+103 |     pub fn max_vanity_len(&self) -> usize {
+    |            ^^^^^^^^^^^^^^
+...
+107 |     pub fn validate(&mut self) -> Result<(), String> {
+    |            ^^^^^^^^
+...
+147 |     pub fn start_search(&mut self) {
+    |            ^^^^^^^^^^^^
+...
+218 |     pub fn stop_search(&mut self) {
+    |            ^^^^^^^^^^^
+...
+226 |     pub fn drain_matches(&mut self) {
+    |            ^^^^^^^^^^^^^
+
+warning: function `detect_optimal_threads` is never used
+   --> benches/../src/app.rs:263:8
+    |
+263 | pub fn detect_optimal_threads() -> usize {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handle_key_event` is never used
+   --> benches/../src/app.rs:284:8
+    |
+284 | pub fn handle_key_event(app: &mut App, key: event::KeyEvent) {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `handle_configuring_key` is never used
+   --> benches/../src/app.rs:318:4
+    |
+318 | fn handle_configuring_key(app: &mut App, key: event::KeyEvent) {
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handle_field_input` is never used
+   --> benches/../src/app.rs:349:4
+    |
+349 | fn handle_field_input(app: &mut App, key: event::KeyEvent) {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `handle_searching_key` is never used
+   --> benches/../src/app.rs:462:4
+    |
+462 | fn handle_searching_key(app: &mut App, key: event::KeyEvent) {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: type alias `MatchPayload` is never used
+  --> benches/../src/chains/mod.rs:16:10
+   |
+16 | pub type MatchPayload = (String, String, String, String);
+   |          ^^^^^^^^^^^^
+
+warning: associated items `LABEL`, `CHARSET`, `MAX_VANITY`, `encode_address`, `encode_secret`, and `matches_raw` are never used
+  --> benches/../src/chains/mod.rs:19:11
+   |
+18 | pub trait Chain: Send + Sync + 'static {
+   |           ----- associated items in this trait
+19 |     const LABEL: &'static str;
+   |           ^^^^^
+20 |     const CHARSET: &'static str;
+   |           ^^^^^^^
+21 |     const MAX_VANITY: usize;
+   |           ^^^^^^^^^^
+...
+27 |     fn encode_address(bytes: &Self::AddressBytes) -> String;
+   |        ^^^^^^^^^^^^^^
+28 |     fn encode_secret(raw: &Self::SecretRaw) -> String;
+   |        ^^^^^^^^^^^^^
+29 |     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool;
+   |        ^^^^^^^^^^^
+
+warning: enum `ChainKind` is never used
+  --> benches/../src/chains/mod.rs:35:10
+   |
+35 | pub enum ChainKind {
+   |          ^^^^^^^^^
+
+warning: methods `label`, `charset`, `max_vanity`, and `search` are never used
+  --> benches/../src/chains/mod.rs:44:12
+   |
+43 | impl ChainKind {
+   | -------------- methods in this implementation
+44 |     pub fn label(self) -> &'static str {
+   |            ^^^^^
+...
+53 |     pub fn charset(self) -> &'static str {
+   |            ^^^^^^^
+...
+62 |     pub fn max_vanity(self) -> usize {
+   |            ^^^^^^^^^^
+...
+71 |     pub fn search(
+   |            ^^^^^^
+
+warning: function `search` is never used
+  --> benches/../src/chains/mod.rs:88:8
+   |
+88 | pub fn search<C: Chain>(
+   |        ^^^^^^
+
+warning: function `expand_5bit` is never used
+  --> benches/../src/chains/bitcoin.rs:23:4
+   |
+23 | fn expand_5bit(bytes: &[u8; 20]) -> [u8; 32] {
+   |    ^^^^^^^^^^^
+
+warning: function `eip55_encode` is never used
+  --> benches/../src/chains/evm.rs:14:4
+   |
+14 | fn eip55_encode(addr: &[u8; 20]) -> [u8; 40] {
+   |    ^^^^^^^^^^^^
+
+warning: function `monero_base58_encode` is never used
+  --> benches/../src/chains/monero.rs:87:4
+   |
+87 | fn monero_base58_encode(data: &[u8]) -> String {
+   |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `mnemonic_to_signing_key` is never used
+  --> benches/../src/chains/ton_mnemonic.rs:86:8
+   |
+86 | pub fn mnemonic_to_signing_key(phrase: &str) -> SigningKey {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `MatchPosition` is never used
+ --> benches/../src/matcher.rs:5:10
+  |
+5 | pub enum MatchPosition {
+  |          ^^^^^^^^^^^^^
+
+warning: struct `Matcher` is never constructed
+  --> benches/../src/matcher.rs:11:12
+   |
+11 | pub struct Matcher {
+   |            ^^^^^^^
+
+warning: function `hex_prefix_to_bytes` is never used
+  --> benches/../src/matcher.rs:28:4
+   |
+28 | fn hex_prefix_to_bytes(hex: &str) -> (Vec<u8>, Option<u8>) {
+   |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `hex_suffix_to_bytes` is never used
+  --> benches/../src/matcher.rs:49:4
+   |
+49 | fn hex_suffix_to_bytes(hex: &str) -> (Vec<u8>, Option<u8>) {
+   |    ^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `matches_evm_raw`, and `matches_str` are never used
+   --> benches/../src/matcher.rs:68:12
+    |
+ 67 | impl Matcher {
+    | ------------ associated items in this implementation
+ 68 |     pub fn new(
+    |            ^^^
+...
+118 |     pub fn matches_evm_raw(&self, addr_bytes: &[u8; 20]) -> bool {
+    |            ^^^^^^^^^^^^^^^
+...
+154 |     pub fn matches_str(&self, address: &str) -> bool {
+    |            ^^^^^^^^^^^
+
+warning: function `ui` is never used
+  --> benches/../src/ui.rs:13:8
+   |
+13 | pub fn ui(f: &mut Frame, app: &App) {
+   |        ^^
+
+warning: function `render_banner` is never used
+  --> benches/../src/ui.rs:36:4
+   |
+36 | fn render_banner(f: &mut Frame, area: Rect) {
+   |    ^^^^^^^^^^^^^
+
+warning: function `render_left_panel` is never used
+  --> benches/../src/ui.rs:61:4
+   |
+61 | fn render_left_panel(f: &mut Frame, area: Rect, app: &App) {
+   |    ^^^^^^^^^^^^^^^^^
+
+warning: function `render_config_form` is never used
+  --> benches/../src/ui.rs:76:4
+   |
+76 | fn render_config_form(f: &mut Frame, area: Rect, app: &App) {
+   |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `render_stats` is never used
+   --> benches/../src/ui.rs:201:4
+    |
+201 | fn render_stats(f: &mut Frame, area: Rect, app: &App) {
+    |    ^^^^^^^^^^^^
+
+warning: function `render_key_hints` is never used
+   --> benches/../src/ui.rs:238:4
+    |
+238 | fn render_key_hints(f: &mut Frame, area: Rect, app: &App) {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `render_help_popup` is never used
+   --> benches/../src/ui.rs:250:4
+    |
+250 | fn render_help_popup(f: &mut Frame, area: Rect) {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: function `render_right_panel` is never used
+   --> benches/../src/ui.rs:300:4
+    |
+300 | fn render_right_panel(f: &mut Frame, area: Rect, app: &App) {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `render_match_table` is never used
+   --> benches/../src/ui.rs:324:4
+    |
+324 | fn render_match_table(f: &mut Frame, area: Rect, app: &App) {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `render_detail_view` is never used
+   --> benches/../src/ui.rs:368:4
+    |
+368 | fn render_detail_view(f: &mut Frame, area: Rect, app: &App) {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: `vanaddy` (bench "generation") generated 50 warnings (run `cargo fix --bench "generation"` to apply 17 suggestions)
+    Finished `bench` profile [optimized] target(s) in 23.08s
+     Running benches/generation.rs (target/release/deps/generation-085696063267e193)
+Gnuplot not found, using plotters backend
+Benchmarking solana_generate
+Benchmarking solana_generate: Warming up for 3.0000 s
+Benchmarking solana_generate: Collecting 100 samples in estimated 5.6522 s (10k iterations)
+Benchmarking solana_generate: Analyzing
+solana_generate         time:   [558.13 µs 570.61 µs 587.48 µs]
+Found 9 outliers among 100 measurements (9.00%)
+  8 (8.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking evm_generate
+Benchmarking evm_generate: Warming up for 3.0000 s
+Benchmarking evm_generate: Collecting 100 samples in estimated 6.5677 s (10k iterations)
+Benchmarking evm_generate: Analyzing
+evm_generate            time:   [642.11 µs 655.68 µs 673.44 µs]
+Found 8 outliers among 100 measurements (8.00%)
+  3 (3.00%) high mild
+  5 (5.00%) high severe
+
+Benchmarking bitcoin_generate
+Benchmarking bitcoin_generate: Warming up for 3.0000 s
+Benchmarking bitcoin_generate: Collecting 100 samples in estimated 6.4970 s (10k iterations)
+Benchmarking bitcoin_generate: Analyzing
+bitcoin_generate        time:   [636.04 µs 645.42 µs 657.51 µs]
+Found 8 outliers among 100 measurements (8.00%)
+  3 (3.00%) high mild
+  5 (5.00%) high severe
+
+Benchmarking ton/ton_generate
+Benchmarking ton/ton_generate: Warming up for 3.0000 s
+Benchmarking ton/ton_generate: Collecting 10 samples in estimated 5.6883 s (110 iterations)
+Benchmarking ton/ton_generate: Analyzing
+ton/ton_generate        time:   [47.923 ms 50.982 ms 54.426 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+
+Benchmarking monero_generate
+Benchmarking monero_generate: Warming up for 3.0000 s
+Benchmarking monero_generate: Collecting 100 samples in estimated 5.0221 s (146k iterations)
+Benchmarking monero_generate: Analyzing
+monero_generate         time:   [34.378 µs 35.147 µs 36.218 µs]
+Found 6 outliers among 100 measurements (6.00%)
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+
