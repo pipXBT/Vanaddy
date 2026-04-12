@@ -12,7 +12,7 @@ EVM addresses are chain-agnostic — the same vanity address works on Ethereum, 
 - **EVM** — secp256k1 / `0x` + hex (Ethereum, Base, Arbitrum, Optimism, Polygon, BSC, Avalanche, HyperEVM, etc.)
 - **Bitcoin** — secp256k1 / Native SegWit Bech32 (`bc1q...`); vanity applies after the `bc1q` prefix
 - **TON** — Ed25519 / user-friendly Base64 (`UQ...`, non-bounceable mainnet); vanity applies from char 3 onward
-  - Generates **wallet-v3r2** addresses using proper TVM cell hashing (per TON whitepaper §3.1.5); verified against Tonkeeper's own computation via pinned round-trip test vector. Tonkeeper's current default is W5, so users should switch to v3R2 in Tonkeeper's "Versions" screen when importing vanaddy-generated mnemonics.
+  - Generates **wallet-v5r1 (W5)** addresses using proper TVM cell hashing (per TON whitepaper §3.1.5); verified against Tonkeeper's own computation via pinned round-trip test vector. W5 is Tonkeeper's current default wallet version, so no "Versions" switch is needed when importing vanaddy-generated mnemonics.
 - **Monero** — Ed25519 / Base58 (`4...`); prefix matching only, and generation is noticeably slower (crypto intrinsic)
 
 ## Features
@@ -134,7 +134,7 @@ Each additional character in your vanity string makes the search exponentially h
 | Solana | Ed25519 | Base58 (32-44 chars) | BIP-39 seed, first 32 bytes | Phantom, Solflare |
 | EVM | secp256k1 | Hex, 0x-prefixed (42 chars) | BIP-44 `m/44'/60'/0'/0/0` | MetaMask, Rabby, any EVM wallet |
 | Bitcoin | secp256k1 | Native SegWit Bech32 (`bc1q...`) | BIP-84 `m/84'/0'/0'/0/0` | Most modern BTC wallets |
-| TON | Ed25519 | User-friendly Base64 (`UQ...`) | TON 24-word mnemonic, Ed25519, wallet-v3r2 | Tonkeeper (switch to v3R2 in Versions screen) |
+| TON | Ed25519 | User-friendly Base64 (`UQ...`) | TON 24-word mnemonic, Ed25519, wallet-v5r1 (W5) | Tonkeeper (default "W5" version) |
 | Monero | Ed25519 | Base58 (`4...`) | Monero spend/view keys | Official Monero wallets (prefix match only) |
 
 ## License

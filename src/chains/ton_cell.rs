@@ -137,6 +137,129 @@ pub fn wallet_v3r2_state_init(pubkey: &[u8; 32], subwallet_id: u32) -> Cell {
     }
 }
 
+/// Wallet-v5r1 (W5) code cell — constant across all W5 wallets.
+///
+/// Root cell hash of the W5 code BOC published in `@ton/ton`
+/// (`src/wallets/v5r1/WalletContractV5R1.ts`); verified empirically against
+/// Tonkeeper's W5 address for a known mnemonic.
+///
+/// Unlike v3r2 (flat code cell), the W5 code cell is a tree of depth 6, so
+/// `max_depth` is non-zero here.
+pub const WALLET_V5R1_CODE: CellRef = CellRef {
+    hash: [
+        0x20, 0x83, 0x4b, 0x7b, 0x72, 0xb1, 0x12, 0x14,
+        0x7e, 0x1b, 0x2f, 0xb4, 0x57, 0xb8, 0x4e, 0x74,
+        0xd1, 0xa3, 0x0f, 0x04, 0xf7, 0x37, 0xd4, 0xf6,
+        0x2a, 0x66, 0x8e, 0x95, 0x52, 0xd2, 0xb7, 0x2f,
+    ],
+    max_depth: 6,
+};
+
+/// Wallet-v5r1 wallet_id for mainnet (global_id = -239), workchain 0,
+/// wallet_version 0, subwalletNumber 0.
+///
+/// Per `@ton/ton`'s `WalletV5R1WalletId`, `wallet_id = global_id ^ context_id`
+/// where the client context packs
+/// `[has_client_context=1 : 1][workchain : i8][wallet_version=0 : u8][subwallet=0 : u15]`
+/// into a signed 32-bit int. For mainnet defaults, that evaluates to
+/// `0x7FFFFF11` = 2147483409.
+pub const W5_MAINNET_WALLET_ID: i32 = 0x7FFF_FF11;
+
+/// Wallet-v5r1 (W5) data cell:
+/// `is_signature_allowed(1=true) || seqno(u32=0) || wallet_id(i32) ||
+///  pubkey(u256) || extensions_dict(1=empty)`.
+///
+/// Total 322 bits, packed MSB-first. Field widths are irregular (not byte-
+/// aligned) because of the single-bit sig flag at the start and the single-bit
+/// plugin-dict flag at the end, so we go through a tiny bit-packer rather than
+/// try to concatenate byte-aligned chunks.
+pub fn wallet_v5r1_data_cell(pubkey: &[u8; 32], wallet_id: i32) -> Cell {
+    fn push_bits(
+        buf: &mut Vec<u8>,
+        pending: &mut u64,
+        pending_bits: &mut u32,
+        value: u64,
+        num_bits: u32,
+    ) {
+        // Flush out whole bytes greedily before adding more — keeps `pending`
+        // below 64 bits at all times and sidesteps the `x << 64` UB on u64
+        // when num_bits can be 64 (happens for the pubkey chunks).
+        debug_assert!(num_bits <= 64);
+        let mask = if num_bits >= 64 { u64::MAX } else { (1u64 << num_bits) - 1 };
+        let value = value & mask;
+
+        // Feed the new bits in, one whole-byte flush at a time so we can keep
+        // the working window ≤ 64 bits.
+        let mut remaining = num_bits;
+        let mut val = value;
+        while remaining > 0 {
+            // How many of the new bits can we take without overflowing 64?
+            let take = remaining.min(64 - *pending_bits);
+            let chunk = (val >> (remaining - take)) & if take >= 64 { u64::MAX } else { (1u64 << take) - 1 };
+            *pending = (*pending << take) | chunk;
+            *pending_bits += take;
+            remaining -= take;
+            val &= if remaining >= 64 { u64::MAX } else { (1u64 << remaining) - 1 };
+            // Drain whole bytes.
+            while *pending_bits >= 8 {
+                let shift = *pending_bits - 8;
+                let byte = ((*pending >> shift) & 0xff) as u8;
+                buf.push(byte);
+                *pending &= if shift == 0 { 0 } else { (1u64 << shift) - 1 };
+                *pending_bits -= 8;
+            }
+        }
+    }
+
+    let mut buf: Vec<u8> = Vec::with_capacity(41);
+    let mut pending: u64 = 0;
+    let mut pending_bits: u32 = 0;
+
+    push_bits(&mut buf, &mut pending, &mut pending_bits, 1, 1); // is_signature_allowed = true
+    push_bits(&mut buf, &mut pending, &mut pending_bits, 0u64, 32); // seqno = 0
+    push_bits(
+        &mut buf,
+        &mut pending,
+        &mut pending_bits,
+        wallet_id as u32 as u64,
+        32,
+    );
+    // pubkey 256 bits as 4×64-bit chunks (big-endian).
+    for chunk in pubkey.chunks(8) {
+        let mut x: u64 = 0;
+        for &b in chunk {
+            x = (x << 8) | b as u64;
+        }
+        push_bits(&mut buf, &mut pending, &mut pending_bits, x, 64);
+    }
+    push_bits(&mut buf, &mut pending, &mut pending_bits, 0u64, 1); // extensions dict = empty
+
+    // 322 bits pushed → pending_bits = 2. Stash the leftover as the high bits
+    // of a final byte; Cell::repr() will handle augmentation using bit_len=322.
+    if pending_bits > 0 {
+        let byte = (pending << (8 - pending_bits)) as u8;
+        buf.push(byte);
+    }
+
+    Cell {
+        data: buf,
+        bit_len: 322,
+        refs: vec![],
+    }
+}
+
+/// Wallet-v5r1 (W5) state_init. Same TL-B header as v3r2 (no split_depth,
+/// no special, has code, has data, no library) — the difference is entirely
+/// in the code cell and the data cell layout.
+pub fn wallet_v5r1_state_init(pubkey: &[u8; 32], wallet_id: i32) -> Cell {
+    let data_cell = wallet_v5r1_data_cell(pubkey, wallet_id);
+    Cell {
+        data: vec![0b0011_0000],
+        bit_len: 5,
+        refs: vec![WALLET_V5R1_CODE, data_cell.as_ref()],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,5 +339,52 @@ mod tests {
         )
         .unwrap();
         assert_eq!(&hash[..], &expected[..]);
+    }
+
+    /// Self-pinned data-cell hash for W5 with an all-zero pubkey and the
+    /// mainnet default wallet_id. Purely a function of this file's W5 data-cell
+    /// encoding: catches any accidental regression in the 322-bit bit-packer
+    /// (sig-flag position, seqno width, wallet_id endianness, pubkey byte
+    /// order, plugin-dict bit). Verified against `tonsdk` independently.
+    #[test]
+    fn wallet_v5r1_data_cell_zero_pubkey_pins_hash() {
+        let pubkey = [0u8; 32];
+        let data = wallet_v5r1_data_cell(&pubkey, W5_MAINNET_WALLET_ID);
+        assert_eq!(data.bit_len, 322);
+        assert_eq!(data.refs.len(), 0);
+        let hash = data.hash();
+        let expected = hex::decode(
+            "0f80a4e3e2630cba3f6f37d12dbcf6afaaa015cd889eeb681a334a4fbe84cf31",
+        )
+        .unwrap();
+        assert_eq!(&hash[..], &expected[..]);
+    }
+
+    /// W5 (v5r1) Tonkeeper round-trip pin. For the canonical mnemonic we
+    /// use for v3r2 round-trips, Tonkeeper's W5 tab shows the address
+    /// `UQAkFCMtkN0Q1TNP6Gk9SqYWsBFc6Aglwckj6ES4AeBEzWja`. Its account_id
+    /// (bytes [2..34] of the base64url-decoded address) must equal the hash
+    /// of our W5 state_init cell. If this fails, W5 derivation is wrong and
+    /// no W5-flavored address we produce should be trusted.
+    #[test]
+    fn wallet_v5r1_matches_tonkeeper_vector() {
+        use super::super::ton_mnemonic::mnemonic_to_signing_key;
+        let phrase = "cloth orbit much expose crater arrow success drop verify then letter song field million quantum fame ankle stereo quote rhythm believe farm property tube";
+        let sk = mnemonic_to_signing_key(phrase);
+        let pubkey: [u8; 32] = sk.verifying_key().to_bytes();
+
+        let state = wallet_v5r1_state_init(&pubkey, W5_MAINNET_WALLET_ID);
+        let hash = state.hash();
+
+        let expected = hex::decode(
+            "2414232d90dd10d5334fe8693d4aa616b0115ce80825c1c923e844b801e044cd",
+        )
+        .unwrap();
+        assert_eq!(
+            &hash[..],
+            &expected[..],
+            "W5 state_init hash mismatch — derived pubkey = {} — if wallet_id or code hash drifted this will flag it",
+            hex::encode(&pubkey),
+        );
     }
 }

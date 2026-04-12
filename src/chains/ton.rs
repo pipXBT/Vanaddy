@@ -1,12 +1,9 @@
 use super::super::matcher::Matcher;
-use super::ton_cell::wallet_v3r2_state_init;
+use super::ton_cell::{wallet_v5r1_state_init, W5_MAINNET_WALLET_ID};
 use super::ton_mnemonic::generate_ton_wallet;
 use super::Chain;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use ed25519_dalek::SigningKey;
-
-/// Standard wallet-v3r2 subwallet_id used by Tonkeeper, MyTonWallet, and @ton/crypto.
-const DEFAULT_SUBWALLET_ID: u32 = 698983191;
 
 pub struct Ton;
 
@@ -26,18 +23,21 @@ fn crc16_xmodem(data: &[u8]) -> u16 {
     crc
 }
 
-/// Compute the wallet-v3r2 account_id for a pubkey via proper TVM cell hashing.
+/// Compute the wallet-v5r1 (W5) account_id for a pubkey via proper TVM cell
+/// hashing.
 ///
 /// The account_id is the representation hash of the StateInit cell:
 /// `SHA-256(refs_desc || bits_desc || data || code_depth || data_depth || code_hash || data_hash)`,
-/// where the code ref is wallet-v3r2's constant code cell and the data ref
-/// is `seqno(0) || subwallet_id || pubkey` packed into 320 bits.
+/// where the code ref is wallet-v5r1's constant code cell and the data ref
+/// is `sig_allowed(1) || seqno(u32=0) || wallet_id(i32) || pubkey(u256) ||
+/// extensions_dict(1=empty)` packed into 322 bits.
 ///
-/// Verified against Tonkeeper's own computation: for the mnemonic used in
-/// `ton_tonkeeper_round_trip_vector`, this function produces the exact
-/// `UQBoiu...` address Tonkeeper displays for the v3r2 wallet version.
+/// W5 is now Tonkeeper's default wallet version. Verified against Tonkeeper's
+/// own computation in `ton_tonkeeper_round_trip_vector`: for the canonical
+/// mnemonic that function produces the exact `UQAkFC...` W5 address Tonkeeper
+/// displays.
 fn account_id_from_pubkey(pubkey: &[u8; 32]) -> [u8; 32] {
-    wallet_v3r2_state_init(pubkey, DEFAULT_SUBWALLET_ID).hash()
+    wallet_v5r1_state_init(pubkey, W5_MAINNET_WALLET_ID).hash()
 }
 
 impl Chain for Ton {
@@ -196,14 +196,14 @@ mod tests {
     }
 
     /// Tonkeeper round-trip: for this 24-word TON-native mnemonic, Tonkeeper's
-    /// "Versions" screen shows the v3R2 address `UQBoiu...`. vanaddy MUST
-    /// produce the same address; if this test fails, funds sent to a
-    /// displayed vanity address would go to a wallet nobody controls.
+    /// "Versions" screen shows the W5 address `UQAkFC...` as the default.
+    /// vanaddy MUST produce the same address; if this test fails, funds sent
+    /// to a displayed vanity address would go to a wallet nobody controls.
     ///
     /// This is the correctness anchor for the entire TVM cell-hashing pipeline:
     /// if this passes, mnemonic derivation, data-cell layout, state_init
     /// encoding, code-cell constants, and base64 address formatting are all
-    /// verified against Tonkeeper's own computation.
+    /// verified against Tonkeeper's own W5 (v5r1) computation.
     #[test]
     fn ton_tonkeeper_round_trip_vector() {
         use super::super::ton_mnemonic::mnemonic_to_signing_key;
@@ -223,6 +223,6 @@ mod tests {
         addr[35] = crc as u8;
 
         let encoded = Ton::encode_address(&addr);
-        assert_eq!(encoded, "UQBoiuZtszIjvz096gjkBAaEfTKBCEsWoT13YLXjo1EFYZXc");
+        assert_eq!(encoded, "UQAkFCMtkN0Q1TNP6Gk9SqYWsBFc6Aglwckj6ES4AeBEzWja");
     }
 }
