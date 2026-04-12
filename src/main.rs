@@ -19,7 +19,6 @@ use sha3::{Digest, Keccak256};
 use std::{
     fs::OpenOptions,
     io::{self, stdout},
-    num::NonZeroU32,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc,
@@ -27,22 +26,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// BIP-39 seed derivation using ring's ARM64-optimized PBKDF2-HMAC-SHA512.
-/// Replaces tiny-bip39's Seed::new() which uses a slower pure-Rust PBKDF2.
-pub fn derive_seed(mnemonic: &Mnemonic) -> [u8; 64] {
-    const PBKDF2_ROUNDS: u32 = 2048;
-    let password = mnemonic.phrase().as_bytes();
-    let salt = b"mnemonic"; // no passphrase
-    let mut seed = [0u8; 64];
-    ring::pbkdf2::derive(
-        ring::pbkdf2::PBKDF2_HMAC_SHA512,
-        NonZeroU32::new(PBKDF2_ROUNDS).unwrap(),
-        salt,
-        password,
-        &mut seed,
-    );
-    seed
-}
+mod seed;
+use seed::derive_seed;
 
 // ---------------------------------------------------------------------------
 // Chain abstraction
