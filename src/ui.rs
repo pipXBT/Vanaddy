@@ -1,4 +1,5 @@
 use super::app::{App, AppState};
+use super::chains::ChainKind;
 use super::matcher::MatchPosition;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -42,7 +43,7 @@ fn render_banner(f: &mut Frame, area: Rect) {
         Line::from("  ╚═══╝  ╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝╚═════╝ ╚═════╝    ╚═╝   "),
         Line::from(""),
         Line::from(Span::styled(
-            "v0.5 — Solana & EVM Vanity Address Generator",
+            "v0.6 — Multi-Chain Vanity Address Generator",
             Style::default().fg(Color::Cyan),
         )),
     ];
@@ -167,6 +168,20 @@ fn render_config_form(f: &mut Frame, area: Rect, app: &App) {
         ]));
     }
 
+    let hint = match app.chain {
+        ChainKind::Solana | ChainKind::Evm => None,
+        ChainKind::Bitcoin => Some("Bitcoin: vanity applies after 'bc1q'"),
+        ChainKind::Ton => Some("TON: vanity applies after 'EQ' (chars 3+)"),
+        ChainKind::Monero => Some("Monero: vanity applies after leading '4'"),
+    };
+    if let Some(h) = hint {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(" {}", h),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
     if let Some(ref err) = app.error_message {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -235,7 +250,7 @@ fn render_key_hints(f: &mut Frame, area: Rect, app: &App) {
 fn render_help_popup(f: &mut Frame, area: Rect) {
     // Center a popup ~60x18
     let popup_width = 56.min(area.width.saturating_sub(4));
-    let popup_height = 20.min(area.height.saturating_sub(4));
+    let popup_height = 26.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(popup_width)) / 2;
     let y = (area.height.saturating_sub(popup_height)) / 2;
     let popup_area = Rect::new(x, y, popup_width, popup_height);
@@ -265,6 +280,12 @@ fn render_help_popup(f: &mut Frame, area: Rect) {
         Line::from("  Ctrl+C       Stop search"),
         Line::from("  q            Quit (not in text fields)"),
         Line::from("  h            Toggle this help"),
+        Line::from(""),
+        Line::from(Span::styled(" Supported Chains", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from("  1=Solana  2=EVM  3=Bitcoin"),
+        Line::from("  4=TON     5=Monero"),
+        Line::from("  Monero generation is slower (crypto intrinsic)"),
     ];
 
     let block = Block::default()
@@ -325,7 +346,7 @@ fn render_match_table(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    let widths = [Constraint::Length(4), Constraint::Length(8), Constraint::Min(20)];
+    let widths = [Constraint::Length(4), Constraint::Length(10), Constraint::Min(20)];
 
     let table = Table::new(rows, widths)
         .header(header)

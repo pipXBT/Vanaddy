@@ -1,14 +1,23 @@
 # Vanaddy
 
-A multi-threaded vanity wallet address generator for **Solana** and **EVM** chains, written in Rust.
+A multi-threaded, multi-chain vanity wallet address generator written in Rust.
 
-Generates BIP-39 seed phrases and derives keypairs using standard wallet-compatible paths, so found addresses can be imported directly into Phantom (Solana), MetaMask, or any EVM-compatible wallet.
+Generates BIP-39 seed phrases and derives keypairs using standard wallet-compatible paths, so found addresses can be imported directly into Phantom (Solana), MetaMask (EVM), and other supported wallets.
 
 EVM addresses are chain-agnostic — the same vanity address works on Ethereum, Base, Arbitrum, Optimism, Polygon, BSC, Avalanche, HyperEVM, and any other EVM chain.
 
+## Supported Chains
+
+- **Solana** — Ed25519 / Base58
+- **EVM** — secp256k1 / `0x` + hex (Ethereum, Base, Arbitrum, Optimism, Polygon, BSC, Avalanche, HyperEVM, etc.)
+- **Bitcoin** — secp256k1 / Native SegWit Bech32 (`bc1q...`); vanity applies after the `bc1q` prefix
+- **TON** — Ed25519 / user-friendly Base64 (`EQ...`); vanity applies from char 3 onward
+  - Note: uses a simplified state-init and may not match Tonkeeper exactly — addresses are internally consistent but verify before funding
+- **Monero** — Ed25519 / Base58 (`4...`); prefix matching only, and generation is noticeably slower (crypto intrinsic)
+
 ## Features
 
-- **Multi-chain**: Solana (Ed25519) and EVM (secp256k1) — one tool, all EVM networks
+- **Multi-chain**: Solana, EVM, Bitcoin, TON, and Monero — one tool
 - **Flexible matching**: Starts with, ends with, or starts _and_ ends with
 - **Case-sensitive or insensitive** search
 - **BIP-39 seed phrases**: 12-word mnemonic output, compatible with Phantom and MetaMask
@@ -41,7 +50,7 @@ The TUI launches with a config form on the left and results panel on the right:
 
 ```
 ┌──────────────────── Vanaddy ─────────────────────┐
-│         VANADDY v0.5 — Solana & EVM              │
+│         VANADDY v0.6 — Multi-Chain               │
 ├──────────┬───────────────────────────────────────┤
 │ Config   │ Matches                               │
 │          │ #  Chain   Address                    │
@@ -124,6 +133,9 @@ Each additional character in your vanity string makes the search exponentially h
 |-------|----------|---------------|------------|-----------------|
 | Solana | Ed25519 | Base58 (32-44 chars) | BIP-39 seed, first 32 bytes | Phantom, Solflare |
 | EVM | secp256k1 | Hex, 0x-prefixed (42 chars) | BIP-44 `m/44'/60'/0'/0/0` | MetaMask, Rabby, any EVM wallet |
+| Bitcoin | secp256k1 | Native SegWit Bech32 (`bc1q...`) | BIP-84 `m/84'/0'/0'/0/0` | Most modern BTC wallets |
+| TON | Ed25519 | User-friendly Base64 (`EQ...`) | BIP-39 seed, Ed25519 | Tonkeeper-compatible (verify before funding) |
+| Monero | Ed25519 | Base58 (`4...`) | Monero spend/view keys | Official Monero wallets (prefix match only) |
 
 ## License
 
