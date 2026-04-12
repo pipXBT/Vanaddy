@@ -1,0 +1,292 @@
+ Downloading crates ...
+  Downloaded same-file v1.0.6
+  Downloaded anstyle v1.0.14
+  Downloaded ciborium-io v0.2.2
+  Downloaded plotters-backend v0.3.7
+  Downloaded cast v0.3.0
+  Downloaded is-terminal v0.4.17
+  Downloaded plotters-svg v0.3.7
+  Downloaded tinytemplate v1.2.1
+  Downloaded walkdir v2.5.0
+  Downloaded oorandom v11.1.5
+  Downloaded half v2.7.1
+  Downloaded clap v4.6.0
+  Downloaded zerocopy-derive v0.8.27
+  Downloaded criterion v0.5.1
+  Downloaded anes v0.1.6
+  Downloaded criterion-plot v0.5.0
+  Downloaded clap_lex v1.1.0
+  Downloaded plotters v0.3.7
+  Downloaded clap_builder v4.6.0
+  Downloaded ciborium-ll v0.2.2
+  Downloaded ciborium v0.2.2
+  Downloaded zerocopy v0.8.27
+   Compiling serde_core v1.0.228
+   Compiling serde v1.0.228
+   Compiling memchr v2.7.1
+   Compiling zerocopy v0.8.27
+   Compiling zerocopy-derive v0.8.27
+   Compiling zmij v1.0.21
+   Compiling autocfg v1.5.0
+   Compiling serde_json v1.0.149
+   Compiling num-traits v0.2.19
+   Compiling regex-syntax v0.8.10
+   Compiling anstyle v1.0.14
+   Compiling ciborium-io v0.2.2
+   Compiling plotters-backend v0.3.7
+   Compiling clap_lex v1.1.0
+   Compiling csv-core v0.1.11
+   Compiling clap_builder v4.6.0
+   Compiling plotters-svg v0.3.7
+   Compiling itertools v0.10.5
+   Compiling cast v0.3.0
+   Compiling same-file v1.0.6
+   Compiling walkdir v2.5.0
+   Compiling is-terminal v0.4.17
+   Compiling anes v0.1.6
+   Compiling oorandom v11.1.5
+   Compiling plotters v0.3.7
+   Compiling regex-automata v0.4.14
+   Compiling criterion-plot v0.5.0
+   Compiling half v2.7.1
+   Compiling ciborium-ll v0.2.2
+   Compiling regex v1.12.3
+   Compiling ciborium v0.2.2
+   Compiling csv v1.3.0
+   Compiling tinytemplate v1.2.1
+   Compiling libsecp256k1 v0.6.0
+   Compiling clap v4.6.0
+   Compiling criterion v0.5.1
+   Compiling vanaddy v0.5.0 (/Users/shawnhopkinson/PipXBT_Repo)
+warning: enum `Chain` is never used
+  --> benches/../src/main.rs:52:6
+   |
+52 | enum Chain {
+   |      ^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: enum `MatchPosition` is never used
+   --> benches/../src/main.rs:110:6
+    |
+110 | enum MatchPosition {
+    |      ^^^^^^^^^^^^^
+
+warning: struct `Matcher` is never constructed
+   --> benches/../src/main.rs:116:8
+    |
+116 | struct Matcher {
+    |        ^^^^^^^
+
+warning: function `hex_prefix_to_bytes` is never used
+   --> benches/../src/main.rs:133:4
+    |
+133 | fn hex_prefix_to_bytes(hex: &str) -> (Vec<u8>, Option<u8>) {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `hex_suffix_to_bytes` is never used
+   --> benches/../src/main.rs:154:4
+    |
+154 | fn hex_suffix_to_bytes(hex: &str) -> (Vec<u8>, Option<u8>) {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `matches_raw`, `matches_evm_raw`, and `matches_str` are never used
+   --> benches/../src/main.rs:173:8
+    |
+172 | impl Matcher {
+    | ------------ associated items in this implementation
+173 |     fn new(
+    |        ^^^
+...
+215 |     fn matches_raw(&self, pubkey_bytes: &[u8]) -> bool {
+    |        ^^^^^^^^^^^
+...
+224 |     fn matches_evm_raw(&self, addr_bytes: &[u8; 20]) -> bool {
+    |        ^^^^^^^^^^^^^^^
+...
+259 |     fn matches_str(&self, address: &str) -> bool {
+    |        ^^^^^^^^^^^
+
+warning: type alias `MatchPayload` is never used
+   --> benches/../src/main.rs:293:6
+    |
+293 | type MatchPayload = (String, String, String, String);
+    |      ^^^^^^^^^^^^
+
+warning: enum `AppState` is never used
+   --> benches/../src/main.rs:300:6
+    |
+300 | enum AppState {
+    |      ^^^^^^^^
+
+warning: struct `App` is never constructed
+   --> benches/../src/main.rs:305:8
+    |
+305 | struct App {
+    |        ^^^
+
+warning: multiple associated items are never used
+   --> benches/../src/main.rs:333:8
+    |
+332 | impl App {
+    | -------- associated items in this implementation
+333 |     fn new() -> Self {
+    |        ^^^
+...
+357 |     fn field_count(&self) -> usize {
+    |        ^^^^^^^^^^^
+...
+365 |     fn is_text_field(&self) -> bool {
+    |        ^^^^^^^^^^^^^
+...
+374 |     fn valid_charset(&self) -> &'static str {
+    |        ^^^^^^^^^^^^^
+...
+381 |     fn max_vanity_len(&self) -> usize {
+    |        ^^^^^^^^^^^^^^
+...
+388 |     fn validate(&self) -> Result<(), String> {
+    |        ^^^^^^^^
+...
+427 |     fn start_search(&mut self) {
+    |        ^^^^^^^^^^^^
+...
+483 |     fn stop_search(&mut self) {
+    |        ^^^^^^^^^^^
+...
+489 |     fn drain_matches(&mut self) {
+    |        ^^^^^^^^^^^^^
+
+warning: function `ui` is never used
+   --> benches/../src/main.rs:511:4
+    |
+511 | fn ui(f: &mut Frame, app: &App) {
+    |    ^^
+
+warning: function `render_banner` is never used
+   --> benches/../src/main.rs:534:4
+    |
+534 | fn render_banner(f: &mut Frame, area: Rect) {
+    |    ^^^^^^^^^^^^^
+
+warning: function `render_left_panel` is never used
+   --> benches/../src/main.rs:559:4
+    |
+559 | fn render_left_panel(f: &mut Frame, area: Rect, app: &App) {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: function `render_config_form` is never used
+   --> benches/../src/main.rs:574:4
+    |
+574 | fn render_config_form(f: &mut Frame, area: Rect, app: &App) {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `render_stats` is never used
+   --> benches/../src/main.rs:688:4
+    |
+688 | fn render_stats(f: &mut Frame, area: Rect, app: &App) {
+    |    ^^^^^^^^^^^^
+
+warning: function `render_key_hints` is never used
+   --> benches/../src/main.rs:725:4
+    |
+725 | fn render_key_hints(f: &mut Frame, area: Rect, app: &App) {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `render_help_popup` is never used
+   --> benches/../src/main.rs:737:4
+    |
+737 | fn render_help_popup(f: &mut Frame, area: Rect) {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: function `render_right_panel` is never used
+   --> benches/../src/main.rs:781:4
+    |
+781 | fn render_right_panel(f: &mut Frame, area: Rect, app: &App) {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `render_match_table` is never used
+   --> benches/../src/main.rs:805:4
+    |
+805 | fn render_match_table(f: &mut Frame, area: Rect, app: &App) {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `render_detail_view` is never used
+   --> benches/../src/main.rs:849:4
+    |
+849 | fn render_detail_view(f: &mut Frame, area: Rect, app: &App) {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `handle_key_event` is never used
+   --> benches/../src/main.rs:895:4
+    |
+895 | fn handle_key_event(app: &mut App, key: event::KeyEvent) {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `handle_configuring_key` is never used
+   --> benches/../src/main.rs:929:4
+    |
+929 | fn handle_configuring_key(app: &mut App, key: event::KeyEvent) {
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `handle_field_input` is never used
+   --> benches/../src/main.rs:960:4
+    |
+960 | fn handle_field_input(app: &mut App, key: event::KeyEvent) {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `handle_searching_key` is never used
+    --> benches/../src/main.rs:1058:4
+     |
+1058 | fn handle_searching_key(app: &mut App, key: event::KeyEvent) {
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `search_solana_raw` is never used
+    --> benches/../src/main.rs:1089:4
+     |
+1089 | fn search_solana_raw(
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: function `search_evm_raw` is never used
+    --> benches/../src/main.rs:1135:4
+     |
+1135 | fn search_evm_raw(
+     |    ^^^^^^^^^^^^^^
+
+warning: function `detect_optimal_threads` is never used
+    --> benches/../src/main.rs:1154:4
+     |
+1154 | fn detect_optimal_threads() -> usize {
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `main` is never used
+    --> benches/../src/main.rs:1175:4
+     |
+1175 | fn main() -> io::Result<()> {
+     |    ^^^^
+
+warning: `vanaddy` (bench "generation") generated 28 warnings
+    Finished `bench` profile [optimized] target(s) in 48.42s
+     Running benches/generation.rs (target/release/deps/generation-01f84e36ea94d8bb)
+Gnuplot not found, using plotters backend
+Benchmarking solana_generate
+Benchmarking solana_generate: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 7.6s, enable flat sampling, or reduce sample count to 50.
+Benchmarking solana_generate: Collecting 100 samples in estimated 7.5975 s (5050 iterations)
+Benchmarking solana_generate: Analyzing
+solana_generate         time:   [1.4398 ms 1.5122 ms 1.5910 ms]
+Found 8 outliers among 100 measurements (8.00%)
+  4 (4.00%) high mild
+  4 (4.00%) high severe
+
+Benchmarking evm_generate
+Benchmarking evm_generate: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 9.1s, enable flat sampling, or reduce sample count to 50.
+Benchmarking evm_generate: Collecting 100 samples in estimated 9.0712 s (5050 iterations)
+Benchmarking evm_generate: Analyzing
+evm_generate            time:   [1.6797 ms 1.7891 ms 1.9037 ms]
+Found 5 outliers among 100 measurements (5.00%)
+  5 (5.00%) high mild
+

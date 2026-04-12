@@ -29,7 +29,7 @@ use std::{
 
 /// BIP-39 seed derivation using ring's ARM64-optimized PBKDF2-HMAC-SHA512.
 /// Replaces tiny-bip39's Seed::new() which uses a slower pure-Rust PBKDF2.
-fn derive_seed(mnemonic: &Mnemonic) -> [u8; 64] {
+pub fn derive_seed(mnemonic: &Mnemonic) -> [u8; 64] {
     const PBKDF2_ROUNDS: u32 = 2048;
     let password = mnemonic.phrase().as_bytes();
     let salt = b"mnemonic"; // no passphrase
@@ -59,7 +59,7 @@ enum Chain {
 // ---------------------------------------------------------------------------
 
 /// BIP-32 child key derivation for secp256k1 (hardened and normal).
-fn bip32_derive_evm_key(seed: &[u8]) -> libsecp256k1::SecretKey {
+pub fn bip32_derive_evm_key(seed: &[u8]) -> libsecp256k1::SecretKey {
     // Master key: HMAC-SHA512("Bitcoin seed", seed)
     let master_key = hmac::Key::new(hmac::HMAC_SHA512, b"Bitcoin seed");
     let result = hmac::sign(&master_key, seed);
@@ -1076,7 +1076,7 @@ fn handle_searching_key(app: &mut App, key: event::KeyEvent) {
 }
 
 /// Generate a Solana keypair returning raw pubkey bytes — only base58-encode on match.
-fn generate_solana_raw() -> ([u8; 32], SigningKey, String) {
+pub fn generate_solana_raw() -> ([u8; 32], SigningKey, String) {
     let mnemonic = Mnemonic::new(MnemonicType::Words12, Language::English);
     let seed_bytes = derive_seed(&mnemonic);
     let mut key_bytes = [0u8; 32];
@@ -1117,7 +1117,7 @@ fn search_solana_raw(
 }
 
 /// Generate an EVM address as raw 20 bytes — only format to hex on match.
-fn generate_evm_raw() -> ([u8; 20], libsecp256k1::SecretKey, String) {
+pub fn generate_evm_raw() -> ([u8; 20], libsecp256k1::SecretKey, String) {
     let mnemonic = Mnemonic::new(MnemonicType::Words12, Language::English);
     let seed_bytes = derive_seed(&mnemonic);
     let secret_key = bip32_derive_evm_key(&seed_bytes);
