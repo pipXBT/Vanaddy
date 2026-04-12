@@ -16,6 +16,9 @@ num_cpus = "1.16"
 ring = "0.17"
 ratatui = "0.29"
 crossterm = "0.28"
+ripemd = "0.1"
+bech32 = "0.9"
+sha2 = "0.10"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

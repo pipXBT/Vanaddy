@@ -1,3 +1,4 @@
+pub mod bitcoin;
 pub mod evm;
 pub mod solana;
 
@@ -29,6 +30,7 @@ pub trait Chain: Send + Sync + 'static {
 pub enum ChainKind {
     Solana,
     Evm,
+    Bitcoin,
 }
 
 impl ChainKind {
@@ -36,18 +38,21 @@ impl ChainKind {
         match self {
             Self::Solana => solana::Solana::LABEL,
             Self::Evm => evm::Evm::LABEL,
+            Self::Bitcoin => bitcoin::Bitcoin::LABEL,
         }
     }
     pub fn charset(self) -> &'static str {
         match self {
             Self::Solana => solana::Solana::CHARSET,
             Self::Evm => evm::Evm::CHARSET,
+            Self::Bitcoin => bitcoin::Bitcoin::CHARSET,
         }
     }
     pub fn max_vanity(self) -> usize {
         match self {
             Self::Solana => solana::Solana::MAX_VANITY,
             Self::Evm => evm::Evm::MAX_VANITY,
+            Self::Bitcoin => bitcoin::Bitcoin::MAX_VANITY,
         }
     }
     pub fn search(
@@ -60,6 +65,7 @@ impl ChainKind {
         match self {
             Self::Solana => search::<solana::Solana>(matcher, stop, counter, tx),
             Self::Evm => search::<evm::Evm>(matcher, stop, counter, tx),
+            Self::Bitcoin => search::<bitcoin::Bitcoin>(matcher, stop, counter, tx),
         }
     }
 }

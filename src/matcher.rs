@@ -1,4 +1,5 @@
 use super::chains::ChainKind;
+use bech32::u5;
 
 #[derive(Clone, Copy)]
 pub enum MatchPosition {
@@ -20,6 +21,8 @@ pub struct Matcher {
     /// For EVM: pre-decoded hex bytes for raw comparison (skips hex::encode in hot loop)
     pub(crate) evm_prefix: Option<(Vec<u8>, Option<u8>)>, // (full_bytes, extra_high_nibble)
     pub(crate) evm_suffix: Option<(Vec<u8>, Option<u8>)>, // (full_bytes, extra_low_nibble)
+    /// For Bitcoin Bech32: pre-computed 5-bit groups of the user's vanity prefix
+    pub(crate) bech32_prefix_5bit: Option<Vec<u5>>,
 }
 
 /// Parse a hex string into full bytes + optional trailing high nibble (for prefix matching).
@@ -90,6 +93,22 @@ impl Matcher {
             _ => None,
         };
 
+        let bech32_prefix_5bit = match chain {
+            ChainKind::Bitcoin if !prefix.is_empty() => {
+                let charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+                Some(
+                    prefix
+                        .chars()
+                        .map(|c| {
+                            let idx = charset.find(c).expect("validated in TUI") as u8;
+                            u5::try_from_u8(idx).unwrap()
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            }
+            _ => None,
+        };
+
         let prefix_lower = prefix.to_lowercase();
         let suffix_lower = suffix.to_lowercase();
 
@@ -103,6 +122,7 @@ impl Matcher {
             raw_prefix,
             evm_prefix,
             evm_suffix,
+            bech32_prefix_5bit,
         }
     }
 

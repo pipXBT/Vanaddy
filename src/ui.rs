@@ -1,5 +1,5 @@
-use crate::app::{App, AppState};
-use crate::matcher::MatchPosition;
+use super::app::{App, AppState};
+use super::matcher::MatchPosition;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},

@@ -1,5 +1,5 @@
-use crate::chains::{ChainKind, MatchPayload};
-use crate::matcher::{Matcher, MatchPosition};
+use super::chains::{ChainKind, MatchPayload};
+use super::matcher::{Matcher, MatchPosition};
 use crossterm::event::{self, KeyCode, KeyEventKind, KeyModifiers};
 use csv::WriterBuilder;
 use rayon::prelude::*;
@@ -305,14 +305,23 @@ fn handle_field_input(app: &mut App, key: event::KeyEvent) {
     let both = matches!(app.match_position, MatchPosition::StartsAndEndsWith);
 
     match app.active_field {
-        // Chain (toggle with Left/Right or 1/2)
+        // Chain (cycle with Left/Right or 1/2/3)
         0 => match key.code {
             KeyCode::Char('1') => app.chain = ChainKind::Solana,
             KeyCode::Char('2') => app.chain = ChainKind::Evm,
-            KeyCode::Left | KeyCode::Right => {
+            KeyCode::Char('3') => app.chain = ChainKind::Bitcoin,
+            KeyCode::Left => {
+                app.chain = match app.chain {
+                    ChainKind::Solana => ChainKind::Bitcoin,
+                    ChainKind::Evm => ChainKind::Solana,
+                    ChainKind::Bitcoin => ChainKind::Evm,
+                };
+            }
+            KeyCode::Right => {
                 app.chain = match app.chain {
                     ChainKind::Solana => ChainKind::Evm,
-                    ChainKind::Evm => ChainKind::Solana,
+                    ChainKind::Evm => ChainKind::Bitcoin,
+                    ChainKind::Bitcoin => ChainKind::Solana,
                 };
             }
             _ => {}

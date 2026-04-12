@@ -5,7 +5,7 @@ pub mod matcher;
 pub mod seed;
 pub mod ui;
 
-use crate::app::App;
+use self::app::App;
 use crossterm::{
     event::{self, Event},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
