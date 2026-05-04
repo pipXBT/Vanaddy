@@ -152,42 +152,15 @@ impl Chain for Monero {
     }
 
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool {
-        let addr = Monero::encode_address(bytes);
-        // Monero vanity applies after leading "4" (1 char)
+        // Monero vanity applies after the leading "4" (mainnet network byte).
         const FIXED_PREFIX_LEN: usize = 1;
+        let addr = Monero::encode_address(bytes);
         let vanity_target = if addr.len() > FIXED_PREFIX_LEN {
             &addr[FIXED_PREFIX_LEN..]
         } else {
             ""
         };
-
-        if !matcher.prefix.is_empty() {
-            let ok = if matcher.case_sensitive {
-                vanity_target.starts_with(&matcher.prefix)
-            } else {
-                vanity_target.as_bytes().len() >= matcher.prefix.len()
-                    && vanity_target.as_bytes()[..matcher.prefix.len()]
-                        .eq_ignore_ascii_case(matcher.prefix.as_bytes())
-            };
-            if !ok {
-                return false;
-            }
-        }
-
-        if !matcher.suffix.is_empty() {
-            let ok = if matcher.case_sensitive {
-                addr.ends_with(&matcher.suffix)
-            } else {
-                let addr_bytes = addr.as_bytes();
-                let start = addr_bytes.len().saturating_sub(matcher.suffix.len());
-                addr_bytes[start..].eq_ignore_ascii_case(matcher.suffix.as_bytes())
-            };
-            if !ok {
-                return false;
-            }
-        }
-
-        true
+        matcher.prefix_matches(vanity_target) && matcher.suffix_matches(&addr)
     }
 }
 
@@ -254,7 +227,7 @@ mod tests {
 
     #[test]
     fn monero_starts_and_ends_with_both_required() {
-        use super::super::super::matcher::{Matcher, MatchPosition};
+        use super::super::super::matcher::Matcher;
         use super::super::ChainKind;
 
         let (_keypair, spend_pub, view_pub) = super::generate_keys();
@@ -271,7 +244,6 @@ mod tests {
         let m = Matcher::new(
             actual_prefix.to_string(),
             wrong_suffix.to_string(),
-            MatchPosition::StartsAndEndsWith,
             true,
             ChainKind::Monero,
         );
@@ -280,7 +252,6 @@ mod tests {
         let m = Matcher::new(
             actual_prefix.to_string(),
             actual_suffix.to_string(),
-            MatchPosition::StartsAndEndsWith,
             true,
             ChainKind::Monero,
         );
@@ -289,7 +260,7 @@ mod tests {
 
     #[test]
     fn monero_case_insensitive_suffix_match() {
-        use super::super::super::matcher::{Matcher, MatchPosition};
+        use super::super::super::matcher::Matcher;
         use super::super::ChainKind;
 
         let (_, spend_pub, view_pub) = super::generate_keys();
@@ -304,7 +275,6 @@ mod tests {
         let m = Matcher::new(
             String::new(),
             actual_suffix_upper,
-            MatchPosition::EndsWith,
             false, // case_sensitive=false
             ChainKind::Monero,
         );
@@ -313,13 +283,12 @@ mod tests {
 
     #[test]
     fn monero_user_reported_scenario_8888_prefix_888_suffix() {
-        use super::super::super::matcher::{Matcher, MatchPosition};
+        use super::super::super::matcher::Matcher;
         use super::super::ChainKind;
 
         let m = Matcher::new(
             "8888".to_string(),
             "888".to_string(),
-            MatchPosition::StartsAndEndsWith,
             true,
             ChainKind::Monero,
         );
@@ -337,14 +306,10 @@ mod tests {
         // produces "11" (the alphabet's index 0 is '1').
         assert_eq!(monero_base58_encode(&[0x00]), "11");
 
-        // 8-byte full block of 0xFF = u64::MAX
-        // = 18446744073709551615 in decimal
-        // base58-encoded in 11 chars.
-        // Expected value captured via first run + verification.
+        // u64::MAX in one full 8-byte block → 11 Base58 chars
         let all_ff = [0xffu8; 8];
         let encoded = monero_base58_encode(&all_ff);
         assert_eq!(encoded.len(), 11);
-        // Pin the exact value — ran once, got "jpXCZedGfVQ"
         assert_eq!(encoded, "jpXCZedGfVQ");
     }
 

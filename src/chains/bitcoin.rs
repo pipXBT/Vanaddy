@@ -85,36 +85,15 @@ impl Chain for Bitcoin {
         }
 
         // Full encode for prefix + suffix string checks.
-        let addr = Bitcoin::encode_address(bytes);
         // Bitcoin vanity applies after "bc1q" (4 chars).
         const FIXED_PREFIX_LEN: usize = 4;
+        let addr = Bitcoin::encode_address(bytes);
         let vanity_target = if addr.len() > FIXED_PREFIX_LEN {
             &addr[FIXED_PREFIX_LEN..]
         } else {
             ""
         };
-
-        // Prefix check (Bech32 is lowercase-only, so case-sensitive == case-insensitive)
-        if !matcher.prefix.is_empty() {
-            let ok = vanity_target.as_bytes().len() >= matcher.prefix.len()
-                && vanity_target.as_bytes()[..matcher.prefix.len()]
-                    .eq_ignore_ascii_case(matcher.prefix.as_bytes());
-            if !ok {
-                return false;
-            }
-        }
-
-        // Suffix check
-        if !matcher.suffix.is_empty() {
-            let addr_bytes = addr.as_bytes();
-            let start = addr_bytes.len().saturating_sub(matcher.suffix.len());
-            let ok = addr_bytes[start..].eq_ignore_ascii_case(matcher.suffix.as_bytes());
-            if !ok {
-                return false;
-            }
-        }
-
-        true
+        matcher.prefix_matches(vanity_target) && matcher.suffix_matches(&addr)
     }
 }
 
@@ -142,7 +121,7 @@ mod tests {
 
     #[test]
     fn bitcoin_starts_and_ends_with_both_required() {
-        use super::super::super::matcher::{Matcher, MatchPosition};
+        use super::super::super::matcher::Matcher;
         use super::super::ChainKind;
 
         let m = Mnemonic::from_phrase(
@@ -164,7 +143,6 @@ mod tests {
         let matcher = Matcher::new(
             actual_prefix.to_string(),
             wrong_suffix.to_string(),
-            MatchPosition::StartsAndEndsWith,
             true,
             ChainKind::Bitcoin,
         );
@@ -173,7 +151,6 @@ mod tests {
         let matcher = Matcher::new(
             actual_prefix.to_string(),
             actual_suffix.to_string(),
-            MatchPosition::StartsAndEndsWith,
             true,
             ChainKind::Bitcoin,
         );

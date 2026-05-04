@@ -95,11 +95,10 @@ impl Cell {
     }
 }
 
-/// Wallet-v3r2 code cell — a well-known constant. Hash matches @ton/crypto's
-/// compiled v3r2 code BOC. `max_depth = 0` because the compiled v3r2 code
-/// BOC is a single cell with no outgoing refs; verified empirically against
-/// Tonkeeper's computed v3r2 address for a known mnemonic.
-pub const WALLET_V3R2_CODE: CellRef = CellRef {
+/// Wallet-v3r2 code cell — kept for regression test coverage of the cell
+/// representation hashing pipeline. Production TON addresses use W5 (v5r1).
+#[cfg(test)]
+const WALLET_V3R2_CODE: CellRef = CellRef {
     hash: [
         0x84, 0xda, 0xfa, 0x44, 0x9f, 0x98, 0xa6, 0x98,
         0x77, 0x89, 0xba, 0x23, 0x23, 0x58, 0x07, 0x2b,
@@ -110,8 +109,9 @@ pub const WALLET_V3R2_CODE: CellRef = CellRef {
 };
 
 /// Wallet-v3r2 data cell: seqno(u32=0) || subwallet_id(u32) || pubkey(u256).
-/// Total 320 bits = 40 bytes exactly (no plugins bit — that's v4, not v3r2).
-pub fn wallet_v3r2_data_cell(pubkey: &[u8; 32], subwallet_id: u32) -> Cell {
+/// Total 320 bits = 40 bytes (no plugins bit — that's v4, not v3r2). Test-only.
+#[cfg(test)]
+fn wallet_v3r2_data_cell(pubkey: &[u8; 32], subwallet_id: u32) -> Cell {
     let mut data = Vec::with_capacity(40);
     data.extend_from_slice(&0u32.to_be_bytes()); // seqno = 0
     data.extend_from_slice(&subwallet_id.to_be_bytes());
@@ -124,11 +124,9 @@ pub fn wallet_v3r2_data_cell(pubkey: &[u8; 32], subwallet_id: u32) -> Cell {
 }
 
 /// Wallet-v3r2 state_init: StateInit TL-B with code + data refs, no split_depth,
-/// no special, no library.
-///
-/// Header bits (MSB-first): 0 (split_depth?) 0 (special?) 1 (code?) 1 (data?) 0 (library?)
-/// = 0b00110_000 as an augmented byte. bit_len = 5, 2 refs.
-pub fn wallet_v3r2_state_init(pubkey: &[u8; 32], subwallet_id: u32) -> Cell {
+/// no special, no library. Header byte 0b0011_0000, 5 bits, 2 refs. Test-only.
+#[cfg(test)]
+fn wallet_v3r2_state_init(pubkey: &[u8; 32], subwallet_id: u32) -> Cell {
     let data_cell = wallet_v3r2_data_cell(pubkey, subwallet_id);
     Cell {
         data: vec![0b0011_0000],

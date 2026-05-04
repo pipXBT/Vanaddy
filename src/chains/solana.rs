@@ -40,36 +40,7 @@ impl Chain for Solana {
 
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool {
         let addr = bs58::encode(bytes).into_string();
-
-        // Prefix check (no fixed leading chars for Solana)
-        if !matcher.prefix.is_empty() {
-            let ok = if matcher.case_sensitive {
-                addr.starts_with(&matcher.prefix)
-            } else {
-                addr.as_bytes().len() >= matcher.prefix.len()
-                    && addr.as_bytes()[..matcher.prefix.len()]
-                        .eq_ignore_ascii_case(matcher.prefix.as_bytes())
-            };
-            if !ok {
-                return false;
-            }
-        }
-
-        // Suffix check
-        if !matcher.suffix.is_empty() {
-            let ok = if matcher.case_sensitive {
-                addr.ends_with(&matcher.suffix)
-            } else {
-                let start = addr.len().saturating_sub(matcher.suffix.len());
-                addr.as_bytes()[start..]
-                    .eq_ignore_ascii_case(matcher.suffix.as_bytes())
-            };
-            if !ok {
-                return false;
-            }
-        }
-
-        true
+        matcher.prefix_matches(&addr) && matcher.suffix_matches(&addr)
     }
 }
 
@@ -104,7 +75,7 @@ mod tests {
 
     #[test]
     fn solana_starts_and_ends_with_both_required() {
-        use super::super::super::matcher::{Matcher, MatchPosition};
+        use super::super::super::matcher::Matcher;
         use super::super::ChainKind;
 
         // Derive the canonical pinned address as a reliable test payload.
@@ -128,7 +99,6 @@ mod tests {
         let matcher = Matcher::new(
             actual_prefix.to_string(),
             wrong_suffix.to_string(),
-            MatchPosition::StartsAndEndsWith,
             false,
             ChainKind::Solana,
         );
@@ -137,7 +107,6 @@ mod tests {
         let matcher = Matcher::new(
             actual_prefix.to_string(),
             actual_suffix.to_string(),
-            MatchPosition::StartsAndEndsWith,
             false,
             ChainKind::Solana,
         );
@@ -146,7 +115,7 @@ mod tests {
 
     #[test]
     fn solana_case_sensitive_prefix_matches() {
-        use super::super::super::matcher::{Matcher, MatchPosition};
+        use super::super::super::matcher::Matcher;
         use super::super::ChainKind;
 
         // Generate a fresh Solana address; take its actual first 3 chars as prefix.
@@ -158,8 +127,7 @@ mod tests {
         let m = Matcher::new(
             actual_prefix.clone(),
             String::new(),
-            MatchPosition::StartsWith,
-            true, // case_sensitive = true — this triggers the broken raw_prefix path today
+            true,
             ChainKind::Solana,
         );
         assert!(

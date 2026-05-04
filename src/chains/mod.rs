@@ -12,8 +12,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 
 /// Channel payload emitted when a vanity address is found.
-/// (chain_label, address, secret_hex, mnemonic)
-pub type MatchPayload = (String, String, String, String);
+#[derive(Clone)]
+pub struct Match {
+    pub chain: String,
+    pub address: String,
+    pub secret_hex: String,
+    pub mnemonic: String,
+}
 
 pub trait Chain: Send + Sync + 'static {
     const LABEL: &'static str;
@@ -73,7 +78,7 @@ impl ChainKind {
         matcher: &Matcher,
         stop: &AtomicBool,
         counter: &AtomicU64,
-        tx: &Sender<MatchPayload>,
+        tx: &Sender<Match>,
     ) {
         match self {
             Self::Solana => search::<solana::Solana>(matcher, stop, counter, tx),
@@ -89,16 +94,19 @@ pub fn search<C: Chain>(
     matcher: &Matcher,
     stop: &AtomicBool,
     counter: &AtomicU64,
-    tx: &Sender<MatchPayload>,
+    tx: &Sender<Match>,
 ) {
     while !stop.load(Ordering::Relaxed) {
         let (addr_bytes, secret_raw, phrase) = C::generate();
         counter.fetch_add(1, Ordering::Relaxed);
 
         if C::matches_raw(matcher, &addr_bytes) {
-            let addr = C::encode_address(&addr_bytes);
-            let secret_hex = C::encode_secret(&secret_raw);
-            let _ = tx.send((C::LABEL.to_string(), addr, secret_hex, phrase));
+            let _ = tx.send(Match {
+                chain: C::LABEL.to_string(),
+                address: C::encode_address(&addr_bytes),
+                secret_hex: C::encode_secret(&secret_raw),
+                mnemonic: phrase,
+            });
         }
     }
 }

@@ -348,14 +348,14 @@ fn render_match_table(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .enumerate()
         .map(|(i, m)| {
-            let addr_display = if m.1.len() > 30 {
-                format!("{}...{}", &m.1[..14], &m.1[m.1.len() - 10..])
+            let addr_display = if m.address.len() > 30 {
+                format!("{}...{}", &m.address[..14], &m.address[m.address.len() - 10..])
             } else {
-                m.1.clone()
+                m.address.clone()
             };
             let cells = vec![
                 Cell::from(format!("{}", i + 1)),
-                Cell::from(m.0.clone()),
+                Cell::from(m.chain.clone()),
                 Cell::from(addr_display),
             ];
             Row::new(cells)
@@ -401,21 +401,21 @@ fn render_detail_view(f: &mut Frame, area: Rect, app: &App) {
     let lines = vec![
         Line::from(vec![
             Span::styled(" Chain:   ", Style::default().fg(Color::Cyan)),
-            Span::raw(&m.0),
+            Span::raw(&m.chain),
         ]),
         Line::from(vec![
             Span::styled(" Address: ", Style::default().fg(Color::Cyan)),
-            Span::raw(&m.1),
+            Span::raw(&m.address),
         ]),
         Line::from(""),
         Line::from(vec![
             Span::styled(" Key:     ", Style::default().fg(Color::Cyan)),
-            Span::raw(&m.2),
+            Span::raw(&m.secret_hex),
         ]),
         Line::from(""),
         Line::from(vec![
             Span::styled(" Phrase:  ", Style::default().fg(Color::Cyan)),
-            Span::raw(&m.3),
+            Span::raw(&m.mnemonic),
         ]),
     ];
 

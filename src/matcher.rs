@@ -11,11 +11,7 @@ pub enum MatchPosition {
 pub struct Matcher {
     pub(crate) prefix: String,
     pub(crate) suffix: String,
-    pub(crate) position: MatchPosition,
     pub(crate) case_sensitive: bool,
-    /// Pre-lowercased for case-insensitive string matching (avoids alloc in hot loop)
-    pub(crate) prefix_lower: String,
-    pub(crate) suffix_lower: String,
     /// For EVM: pre-decoded hex bytes for raw comparison (skips hex::encode in hot loop)
     pub(crate) evm_prefix: Option<(Vec<u8>, Option<u8>)>, // (full_bytes, extra_high_nibble)
     pub(crate) evm_suffix: Option<(Vec<u8>, Option<u8>)>, // (full_bytes, extra_low_nibble)
@@ -68,7 +64,6 @@ impl Matcher {
     pub fn new(
         prefix: String,
         suffix: String,
-        position: MatchPosition,
         case_sensitive: bool,
         chain: ChainKind,
     ) -> Self {
@@ -98,19 +93,52 @@ impl Matcher {
             _ => None,
         };
 
-        let prefix_lower = prefix.to_lowercase();
-        let suffix_lower = suffix.to_lowercase();
-
         Matcher {
             prefix,
             suffix,
-            position,
             case_sensitive,
-            prefix_lower,
-            suffix_lower,
             evm_prefix,
             evm_suffix,
             bech32_prefix_5bit,
+        }
+    }
+
+    /// Whether the user's prefix matches `addr` (already stripped of any
+    /// chain-specific fixed leading chars). Allocation-free.
+    #[inline]
+    pub fn prefix_matches(&self, addr: &str) -> bool {
+        if self.prefix.is_empty() {
+            return true;
+        }
+        let addr = addr.as_bytes();
+        let pre = self.prefix.as_bytes();
+        if addr.len() < pre.len() {
+            return false;
+        }
+        if self.case_sensitive {
+            &addr[..pre.len()] == pre
+        } else {
+            addr[..pre.len()].eq_ignore_ascii_case(pre)
+        }
+    }
+
+    /// Whether the user's suffix matches the trailing chars of `addr`.
+    /// Allocation-free.
+    #[inline]
+    pub fn suffix_matches(&self, addr: &str) -> bool {
+        if self.suffix.is_empty() {
+            return true;
+        }
+        let addr = addr.as_bytes();
+        let suf = self.suffix.as_bytes();
+        if addr.len() < suf.len() {
+            return false;
+        }
+        let start = addr.len() - suf.len();
+        if self.case_sensitive {
+            &addr[start..] == suf
+        } else {
+            addr[start..].eq_ignore_ascii_case(suf)
         }
     }
 
@@ -151,33 +179,6 @@ impl Matcher {
         true
     }
 
-    pub fn matches_str(&self, address: &str) -> bool {
-        let addr = if address.starts_with("0x") {
-            &address[2..]
-        } else {
-            address
-        };
-
-        if self.case_sensitive {
-            match self.position {
-                MatchPosition::StartsWith => addr.starts_with(&self.prefix),
-                MatchPosition::EndsWith => addr.ends_with(&self.suffix),
-                MatchPosition::StartsAndEndsWith => {
-                    addr.starts_with(&self.prefix) && addr.ends_with(&self.suffix)
-                }
-            }
-        } else {
-            let a = addr.to_lowercase();
-            match self.position {
-                MatchPosition::StartsWith => a.starts_with(&self.prefix_lower),
-                MatchPosition::EndsWith => a.ends_with(&self.suffix_lower),
-                MatchPosition::StartsAndEndsWith => {
-                    a.starts_with(&self.prefix_lower) && a.ends_with(&self.suffix_lower)
-                }
-            }
-        }
-    }
-
 }
 
 #[cfg(test)]
@@ -186,7 +187,7 @@ mod tests {
 
     #[test]
     fn evm_matches_raw_prefix() {
-        let m = Matcher::new("dead".into(), "".into(), MatchPosition::StartsWith, false, ChainKind::Evm);
+        let m = Matcher::new("dead".into(), "".into(), false, ChainKind::Evm);
         let mut addr = [0u8; 20];
         addr[0] = 0xde;
         addr[1] = 0xad;
@@ -195,7 +196,7 @@ mod tests {
 
     #[test]
     fn evm_odd_nibble_prefix() {
-        let m = Matcher::new("dea".into(), "".into(), MatchPosition::StartsWith, false, ChainKind::Evm);
+        let m = Matcher::new("dea".into(), "".into(), false, ChainKind::Evm);
         let mut addr = [0u8; 20];
         addr[0] = 0xde;
         addr[1] = 0xa5;
@@ -206,7 +207,7 @@ mod tests {
 
     #[test]
     fn evm_suffix_odd_nibble() {
-        let m = Matcher::new("".into(), "beef".into(), MatchPosition::EndsWith, false, ChainKind::Evm);
+        let m = Matcher::new("".into(), "beef".into(), false, ChainKind::Evm);
         let mut addr = [0u8; 20];
         addr[18] = 0xbe;
         addr[19] = 0xef;

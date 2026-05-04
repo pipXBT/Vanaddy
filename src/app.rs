@@ -1,4 +1,4 @@
-use super::chains::{ChainKind, MatchPayload};
+use super::chains::{ChainKind, Match};
 use super::matcher::{Matcher, MatchPosition};
 use crossterm::event::{self, KeyCode, KeyEventKind, KeyModifiers};
 use csv::WriterBuilder;
@@ -11,10 +11,6 @@ use std::{
     },
     time::Instant,
 };
-
-// ---------------------------------------------------------------------------
-// TUI state
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum AppState {
@@ -42,13 +38,12 @@ pub struct App {
     pub show_help: bool,
 
     // Search state
-    pub matches: Vec<MatchPayload>,
+    pub matches: Vec<Match>,
     pub selected_match: usize,
     pub counter: Arc<AtomicU64>,
-    pub match_count: Arc<AtomicU64>,
     pub start_time: Option<Instant>,
     pub stop: Arc<AtomicBool>,
-    pub rx: Option<mpsc::Receiver<MatchPayload>>,
+    pub rx: Option<mpsc::Receiver<Match>>,
     pub thread_pool: Option<rayon::ThreadPool>,
 }
 
@@ -71,7 +66,6 @@ impl App {
             matches: Vec::new(),
             selected_match: 0,
             counter: Arc::new(AtomicU64::new(0)),
-            match_count: Arc::new(AtomicU64::new(0)),
             start_time: None,
             stop: Arc::new(AtomicBool::new(false)),
             rx: None,
@@ -150,7 +144,7 @@ impl App {
     }
 
     /// Rough per-thread throughput estimate (attempts/sec), used for ETA when
-    /// the user hasn't started a search yet. Numbers are from Task 13 benches.
+    /// the user hasn't started a search yet. Numbers from `benches/generation.rs`.
     fn single_thread_rate(&self) -> f64 {
         match self.chain {
             ChainKind::Solana => 1_750.0, // ~570 µs/gen
@@ -222,7 +216,6 @@ impl App {
         self.matches.clear();
         self.selected_match = 0;
         self.counter = Arc::new(AtomicU64::new(0));
-        self.match_count = Arc::new(AtomicU64::new(0));
         self.stop = Arc::new(AtomicBool::new(false));
         self.start_time = Some(Instant::now());
         self.state = AppState::Searching;
@@ -233,7 +226,7 @@ impl App {
             MatchPosition::StartsAndEndsWith => (self.vanity_prefix.clone(), self.vanity_suffix.clone()),
         };
 
-        let matcher = Matcher::new(prefix, suffix, self.match_position, self.case_sensitive, self.chain);
+        let matcher = Matcher::new(prefix, suffix, self.case_sensitive, self.chain);
         let chain = self.chain;
         let stop = self.stop.clone();
         let counter = self.counter.clone();
@@ -243,27 +236,7 @@ impl App {
 
         // Ensure CSV has header
         {
-            let file = {
-                let mut opts = OpenOptions::new();
-                opts.create(true).append(true);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    opts.mode(0o600);
-                }
-                opts.open("vanity_wallets.csv")
-                    .expect("Failed to open vanity_wallets.csv")
-            };
-            // `mode()` only applies at creation time. For pre-existing files, force 0600.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Ok(metadata) = file.metadata() {
-                    let mut perms = metadata.permissions();
-                    perms.set_mode(0o600);
-                    let _ = std::fs::set_permissions("vanity_wallets.csv", perms);
-                }
-            }
+            let file = open_csv_secure().expect("Failed to open vanity_wallets.csv");
             let needs_header = file.metadata().map(|m| m.len() == 0).unwrap_or(true);
             if needs_header {
                 let mut wtr = WriterBuilder::new().has_headers(false).from_writer(file);
@@ -298,30 +271,14 @@ impl App {
     pub fn drain_matches(&mut self) {
         if let Some(ref rx) = self.rx {
             while let Ok(payload) = rx.try_recv() {
-                self.match_count.fetch_add(1, Ordering::Relaxed);
-
-                let open_result = {
-                    let mut opts = OpenOptions::new();
-                    opts.create(true).append(true);
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::OpenOptionsExt;
-                        opts.mode(0o600);
-                    }
-                    opts.open("vanity_wallets.csv")
-                };
-                if let Ok(file) = open_result {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        if let Ok(metadata) = file.metadata() {
-                            let mut perms = metadata.permissions();
-                            perms.set_mode(0o600);
-                            let _ = std::fs::set_permissions("vanity_wallets.csv", perms);
-                        }
-                    }
+                if let Ok(file) = open_csv_secure() {
                     let mut wtr = WriterBuilder::new().has_headers(false).from_writer(file);
-                    let _ = wtr.write_record(&[&payload.0, &payload.1, &payload.2, &payload.3]);
+                    let _ = wtr.write_record([
+                        &payload.chain,
+                        &payload.address,
+                        &payload.secret_hex,
+                        &payload.mnemonic,
+                    ]);
                     let _ = wtr.flush();
                 }
 
@@ -330,6 +287,32 @@ impl App {
             }
         }
     }
+}
+
+/// Open `vanity_wallets.csv` for append, creating it with mode 0o600 on Unix
+/// and re-asserting 0o600 on every open in case a pre-existing file had looser
+/// permissions. The file holds plaintext seed phrases, so this is the single
+/// chokepoint for that security guarantee — all writers MUST go through here.
+fn open_csv_secure() -> std::io::Result<std::fs::File> {
+    const PATH: &str = "vanity_wallets.csv";
+    let mut opts = OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let file = opts.open(PATH)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = file.metadata() {
+            let mut perms = metadata.permissions();
+            perms.set_mode(0o600);
+            let _ = std::fs::set_permissions(PATH, perms);
+        }
+    }
+    Ok(file)
 }
 
 pub fn detect_optimal_threads() -> usize {
@@ -348,10 +331,6 @@ pub fn detect_optimal_threads() -> usize {
         logical
     }
 }
-
-// ---------------------------------------------------------------------------
-// TUI event handling
-// ---------------------------------------------------------------------------
 
 pub fn handle_key_event(app: &mut App, key: event::KeyEvent) {
     if key.kind != KeyEventKind::Press {

@@ -81,42 +81,15 @@ impl Chain for Ton {
     }
 
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool {
-        let encoded = Ton::encode_address(bytes);
-        // TON vanity applies after the fixed tag prefix ("UQ" non-bounceable mainnet) — 2 chars
+        // TON vanity applies after the fixed tag prefix "UQ" (non-bounceable mainnet).
         const FIXED_PREFIX_LEN: usize = 2;
+        let encoded = Ton::encode_address(bytes);
         let vanity_target = if encoded.len() > FIXED_PREFIX_LEN {
             &encoded[FIXED_PREFIX_LEN..]
         } else {
             ""
         };
-
-        if !matcher.prefix.is_empty() {
-            let ok = if matcher.case_sensitive {
-                vanity_target.starts_with(&matcher.prefix)
-            } else {
-                vanity_target.as_bytes().len() >= matcher.prefix.len()
-                    && vanity_target.as_bytes()[..matcher.prefix.len()]
-                        .eq_ignore_ascii_case(matcher.prefix.as_bytes())
-            };
-            if !ok {
-                return false;
-            }
-        }
-
-        if !matcher.suffix.is_empty() {
-            let ok = if matcher.case_sensitive {
-                encoded.ends_with(&matcher.suffix)
-            } else {
-                let encoded_bytes = encoded.as_bytes();
-                let start = encoded_bytes.len().saturating_sub(matcher.suffix.len());
-                encoded_bytes[start..].eq_ignore_ascii_case(matcher.suffix.as_bytes())
-            };
-            if !ok {
-                return false;
-            }
-        }
-
-        true
+        matcher.prefix_matches(vanity_target) && matcher.suffix_matches(&encoded)
     }
 }
 
@@ -148,7 +121,7 @@ mod tests {
 
     #[test]
     fn ton_starts_and_ends_with_both_required() {
-        use super::super::super::matcher::{Matcher, MatchPosition};
+        use super::super::super::matcher::Matcher;
         use super::super::ChainKind;
 
         let (_phrase, sk) = super::super::ton_mnemonic::generate_ton_wallet();
@@ -173,7 +146,6 @@ mod tests {
         let m = Matcher::new(
             actual_prefix.to_string(),
             wrong_suffix.to_string(),
-            MatchPosition::StartsAndEndsWith,
             true,
             ChainKind::Ton,
         );
@@ -182,7 +154,6 @@ mod tests {
         let m = Matcher::new(
             actual_prefix.to_string(),
             actual_suffix.to_string(),
-            MatchPosition::StartsAndEndsWith,
             true,
             ChainKind::Ton,
         );
