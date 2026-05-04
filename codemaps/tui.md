@@ -134,7 +134,7 @@ Path: `vanity_wallets.csv` in CWD. Created at `start_search` if missing; permiss
 
 `effective_alphabet_size`: 33/58 (Solana, Monero), 16/32 (EVM, where 32 = case-sensitive EIP-55), 32 (Bitcoin, lowercase only), 38/64 (TON).
 
-`single_thread_rate` cribbed from bench numbers: Solana 1750/s, EVM 1525/s, Bitcoin 1550/s, TON 19.6/s, Monero 28600/s.
+`single_thread_rate` carries historical per-chain throughput numbers (Solana 1750/s, EVM 1525/s, Bitcoin 1550/s, TON 19.6/s, Monero 28600/s) — used for ETA estimation when no live rate is yet available.
 
 `format_duration`: `< 1s`, `Ns`, `Nm Ns`, `Nh Nm`, `Nd Nh`, `N.Ny`, `>100y`.
 

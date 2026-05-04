@@ -91,9 +91,8 @@ src/main.rs              # Entry: terminal setup, event loop, drain matches
 | `cargo build --release` | Production binary (`target/release/vanaddy`) |
 | `cargo run` | Dev TUI |
 | `cargo test` | Unit tests (in-module `#[cfg(test)]`) |
-| `cargo bench` | Criterion benchmarks (`benches/generation.rs`) |
 
-`benches/generation.rs` uses `#[path = "../src/main.rs"] mod vanaddy;` to re-include the binary as a module — there is no library target.
+There is no library target and no committed bench harness. `App::single_thread_rate` carries the historical per-chain throughput numbers used for ETA estimation.
 
 ## Key Dependencies
 

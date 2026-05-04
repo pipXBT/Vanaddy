@@ -22,11 +22,10 @@ The codemaps are regenerable via `/cc-codemaps:update-codemaps`. Don't hand-edit
 | `cargo build --release` | Production binary at `target/release/vanaddy` |
 | `cargo run` | Dev TUI |
 | `cargo test` | Run all unit tests (in-module `#[cfg(test)]`) |
-| `cargo bench` | Criterion benchmarks (`benches/generation.rs`) |
 | `cargo clippy --all-targets` | Lint (no clippy config file; default lints) |
 | `cargo fmt` | Format (no rustfmt config; defaults) |
 
-There is no separate library target. `benches/generation.rs` re-includes the binary via `#[path = "../src/main.rs"] mod vanaddy;`.
+There is no separate library target.
 
 ## Conventions
 
@@ -62,7 +61,6 @@ There is no separate library target. `benches/generation.rs` re-includes the bin
 | `src/seed.rs` | BIP-39 PBKDF2 seed derivation (via `ring`) |
 | `src/slip10.rs` | SLIP-0010 Ed25519 + Phantom path constant |
 | `src/bip32.rs` | BIP-32 secp256k1 + BIP-44/BIP-84 path constants |
-| `benches/generation.rs` | Criterion per-chain `generate()` benches |
 
 ## Output
 
@@ -78,4 +76,4 @@ Single CSV at `vanity_wallets.csv` in the current working directory. Header: `Ch
 | TON | ~51 ms (PBKDF2-dominated) |
 | Monero | ~35 µs |
 
-If a benchmark regresses noticeably (>10%) after a change, that's a signal the hot loop picked up an allocation or a non-monomorphized call.
+These are the rates `App::single_thread_rate` uses for ETA estimation. If you suspect a hot-loop regression, write a small one-shot timing harness — there is no committed bench harness in this tree.
