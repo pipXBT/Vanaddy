@@ -2,7 +2,7 @@
 
 # Architecture
 
-Single-binary Rust TUI for generating multi-chain vanity wallet addresses. No library crate, no workspace — `src/main.rs` declares the modules and runs the event loop directly.
+Single-binary Rust TUI for generating multi-chain vanity wallet addresses. No library crate, no workspace, no committed bench harness — `src/main.rs` declares the modules and runs the event loop directly.
 
 ## Crate
 
@@ -20,12 +20,12 @@ Single-binary Rust TUI for generating multi-chain vanity wallet addresses. No li
 src/main.rs              # Entry: terminal setup, event loop, drain matches
 ├── app                  # AppState machine, validation, search lifecycle, key handling
 ├── ui                   # Ratatui rendering: banner, config form, stats, matches, detail, help popup
-├── matcher              # Matcher struct: precomputed prefix/suffix data (hex bytes, 5-bit groups)
+├── matcher              # Matcher struct: precomputed prefix/suffix data + prefix/suffix_matches helpers
 ├── seed                 # BIP-39 seed derivation (PBKDF2-HMAC-SHA512 via ring)
 ├── slip10               # SLIP-0010 Ed25519 derivation (Solana)
 ├── bip32                # BIP-32 secp256k1 derivation (EVM, Bitcoin) + path constants
 └── chains/
-    ├── mod              # Chain trait, ChainKind enum, monomorphized search<C>
+    ├── mod              # Chain trait, ChainKind enum, Match struct, monomorphized search<C>
     ├── solana           # Ed25519 + Base58, SLIP-0010 m/44'/501'/0'/0'
     ├── evm              # secp256k1 + 0x-hex, BIP-44 m/44'/60'/0'/0/0, EIP-55
     ├── bitcoin          # secp256k1 + Bech32 bc1q, BIP-84 m/84'/0'/0'/0/0
@@ -65,11 +65,11 @@ src/main.rs              # Entry: terminal setup, event loop, drain matches
          (addr, secret, phrase) = C::generate()    ← per-chain key derivation
          counter.fetch_add(1)
          if C::matches_raw(matcher, &addr):
-            tx.send((label, encode_address, encode_secret, phrase))
+            tx.send(Match { chain, address, secret_hex, mnemonic })
          if stop.load(): break
             │
             ▼
-       App::drain_matches() reads rx → appends CSV (chmod 0600) → matches.push
+       App::drain_matches() reads rx → open_csv_secure → append → matches.push
 ```
 
 ## Concurrency Primitives
@@ -78,11 +78,10 @@ src/main.rs              # Entry: terminal setup, event loop, drain matches
 |-----------|------|---------|
 | `App.stop` | `Arc<AtomicBool>` | Cooperative cancellation flag, polled in worker hot loop |
 | `App.counter` | `Arc<AtomicU64>` | Total candidates checked across all threads |
-| `App.match_count` | `Arc<AtomicU64>` | Successful matches found |
-| `App.rx` | `Option<mpsc::Receiver<MatchPayload>>` | Workers → main thread for CSV write |
+| `App.rx` | `Option<mpsc::Receiver<Match>>` | Workers → main thread for CSV write |
 | `App.thread_pool` | `Option<rayon::ThreadPool>` | Owns worker threads; dropped on stop |
 
-`MatchPayload = (chain_label, address, secret_hex, mnemonic)` — 4-tuple of `String`.
+`Match` (defined in `chains/mod.rs:16`) is a 4-field struct: `{ chain, address, secret_hex, mnemonic }` — replaced the prior `MatchPayload = (String, String, String, String)` tuple alias.
 
 ## Build & Test
 
@@ -92,7 +91,7 @@ src/main.rs              # Entry: terminal setup, event loop, drain matches
 | `cargo run` | Dev TUI |
 | `cargo test` | Unit tests (in-module `#[cfg(test)]`) |
 
-There is no library target and no committed bench harness. `App::single_thread_rate` carries the historical per-chain throughput numbers used for ETA estimation.
+There is no library target and no committed bench harness. Per-chain throughput numbers used for ETA estimation live in `App::single_thread_rate` (`src/app.rs`).
 
 ## Key Dependencies
 
@@ -110,14 +109,17 @@ There is no library target and no committed bench harness. `App::single_thread_r
 | `zeroize 1.8` | Wipe Monero secret material on drop |
 | `crc32fast 1.4` | Monero seed phrase checksum |
 
+No `[dev-dependencies]`. No `[[bench]]` targets.
+
 ## Output
 
-Single CSV file `vanity_wallets.csv` (created with `chmod 0600` on Unix). Header: `Chain, Address, Private Key (hex), Seed Phrase`. Appended to on every match. Permissions reasserted on each open in case the user fixed them up.
+Single CSV file `vanity_wallets.csv` (created with `chmod 0600` on Unix). Header: `Chain, Address, Private Key (hex), Seed Phrase`. Appended on every match. All file opens go through the `open_csv_secure()` helper (`src/app.rs`) — the single chokepoint enforcing the 0o600 invariant.
 
 ## Performance Notes
 
 - Hot loop is monomorphized per chain via `search::<C: Chain>` — no dynamic dispatch.
 - `Matcher` precomputes byte-level filters: EVM stores `(Vec<u8>, Option<u8>)` for partial-nibble prefix/suffix matching; Bitcoin stores 5-bit Bech32 groups so candidate hashes can be byte-compared without full Bech32 encoding.
+- Solana / Bitcoin / TON / Monero share `Matcher::prefix_matches` and `Matcher::suffix_matches` (`#[inline]`, allocation-free) for their post-fast-path string compares; EVM uses `Matcher::matches_evm_raw` exclusively (byte-level).
 - `expand_5bit` (Bitcoin) is a hand-rolled stack-buffer alternative to `bytes.to_base32()` to avoid a `Vec` allocation per candidate.
 - TON is intrinsically slow (~50 ms/wallet) due to 100k PBKDF2 iters × ~256 retries from the `basic_seed[0] == 0` acceptance filter. `MAX_VANITY = 4`.
 - Monero is fastest (~35 µs/wallet) — no PBKDF2, just two Ed25519 scalar multiplications.

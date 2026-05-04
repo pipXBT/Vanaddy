@@ -8,13 +8,13 @@ Core types, enums, and the cross-chain crypto helpers.
 
 | Type | Defined in | Notes |
 |------|------------|-------|
-| `App` | `src/app.rs:25` | Whole TUI state |
-| `AppState` | `src/app.rs:20` | `Configuring \| Searching` |
-| `Chain` (trait) | `src/chains/mod.rs:18` | Per-chain contract; `Send + Sync + 'static` |
-| `ChainKind` (enum) | `src/chains/mod.rs:35` | `Solana \| Evm \| Bitcoin \| Ton \| Monero` |
-| `MatchPayload` | `src/chains/mod.rs:16` | `(String, String, String, String) = (label, address, secret_hex, mnemonic)` |
+| `App` | `src/app.rs:21` | Whole TUI state |
+| `AppState` | `src/app.rs:16` | `Configuring \| Searching` |
+| `Chain` (trait) | `src/chains/mod.rs:23` | Per-chain contract; `Send + Sync + 'static` |
+| `ChainKind` (enum) | `src/chains/mod.rs:40` | `Solana \| Evm \| Bitcoin \| Ton \| Monero` |
+| `Match` (struct) | `src/chains/mod.rs:16` | `{ chain, address, secret_hex, mnemonic: String }` — channel payload |
 | `Matcher` | `src/matcher.rs:11` | Pre-computed prefix/suffix matchers |
-| `MatchPosition` | `src/matcher.rs:5` | `StartsWith \| EndsWith \| StartsAndEndsWith` |
+| `MatchPosition` | `src/matcher.rs:5` | `StartsWith \| EndsWith \| StartsAndEndsWith` (App/UI only — Matcher itself doesn't carry it) |
 | `Cell` | `src/chains/ton_cell.rs:12` | TVM cell (data bits + refs) |
 | `CellRef` | `src/chains/ton_cell.rs:24` | `(hash: [u8; 32], max_depth: u16)` |
 | `MoneroKeypair` | `src/chains/monero.rs:28` | `{ spend_sec, view_sec }` with `Zeroize + ZeroizeOnDrop` |
@@ -25,22 +25,22 @@ Core types, enums, and the cross-chain crypto helpers.
 pub struct Matcher {
     pub(crate) prefix: String,
     pub(crate) suffix: String,
-    pub(crate) position: MatchPosition,
     pub(crate) case_sensitive: bool,
-    pub(crate) prefix_lower: String,    // pre-lowercased
-    pub(crate) suffix_lower: String,
     pub(crate) evm_prefix: Option<(Vec<u8>, Option<u8>)>,   // (full_bytes, extra_high_nibble)
     pub(crate) evm_suffix: Option<(Vec<u8>, Option<u8>)>,   // (full_bytes, extra_low_nibble)
     pub(crate) bech32_prefix_5bit: Option<Vec<u5>>,
 }
+
+pub fn new(prefix: String, suffix: String, case_sensitive: bool, chain: ChainKind) -> Self
 ```
 
 | Helper | Purpose |
 |--------|---------|
 | `hex_prefix_to_bytes(hex)` | "dead" → ([0xde, 0xad], None); "dea" → ([0xde], Some(0x0a)) |
 | `hex_suffix_to_bytes(hex)` | "beef" → ([0xbe, 0xef], None); "def" → ([0xef], Some(0x0d)) |
-| `Matcher::matches_evm_raw(&[u8; 20])` | Byte+nibble compare against `evm_prefix`/`evm_suffix` |
-| `Matcher::matches_str(&str)` | Generic string `starts_with`/`ends_with`, strips `0x` prefix |
+| `Matcher::matches_evm_raw(&[u8; 20])` | Byte+nibble compare against `evm_prefix`/`evm_suffix` (EVM only) |
+| `Matcher::prefix_matches(&str)` | `#[inline]` — empty → true; else byte-slice eq with optional `eq_ignore_ascii_case`. No alloc. |
+| `Matcher::suffix_matches(&str)` | Mirror of `prefix_matches` for trailing chars. |
 
 For Bitcoin: `bech32_prefix_5bit` is precomputed by mapping each user-typed Bech32 char to its u5 index via the `qpzry9x8gf2tvdw0s3jn54khce6mua7l` charset.
 
@@ -72,6 +72,16 @@ For Bitcoin: `bech32_prefix_5bit` is precomputed by mapping each user-typed Bech
 | `monero::NETWORK_BYTE_MAINNET` | `0x12` | leading address byte → produces "4..." |
 | `tick_rate` | `Duration::from_millis(100)` | main event loop |
 
+### Test-Only (`#[cfg(test)]`)
+
+| Item | Location | Purpose |
+|------|----------|---------|
+| `WALLET_V3R2_CODE` | `chains/ton_cell.rs:104` | regression coverage of cell-hashing pipeline |
+| `wallet_v3r2_data_cell` | `chains/ton_cell.rs:115` | builds 320-bit data cell |
+| `wallet_v3r2_state_init` | `chains/ton_cell.rs:130` | builds StateInit cell with v3r2 code+data refs |
+
+Production TON path uses W5 (v5r1) — v3r2 is preserved purely for test pins.
+
 ## Address Encoding
 
 | Chain | Encode |
@@ -86,14 +96,13 @@ For Bitcoin: `bech32_prefix_5bit` is precomputed by mapping each user-typed Bech
 
 `Matcher` is built with:
 - For `StartsWith`: `prefix=user_input`, `suffix=""`.
-- For `EndsWith`: `prefix=""`, `suffix=user_input`. (Note: validation uses `vanity_suffix` for both, but the Matcher field semantics are independent.)
+- For `EndsWith`: `prefix=""`, `suffix=user_input`.
 - For `StartsAndEndsWith`: both filled.
 
 Per-chain `matches_raw` does:
-1. Optional fast-path (EVM byte/nibble compare; Bitcoin 5-bit group compare).
-2. Full address encode (always for Solana/Bitcoin/TON/Monero — fast-path is for filtering, not skipping the encode entirely).
-3. String-level prefix/suffix check, with case-insensitive paths using `eq_ignore_ascii_case` over byte slices to avoid `to_lowercase()` allocations.
-4. EVM case-sensitive: additionally re-compute `eip55_encode(addr)` and compare prefix/suffix exactly.
+1. Optional fast-path (EVM byte/nibble compare via `matches_evm_raw`; Bitcoin 5-bit group compare).
+2. For Solana/Bitcoin/TON/Monero: full address encode, then `matcher.prefix_matches(vanity_target) && matcher.suffix_matches(&addr)`.
+3. EVM: in case-sensitive mode, additionally re-compute `eip55_encode(addr)` and compare prefix/suffix exactly. Does NOT use `prefix_matches`/`suffix_matches`.
 
 The vanity-skip rule per chain:
 
@@ -101,15 +110,15 @@ The vanity-skip rule per chain:
 |-------|--------------|-------------------|
 | Solana | none | `addr[..]` |
 | EVM | `0x` (in display only — raw bytes have no skip) | EIP-55 hex chars from index 0 |
-| Bitcoin | `bc1q` | `addr[4..]` |
-| TON | `UQ` | `addr[2..]` (suffix can extend into trailing CRC bytes) |
-| Monero | `4` | `addr[1..]` |
+| Bitcoin | `bc1q` | `addr[4..]` (suffix matches against full `addr`) |
+| TON | `UQ` | `addr[2..]` (suffix matches against full `encoded`) |
+| Monero | `4` | `addr[1..]` (suffix matches against full `addr`) |
 
 ## Memory & Secrets
 
 - Solana / EVM / Bitcoin: secret hex is computed only on a successful match (`encode_secret` not in hot loop). Internal zeroize is whatever `ed25519-dalek` / `libsecp256k1` provide.
 - Monero: `MoneroKeypair: Clone + Zeroize + ZeroizeOnDrop`. Discarded candidates have their `spend_sec` and `view_sec` wiped on drop.
-- CSV file: created `chmod 0600`; permissions reasserted on every open.
+- CSV file: every open via `app::open_csv_secure()`, which sets `chmod 0600` on create AND re-asserts after open.
 - `OsRng` is the entropy source for Monero scalars; BIP-39 phrases come from `tiny-bip39`'s `Mnemonic::new` (uses OS CSPRNG).
 
 ## Test Vectors (pinned)

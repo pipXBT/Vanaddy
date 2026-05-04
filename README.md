@@ -161,6 +161,10 @@ Each additional character in your vanity makes the search exponentially harder. 
 
 MIT
 
+## Architecture Reference
+
+Token-lean architecture maps for agents and contributors live in [`codemaps/`](codemaps/). They cover the module graph, per-chain implementation detail, the TUI state machine, and pinned cryptographic vectors — kept in sync with the source via `/cc-codemaps:update-codemaps`.
+
 ## Ratatui UI
 
 <img width="1084" height="1162" alt="Screenshot 2026-04-11 at 4 08 22 am" src="https://github.com/user-attachments/assets/cbb77e73-f775-4f6c-b158-07072459b7af" />

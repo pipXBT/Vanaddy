@@ -19,7 +19,7 @@ loop {
 }
 ```
 
-Tick rate is `Duration::from_millis(100)` — UI redraws ~10 fps (matches the README claim). On exit, alt-screen is left, raw mode disabled, and a summary printed (counts + CSV warning if matches were found).
+Tick rate is `Duration::from_millis(100)` — UI redraws ~10 fps. On exit, alt-screen is left, raw mode disabled, and a summary printed (counts + CSV warning if matches were found).
 
 ## State Machine
 
@@ -31,7 +31,7 @@ AppState::Configuring  ─── Enter (validate OK) ───►  AppState::Sea
         q (any state) ── should_quit = true ─► main loop break
 ```
 
-## App Struct (`src/app.rs:25`)
+## App Struct (`src/app.rs:21`)
 
 | Field | Type | Purpose |
 |-------|------|---------|
@@ -45,13 +45,15 @@ AppState::Configuring  ─── Enter (validate OK) ───►  AppState::Sea
 | `thread_count` | `String` | User-typed; validated into `validated_thread_count: usize` |
 | `error_message` | `Option<String>` | Inline form error (red text in config panel) |
 | `show_help` | `bool` | Help popup overlay |
-| `matches` | `Vec<MatchPayload>` | Found vanity addresses |
+| `matches` | `Vec<Match>` | Found vanity addresses |
 | `selected_match` | `usize` | Highlighted row in match table / detail view source |
-| `counter`, `match_count` | `Arc<AtomicU64>` | Shared with workers |
+| `counter` | `Arc<AtomicU64>` | Shared with workers — total candidates checked |
 | `start_time` | `Option<Instant>` | Wall-clock start, for rate + ETA |
 | `stop` | `Arc<AtomicBool>` | Worker cancellation |
-| `rx` | `Option<mpsc::Receiver<MatchPayload>>` | Drained each tick |
+| `rx` | `Option<mpsc::Receiver<Match>>` | Drained each tick |
 | `thread_pool` | `Option<rayon::ThreadPool>` | Owns worker threads; `None` when not searching |
+
+`Match` is a struct (not a tuple) with fields `{ chain, address, secret_hex, mnemonic: String }`.
 
 ## Field Layout
 
@@ -66,9 +68,9 @@ AppState::Configuring  ─── Enter (validate OK) ───►  AppState::Sea
 | 4 | Threads | Case |
 | 5 | — | Threads |
 
-`is_text_field()` (`app.rs:90`): fields 2, 3 (when both), and the last field (threads).
+`is_text_field()` (`app.rs:84`): fields 2, 3 (when both), and the last field (threads).
 
-## Key Handling (`app.rs:356`)
+## Key Handling (`app.rs:335`)
 
 Top-level: `key.kind != Press` → ignored. Help popup dismissed by any key. `Ctrl+C` either stops search (Searching) or quits (Configuring). `h` toggles help unless typing in a text field.
 
@@ -84,7 +86,7 @@ Top-level: `key.kind != Press` → ignored. Help popup dismissed by any key. `Ct
 
 In `AppState::Searching`: `Up/Down` browse `selected_match`, `q` stops & quits, `Ctrl+C` stops to config.
 
-## Validation (`app.rs:179`)
+## Validation (`app.rs:173`)
 
 1. Pick `input_str` per `match_position` (suffix when `EndsWith`, otherwise prefix).
 2. Empty → `"Vanity string cannot be empty"`.
@@ -95,14 +97,14 @@ In `AppState::Searching`: `Up/Down` browse `selected_match`, `q` stops & quits, 
 
 `validated_thread_count` is populated for `start_search()` to consume.
 
-## Search Lifecycle (`app.rs:219`)
+## Search Lifecycle (`app.rs:213`)
 
 ```rust
 start_search:
     reset counters, atomics, matches, time
     state = Searching
-    matcher = Matcher::new(prefix, suffix, position, case_sensitive, chain)
-    open vanity_wallets.csv (chmod 0600), write header if empty
+    matcher = Matcher::new(prefix, suffix, case_sensitive, chain)   // 4 args
+    open_csv_secure() → write header if file is empty
     pool = rayon::ThreadPoolBuilder::num_threads(N).build()
     pool.spawn(move || (0..N).par_iter().for_each(|_| chain.search(&matcher, &stop, &counter, &tx)))
 
@@ -113,15 +115,19 @@ stop_search:
     state = Configuring
 ```
 
-`detect_optimal_threads()` (line 335): if `logical > physical` (x86 hyperthreaded) → physical; otherwise (Apple Silicon) → logical.
+`detect_optimal_threads()` (line 318): if `logical > physical` (x86 hyperthreaded) → physical; otherwise (Apple Silicon) → logical.
 
-`drain_matches` (line 298): non-blocking `try_recv` loop. For each payload, opens CSV with `chmod 0600`, reasserts permissions, appends row, pushes to `matches`, advances `selected_match`.
+`drain_matches` (line 271): non-blocking `try_recv` loop. For each `Match`, opens CSV via `open_csv_secure()`, appends a row using `payload.chain / address / secret_hex / mnemonic`, pushes to `matches`, advances `selected_match`.
 
 ## CSV Output
 
-Path: `vanity_wallets.csv` in CWD. Created at `start_search` if missing; permissions forced to `0o600` on every open. Header: `Chain, Address, Private Key (hex), Seed Phrase`. Rows appended one per match.
+Path: `vanity_wallets.csv` in CWD. Single chokepoint: `open_csv_secure()` (`src/app.rs:296`) — every open goes through it. The function:
+1. `OpenOptions::create(true).append(true)`, with `mode(0o600)` on Unix.
+2. After open, re-asserts `0o600` via `set_permissions` in case the file pre-existed with looser perms.
 
-## Stats / ETA (`ui.rs:201`, `app.rs:142-176`)
+Header (`Chain, Address, Private Key (hex), Seed Phrase`) is written by `start_search` only when the file is empty. Rows appended one per match by `drain_matches`.
+
+## Stats / ETA (`ui.rs:201`, `app.rs:136-170`)
 
 | Stat | Source |
 |------|--------|
@@ -148,6 +154,8 @@ Path: `vanity_wallets.csv` in CWD. Created at `start_search` if missing; permiss
 │ Key hints (3 lines) │ Detail view (40%)                    │
 └─────────────────────┴───────────────────────────────────────┘
 ```
+
+Match table & detail view access `Match` fields by name (`.chain`, `.address`, `.secret_hex`, `.mnemonic`) — replaces the prior `.0/.1/.2/.3` tuple indexing.
 
 Help popup (`render_help_popup`, line 266): centered 56×26 `Block` with key bindings, dismissed by any key.
 
