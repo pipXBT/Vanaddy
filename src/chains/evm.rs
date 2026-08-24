@@ -1,7 +1,8 @@
 use super::super::bip32::{bip32_derive_secp256k1, EVM_PATH};
 use super::Chain;
 use super::super::matcher::Matcher;
-use super::super::seed::derive_seed;
+use super::super::seed::{derive_seed, derive_seeds};
+use crate::pbkdf2_lanes::LANES;
 use bip39::{Language, Mnemonic, MnemonicType};
 use sha3::{Digest, Keccak256};
 
@@ -30,27 +31,45 @@ fn eip55_encode(addr: &[u8; 20]) -> [u8; 40] {
     out
 }
 
-impl Chain for Evm {
-    const LABEL: &'static str = "EVM";
-    const CHARSET: &'static str = "0123456789abcdefABCDEF";
-    const MAX_VANITY: usize = 8;
-
-    type AddressBytes = [u8; 20];
-    type SecretRaw = libsecp256k1::SecretKey;
-
-    fn generate() -> (Self::AddressBytes, Self::SecretRaw, String) {
-        let mnemonic = Mnemonic::new(MnemonicType::Words12, Language::English);
-        let seed_bytes = derive_seed(&mnemonic);
-        let secret_key = bip32_derive_secp256k1(&seed_bytes, &EVM_PATH);
-        let public_key = libsecp256k1::PublicKey::from_secret_key(&secret_key);
-        let pubkey_bytes = public_key.serialize();
+impl Evm {
+    /// BIP-44 m/44'/60'/0'/0/0 address + secret key from a BIP-39 seed.
+    fn from_seed(seed: &[u8; 64]) -> ([u8; 20], secp256k1::SecretKey) {
+        let secret_key = bip32_derive_secp256k1(seed, &EVM_PATH);
+        let public_key = secp256k1::PublicKey::from_secret_key_global(&secret_key);
+        let pubkey_bytes = public_key.serialize_uncompressed();
         let pubkey_uncompressed = &pubkey_bytes[1..];
         let hash = Keccak256::digest(pubkey_uncompressed);
 
         let mut addr = [0u8; 20];
         addr.copy_from_slice(&hash[12..]);
+        (addr, secret_key)
+    }
+}
 
+impl Chain for Evm {
+    const LABEL: &'static str = "EVM";
+    const CHARSET: &'static str = "0123456789abcdefABCDEF";
+    const MAX_VANITY: usize = 8;
+    const BATCH: usize = LANES;
+
+    type AddressBytes = [u8; 20];
+    type SecretRaw = secp256k1::SecretKey;
+
+    fn generate() -> (Self::AddressBytes, Self::SecretRaw, String) {
+        let mnemonic = Mnemonic::new(MnemonicType::Words12, Language::English);
+        let seed_bytes = derive_seed(&mnemonic);
+        let (addr, secret_key) = Self::from_seed(&seed_bytes);
         (addr, secret_key, mnemonic.phrase().to_string())
+    }
+
+    fn generate_batch(mut emit: impl FnMut(Self::AddressBytes, Self::SecretRaw, String)) {
+        let mnemonics: [Mnemonic; LANES] =
+            std::array::from_fn(|_| Mnemonic::new(MnemonicType::Words12, Language::English));
+        let seeds = derive_seeds(&mnemonics);
+        for (mnemonic, seed) in mnemonics.iter().zip(seeds.iter()) {
+            let (addr, secret) = Self::from_seed(seed);
+            emit(addr, secret, mnemonic.phrase().to_string());
+        }
     }
 
     fn encode_address(bytes: &Self::AddressBytes) -> String {
@@ -58,7 +77,7 @@ impl Chain for Evm {
     }
 
     fn encode_secret(raw: &Self::SecretRaw) -> String {
-        hex::encode(raw.serialize())
+        hex::encode(raw.secret_bytes())
     }
 
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool {
@@ -115,5 +134,39 @@ mod tests {
         let checksummed = eip55_encode(&arr);
         let got = std::str::from_utf8(&checksummed).unwrap();
         assert_eq!(got, "fB6916095ca1df60bB79Ce92cE3Ea74c37c5d359");
+    }
+
+    /// BIP-44 pinned vector: the canonical BIP-39 phrase at m/44'/60'/0'/0/0 is the
+    /// first MetaMask account, 0x9858EfFD232B4033E47d90003D41EC34EcaEda94.
+    #[test]
+    fn bip44_canonical_vector() {
+        use bip39::{Language, Mnemonic};
+        let m = Mnemonic::from_phrase(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            Language::English,
+        ).unwrap();
+        let seed = derive_seed(&m);
+        let (addr, _sk) = Evm::from_seed(&seed);
+        assert_eq!(hex::encode(addr), "9858effd232b4033e47d90003d41ec34ecaeda94");
+        let eip55 = eip55_encode(&addr);
+        assert_eq!(std::str::from_utf8(&eip55).unwrap(), "9858EfFD232B4033E47d90003D41EC34EcaEda94");
+    }
+
+    #[test]
+    fn generate_batch_emits_lane_count_candidates_matching_single_path() {
+        use crate::pbkdf2_lanes::LANES;
+        let mut got = Vec::new();
+        Evm::generate_batch(|addr, secret, phrase| got.push((addr, secret, phrase)));
+        assert_eq!(Evm::BATCH, LANES);
+        assert_eq!(got.len(), LANES);
+        for (addr, secret, phrase) in &got {
+            let m = Mnemonic::from_phrase(phrase, Language::English).unwrap();
+            let (addr2, secret2) = Evm::from_seed(&derive_seed(&m));
+            assert_eq!(addr, &addr2, "batch address must match single-path derivation");
+            assert_eq!(Evm::encode_secret(secret), Evm::encode_secret(&secret2));
+        }
+        let mut addrs: Vec<_> = got.iter().map(|c| c.0).collect();
+        addrs.dedup();
+        assert_eq!(addrs.len(), LANES, "every lane must use fresh entropy");
     }
 }

@@ -1,6 +1,7 @@
 use super::super::bip32::{bip32_derive_secp256k1, BTC_BIP84_PATH};
 use super::super::matcher::Matcher;
-use super::super::seed::derive_seed;
+use super::super::seed::{derive_seed, derive_seeds};
+use crate::pbkdf2_lanes::LANES;
 use super::Chain;
 use bech32::{u5, ToBase32, Variant};
 use bip39::{Language, Mnemonic, MnemonicType};
@@ -40,23 +41,41 @@ fn expand_5bit(bytes: &[u8; 20]) -> [u8; 32] {
     out
 }
 
+impl Bitcoin {
+    /// BIP-84 m/84'/0'/0'/0/0 HASH160 + secret key from a BIP-39 seed.
+    fn from_seed(seed: &[u8; 64]) -> ([u8; 20], secp256k1::SecretKey) {
+        let secret_key = bip32_derive_secp256k1(seed, &BTC_BIP84_PATH);
+        let public_key = secp256k1::PublicKey::from_secret_key_global(&secret_key);
+        let addr_hash = hash160(&public_key.serialize());
+        (addr_hash, secret_key)
+    }
+}
+
 impl Chain for Bitcoin {
     const LABEL: &'static str = "Bitcoin";
     // Bech32 alphabet (lowercase only)
     const CHARSET: &'static str = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
     const MAX_VANITY: usize = 8;
+    const BATCH: usize = LANES;
 
     type AddressBytes = [u8; 20];
-    type SecretRaw = libsecp256k1::SecretKey;
+    type SecretRaw = secp256k1::SecretKey;
 
     fn generate() -> (Self::AddressBytes, Self::SecretRaw, String) {
         let mnemonic = Mnemonic::new(MnemonicType::Words12, Language::English);
         let seed_bytes = derive_seed(&mnemonic);
-        let secret_key = bip32_derive_secp256k1(&seed_bytes, &BTC_BIP84_PATH);
-        let public_key = libsecp256k1::PublicKey::from_secret_key(&secret_key);
-        let pubkey_compressed = public_key.serialize_compressed();
-        let addr_hash = hash160(&pubkey_compressed);
+        let (addr_hash, secret_key) = Self::from_seed(&seed_bytes);
         (addr_hash, secret_key, mnemonic.phrase().to_string())
+    }
+
+    fn generate_batch(mut emit: impl FnMut(Self::AddressBytes, Self::SecretRaw, String)) {
+        let mnemonics: [Mnemonic; LANES] =
+            std::array::from_fn(|_| Mnemonic::new(MnemonicType::Words12, Language::English));
+        let seeds = derive_seeds(&mnemonics);
+        for (mnemonic, seed) in mnemonics.iter().zip(seeds.iter()) {
+            let (addr, secret) = Self::from_seed(seed);
+            emit(addr, secret, mnemonic.phrase().to_string());
+        }
     }
 
     fn encode_address(bytes: &Self::AddressBytes) -> String {
@@ -67,7 +86,7 @@ impl Chain for Bitcoin {
     }
 
     fn encode_secret(raw: &Self::SecretRaw) -> String {
-        hex::encode(raw.serialize())
+        hex::encode(raw.secret_bytes())
     }
 
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool {
@@ -113,8 +132,8 @@ mod tests {
         ).unwrap();
         let seed = derive_seed(&m);
         let sk = bip32_derive_secp256k1(&seed, &BTC_BIP84_PATH);
-        let pk = libsecp256k1::PublicKey::from_secret_key(&sk);
-        let hash = hash160(&pk.serialize_compressed());
+        let pk = secp256k1::PublicKey::from_secret_key_global(&sk);
+        let hash = hash160(&pk.serialize());
         let addr = Bitcoin::encode_address(&hash);
         assert_eq!(addr, "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu");
     }
@@ -130,8 +149,8 @@ mod tests {
         ).unwrap();
         let seed = derive_seed(&m);
         let sk = bip32_derive_secp256k1(&seed, &BTC_BIP84_PATH);
-        let pk = libsecp256k1::PublicKey::from_secret_key(&sk);
-        let hash = hash160(&pk.serialize_compressed());
+        let pk = secp256k1::PublicKey::from_secret_key_global(&sk);
+        let hash = hash160(&pk.serialize());
         let addr = Bitcoin::encode_address(&hash);
         // addr = "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
         // after "bc1q": "cr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
@@ -171,5 +190,23 @@ mod tests {
         for (a, b) in ours.iter().zip(theirs.iter()) {
             assert_eq!(*a, b.to_u8());
         }
+    }
+
+    #[test]
+    fn generate_batch_emits_lane_count_candidates_matching_single_path() {
+        use crate::pbkdf2_lanes::LANES;
+        let mut got = Vec::new();
+        Bitcoin::generate_batch(|addr, secret, phrase| got.push((addr, secret, phrase)));
+        assert_eq!(Bitcoin::BATCH, LANES);
+        assert_eq!(got.len(), LANES);
+        for (addr, secret, phrase) in &got {
+            let m = Mnemonic::from_phrase(phrase, Language::English).unwrap();
+            let (addr2, secret2) = Bitcoin::from_seed(&derive_seed(&m));
+            assert_eq!(addr, &addr2, "batch address must match single-path derivation");
+            assert_eq!(Bitcoin::encode_secret(secret), Bitcoin::encode_secret(&secret2));
+        }
+        let mut addrs: Vec<_> = got.iter().map(|c| c.0).collect();
+        addrs.dedup();
+        assert_eq!(addrs.len(), LANES, "every lane must use fresh entropy");
     }
 }

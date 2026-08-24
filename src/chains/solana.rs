@@ -1,17 +1,28 @@
 use super::Chain;
 use super::super::matcher::Matcher;
-use super::super::seed::derive_seed;
+use super::super::seed::{derive_seed, derive_seeds};
+use crate::pbkdf2_lanes::LANES;
 use super::super::slip10::{slip10_derive_ed25519, PHANTOM_SOLANA_PATH};
 use bip39::{Language, Mnemonic, MnemonicType};
 use ed25519_dalek::SigningKey;
 
 pub struct Solana;
 
+impl Solana {
+    /// Phantom m/44'/501'/0'/0' public key + signing key from a BIP-39 seed.
+    fn from_seed(seed: &[u8; 64]) -> ([u8; 32], SigningKey) {
+        let key_bytes = slip10_derive_ed25519(seed, &PHANTOM_SOLANA_PATH);
+        let signing_key = SigningKey::from_bytes(&key_bytes);
+        (signing_key.verifying_key().to_bytes(), signing_key)
+    }
+}
+
 impl Chain for Solana {
     const LABEL: &'static str = "Solana";
     const CHARSET: &'static str =
         "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     const MAX_VANITY: usize = 9;
+    const BATCH: usize = LANES;
 
     type AddressBytes = [u8; 32];
     type SecretRaw = SigningKey;
@@ -19,10 +30,18 @@ impl Chain for Solana {
     fn generate() -> (Self::AddressBytes, Self::SecretRaw, String) {
         let mnemonic = Mnemonic::new(MnemonicType::Words12, Language::English);
         let seed_bytes = derive_seed(&mnemonic);
-        let key_bytes = slip10_derive_ed25519(&seed_bytes, &PHANTOM_SOLANA_PATH);
-        let signing_key = SigningKey::from_bytes(&key_bytes);
-        let pubkey_bytes = signing_key.verifying_key().to_bytes();
+        let (pubkey_bytes, signing_key) = Self::from_seed(&seed_bytes);
         (pubkey_bytes, signing_key, mnemonic.phrase().to_string())
+    }
+
+    fn generate_batch(mut emit: impl FnMut(Self::AddressBytes, Self::SecretRaw, String)) {
+        let mnemonics: [Mnemonic; LANES] =
+            std::array::from_fn(|_| Mnemonic::new(MnemonicType::Words12, Language::English));
+        let seeds = derive_seeds(&mnemonics);
+        for (mnemonic, seed) in mnemonics.iter().zip(seeds.iter()) {
+            let (addr, secret) = Self::from_seed(seed);
+            emit(addr, secret, mnemonic.phrase().to_string());
+        }
     }
 
     fn encode_address(bytes: &Self::AddressBytes) -> String {
@@ -135,5 +154,23 @@ mod tests {
             "case-sensitive prefix '{}' must match its own address '{}'",
             actual_prefix, addr
         );
+    }
+
+    #[test]
+    fn generate_batch_emits_lane_count_candidates_matching_single_path() {
+        use crate::pbkdf2_lanes::LANES;
+        let mut got = Vec::new();
+        Solana::generate_batch(|addr, secret, phrase| got.push((addr, secret, phrase)));
+        assert_eq!(Solana::BATCH, LANES);
+        assert_eq!(got.len(), LANES);
+        for (addr, secret, phrase) in &got {
+            let m = Mnemonic::from_phrase(phrase, Language::English).unwrap();
+            let (addr2, secret2) = Solana::from_seed(&derive_seed(&m));
+            assert_eq!(addr, &addr2, "batch address must match single-path derivation");
+            assert_eq!(Solana::encode_secret(secret), Solana::encode_secret(&secret2));
+        }
+        let mut addrs: Vec<_> = got.iter().map(|c| c.0).collect();
+        addrs.dedup();
+        assert_eq!(addrs.len(), LANES, "every lane must use fresh entropy");
     }
 }

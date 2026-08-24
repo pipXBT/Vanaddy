@@ -2,6 +2,7 @@ pub mod app;
 pub mod bip32;
 pub mod chains;
 pub mod matcher;
+pub mod pbkdf2_lanes;
 pub mod seed;
 pub mod slip10;
 pub mod ui;

@@ -21,7 +21,7 @@ EVM addresses are chain-agnostic — the same vanity address works on Ethereum, 
 - **Flexible matching**: Starts with, ends with, or starts _and_ ends with
 - **Case-sensitive or insensitive** search; EVM case-sensitive uses EIP-55 checksum matching
 - **Multi-threaded**: Rayon work-stealing thread pool with auto-detected optimal core count
-- **Optimized crypto**: `ring` crate with ARM64 NEON assembly for PBKDF2, stack-buffer Bech32 expansion, byte-wise case-insensitive matching — zero hot-loop heap allocations
+- **Optimized crypto**: 4-lane PBKDF2 on the ARMv8.2 SHA-512 instructions (`ring` fallback elsewhere), bitcoin-core's C `secp256k1`, stack-buffer Bech32 expansion, byte-wise case-insensitive matching — zero hot-loop heap allocations
 - **Fast-path matching**: EVM compares Keccak-256 hash bytes before hex-encoding; Bitcoin compares 5-bit Bech32 groups before full encoding — expensive string formatting only happens on candidates that pass the byte-level filter
 - **Full TUI**: Ratatui-powered terminal UI with config form, live stats dashboard, scrollable match table, and detail view — all at 10fps
 - **Graceful shutdown**: Press Ctrl+C to stop search and return to config, `q` to quit — all matches saved
@@ -97,22 +97,25 @@ Results are saved to `vanity_wallets.csv`:
 
 The generator uses several optimizations:
 
-- **`ring` PBKDF2**: ARM64 NEON-optimized HMAC-SHA512 assembly replaces the pure-Rust `pbkdf2` crate, ~1.5-2× faster seed derivation on Apple Silicon
+- **4-lane hardware PBKDF2**: BIP-39 and TON seeds are derived four at a time on the ARMv8.2 SHA-512 instructions (`sha512h`/`sha512h2`/`sha512su0`/`sha512su1`), interleaving four independent streams so the core's crypto unit never waits on a single dependency chain — ~2× per core over single-stream `ring` on M1 (which already used the hardware path). Runtime-detected; other targets fall back to `ring`
+- **C `secp256k1`**: BIP-32 public-key steps and address derivation use bitcoin-core's libsecp256k1 (~17 µs per fixed-base multiply vs ~38 µs for the pure-Rust `libsecp256k1` it replaced)
 - **Byte-level fast-paths**: EVM compares Keccak-256 hash bytes with nibble-level precision before hex-encoding; Bitcoin compares 5-bit Bech32 groups via a stack-buffer expansion — the encoder is only called on candidates that pass the byte-level filter
 - **Zero hot-loop allocations**: Byte-wise ASCII case comparison via `eq_ignore_ascii_case` (no `to_lowercase()` per candidate); fixed-size arrays in BIP-32/SLIP-0010 derivation; secrets are raw structs until `encode_secret()` is called on a match
 - **Monomorphized generics**: Each chain's search loop is monomorphized by the compiler (`search::<C: Chain>`) — no trait-object dispatch, no v-table lookups in the hot loop
 - **Auto-detected thread count**: Detects physical vs logical cores, recommends optimal count for Apple Silicon (all cores) or x86 with hyperthreading (physical cores only)
 - **Rayon work-stealing** thread pool with atomic counters — no lock contention between threads
 
-### Per-chain throughput (Apple Silicon, release build)
+### Per-chain throughput (Apple M1 P-core, release build)
 
 | Chain    | Mean / generation  | Notes |
 |----------|-------------------|-------|
-| Solana   | ~570 µs          | SLIP-0010 at `m/44'/501'/0'/0'` (Phantom-compat) |
-| EVM      | ~655 µs          | Keccak-256 + optional EIP-55 for case-sensitive |
-| Bitcoin  | ~645 µs          | BIP-84 Bech32 with stack-buffer 5-bit fast-path |
-| TON      | ~51 ms           | Native 24-word mnemonic; PBKDF2-dominated (~100k iters/wallet) |
+| Solana   | ~288 µs          | SLIP-0010 at `m/44'/501'/0'/0'` (Phantom-compat) |
+| EVM      | ~321 µs          | Keccak-256 + optional EIP-55 for case-sensitive |
+| Bitcoin  | ~321 µs          | BIP-84 Bech32 with stack-buffer 5-bit fast-path |
+| TON      | ~26 ms           | Native 24-word mnemonic; PBKDF2-dominated (~100k iters/wallet) |
 | Monero   | ~35 µs           | Two Ed25519 scalars + Keccak; no PBKDF2 |
+
+Per-candidate cost is ~90% PBKDF2 on the mnemonic chains; the 4-lane derivation roughly halved it versus the previous single-stream numbers (570 / 655 / 645 µs, 51 ms).
 
 ### Difficulty scaling
 
@@ -143,7 +146,7 @@ Each additional character in your vanity makes the search exponentially harder. 
   - Monero → standard `spend_sec = reduce32(random)`, `view_sec = reduce32(Keccak(spend_sec))`, 25-word Electrum phrase
 - **CSV file is created with `chmod 0600`** (owner read/write only). On quit, a warning prints reminding you the file contains plaintext secrets.
 - **Monero secret key material is zeroized on drop** (only generated keys that match are kept; discarded candidates have their secrets wiped).
-- **EVM/Solana/Bitcoin secrets** rely on `libsecp256k1` / `ed25519-dalek`'s internal zeroization.
+- **Solana/TON secrets** rely on `ed25519-dalek`'s zeroize-on-drop. **EVM/Bitcoin** `secp256k1::SecretKey` is `Copy` and is not wiped automatically; discarded candidates only live on the stack for the duration of one 4-candidate batch.
 
 **Keep your `vanity_wallets.csv` file secure.** Anyone with the seed phrase or private key has full control of the wallet. After transferring vanity addresses to their final wallet, consider moving the CSV to an encrypted location and removing the original.
 

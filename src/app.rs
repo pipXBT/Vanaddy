@@ -144,13 +144,14 @@ impl App {
     }
 
     /// Rough per-thread throughput estimate (attempts/sec), used for ETA when
-    /// the user hasn't started a search yet. Numbers from `benches/generation.rs`.
+    /// the user hasn't started a search yet. Measured on an Apple M1 P-core
+    /// (release build, 4-lane PBKDF2 path); see the table in CLAUDE.md.
     fn single_thread_rate(&self) -> f64 {
         match self.chain {
-            ChainKind::Solana => 1_750.0, // ~570 µs/gen
-            ChainKind::Evm => 1_525.0,    // ~655 µs/gen
-            ChainKind::Bitcoin => 1_550.0, // ~645 µs/gen
-            ChainKind::Ton => 19.6,       // ~51 ms/gen — intrinsically slow
+            ChainKind::Solana => 3_470.0, // ~288 µs/gen
+            ChainKind::Evm => 3_115.0,    // ~321 µs/gen
+            ChainKind::Bitcoin => 3_115.0, // ~321 µs/gen
+            ChainKind::Ton => 38.4,       // ~26 ms/gen — intrinsically slow
             ChainKind::Monero => 28_600.0, // ~35 µs/gen
         }
     }

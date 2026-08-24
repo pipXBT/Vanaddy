@@ -1,6 +1,7 @@
 use super::super::matcher::Matcher;
 use super::ton_cell::{wallet_v5r1_state_init, W5_MAINNET_WALLET_ID};
-use super::ton_mnemonic::generate_ton_wallet;
+use super::ton_mnemonic::{generate_ton_wallet, generate_ton_wallets};
+use crate::pbkdf2_lanes::LANES;
 use super::Chain;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use ed25519_dalek::SigningKey;
@@ -40,6 +41,21 @@ fn account_id_from_pubkey(pubkey: &[u8; 32]) -> [u8; 32] {
     wallet_v5r1_state_init(pubkey, W5_MAINNET_WALLET_ID).hash()
 }
 
+impl Ton {
+    /// Raw user-friendly address: tag(1) || workchain(1) || account_id(32) || crc16(2).
+    fn address_bytes(pubkey: &[u8; 32]) -> [u8; 36] {
+        let account = account_id_from_pubkey(pubkey);
+        let mut addr = [0u8; 36];
+        addr[0] = 0x51; // non-bounceable mainnet (UQ) — Tonkeeper's default receive tag
+        addr[1] = 0x00; // mainnet workchain
+        addr[2..34].copy_from_slice(&account);
+        let crc = crc16_xmodem(&addr[..34]);
+        addr[34] = (crc >> 8) as u8;
+        addr[35] = crc as u8;
+        addr
+    }
+}
+
 impl Chain for Ton {
     const LABEL: &'static str = "TON";
     // Base64url alphabet (A-Z a-z 0-9 - _)
@@ -48,8 +64,9 @@ impl Chain for Ton {
     // Reduced from 6: TON's native mnemonic is ~100x slower than other chains due to
     // 100,000 PBKDF2-HMAC-SHA512 iterations per valid wallet (plus a ~1/256 acceptance
     // filter). A 4-char vanity is the practical maximum; 5+ chars would take days to
-    // months at realistic multi-threaded throughput (~100 wallets/sec).
+    // months at realistic multi-threaded throughput (~200 wallets/sec on an M1).
     const MAX_VANITY: usize = 4;
+    const BATCH: usize = LANES;
 
     /// 36 bytes: tag(1) || workchain(1) || account_id(32) || crc16(2)
     type AddressBytes = [u8; 36];
@@ -57,19 +74,15 @@ impl Chain for Ton {
 
     fn generate() -> (Self::AddressBytes, Self::SecretRaw, String) {
         let (phrase, signing_key) = generate_ton_wallet();
-        let pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
-
-        let account = account_id_from_pubkey(&pubkey);
-
-        let mut addr = [0u8; 36];
-        addr[0] = 0x51; // non-bounceable mainnet (UQ) — Tonkeeper's default receive tag
-        addr[1] = 0x00; // mainnet workchain
-        addr[2..34].copy_from_slice(&account);
-        let crc = crc16_xmodem(&addr[..34]);
-        addr[34] = (crc >> 8) as u8;
-        addr[35] = crc as u8;
-
+        let addr = Self::address_bytes(&signing_key.verifying_key().to_bytes());
         (addr, signing_key, phrase)
+    }
+
+    fn generate_batch(mut emit: impl FnMut(Self::AddressBytes, Self::SecretRaw, String)) {
+        for (phrase, signing_key) in generate_ton_wallets() {
+            let addr = Self::address_bytes(&signing_key.verifying_key().to_bytes());
+            emit(addr, signing_key, phrase);
+        }
     }
 
     fn encode_address(bytes: &Self::AddressBytes) -> String {
@@ -195,5 +208,20 @@ mod tests {
 
         let encoded = Ton::encode_address(&addr);
         assert_eq!(encoded, "UQAkFCMtkN0Q1TNP6Gk9SqYWsBFc6Aglwckj6ES4AeBEzWja");
+    }
+
+    #[test]
+    fn generate_batch_emits_lane_count_wallets_with_consistent_addresses() {
+        use super::super::ton_mnemonic::mnemonic_to_signing_key;
+        use crate::pbkdf2_lanes::LANES;
+        let mut got = Vec::new();
+        Ton::generate_batch(|addr, secret, phrase| got.push((addr, secret, phrase)));
+        assert_eq!(Ton::BATCH, LANES);
+        assert_eq!(got.len(), LANES);
+        for (addr, secret, phrase) in &got {
+            let sk = mnemonic_to_signing_key(phrase);
+            assert_eq!(sk.to_bytes(), secret.to_bytes(), "batch key must match single-path derivation");
+            assert_eq!(addr, &Ton::address_bytes(&sk.verifying_key().to_bytes()));
+        }
     }
 }

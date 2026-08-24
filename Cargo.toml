@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-libsecp256k1 = "0.6"
+secp256k1 = { version = "0.30", features = ["global-context"] }
 sha3 = "0.9"
 rayon = "1.8"
 csv = "1.3"

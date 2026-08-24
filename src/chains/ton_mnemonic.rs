@@ -4,9 +4,12 @@
 //! seed via HMAC-SHA512 of the phrase, an acceptance filter (basic_seed[0] == 0)
 //! and a 100,000-iter PBKDF2-HMAC-SHA512. The filter accepts ~1/256 of phrases,
 //! so generation is roughly 100x slower than other chains' BIP-39 pipelines.
+//! Both PBKDF2 stages run `pbkdf2_lanes::LANES` phrases interleaved (see
+//! `generate_ton_wallets`), which halves the per-wallet cost on Apple Silicon.
 //!
 //! Reference: https://github.com/toncenter/tonweb-mnemonic/blob/master/src/functions/generate.ts
 
+use crate::pbkdf2_lanes::{pbkdf2_hmac_sha512, LANES};
 use bip39::{Language, Mnemonic, MnemonicType};
 use ed25519_dalek::SigningKey;
 use ring::{hmac, pbkdf2};
@@ -80,6 +83,40 @@ pub fn generate_ton_wallet() -> (String, SigningKey) {
     }
 }
 
+/// Generate `LANES` Tonkeeper-compatible wallets, running the acceptance
+/// filter and the final 100k-iteration PBKDF2 for all lanes interleaved.
+pub fn generate_ton_wallets() -> [(String, SigningKey); LANES] {
+    // Phase 1: trial phrases LANES at a time until LANES of them pass the filter.
+    let mut accepted: Vec<(String, [u8; 64])> = Vec::with_capacity(LANES);
+    while accepted.len() < LANES {
+        let phrases: [String; LANES] = std::array::from_fn(|_| {
+            Mnemonic::new(MnemonicType::Words24, Language::English)
+                .phrase()
+                .to_string()
+        });
+        let entropies: [[u8; 64]; LANES] =
+            std::array::from_fn(|i| hmac_sha512_empty_key(phrases[i].as_bytes()));
+        let passwords: [&[u8]; LANES] = std::array::from_fn(|i| entropies[i].as_slice());
+        let basic = pbkdf2_hmac_sha512::<LANES>(passwords, b"TON seed version", PBKDF2_BASIC_ITER);
+        for (i, phrase) in phrases.into_iter().enumerate() {
+            if basic[i][0] == 0 && accepted.len() < LANES {
+                accepted.push((phrase, entropies[i]));
+            }
+        }
+    }
+
+    // Phase 2: the expensive seed derivation for all accepted phrases at once.
+    let passwords: [&[u8]; LANES] = std::array::from_fn(|i| accepted[i].1.as_slice());
+    let seeds = pbkdf2_hmac_sha512::<LANES>(passwords, b"TON default seed", PBKDF2_SEED_ITER);
+    let mut accepted = accepted.into_iter();
+    std::array::from_fn(|i| {
+        let (phrase, _entropy) = accepted.next().expect("LANES phrases accepted");
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&seeds[i][..32]);
+        (phrase, SigningKey::from_bytes(&seed))
+    })
+}
+
 /// Recover the Ed25519 signing key from an existing TON mnemonic phrase.
 /// Used for round-trip determinism tests.
 #[cfg(test)]
@@ -116,6 +153,22 @@ mod tests {
             sk2.to_bytes(),
             "re-deriving from the same phrase must yield identical signing key"
         );
+    }
+
+    #[test]
+    fn batch_wallets_match_single_path_and_pass_filter() {
+        let wallets = generate_ton_wallets();
+        let mut phrases: Vec<&str> = wallets.iter().map(|(p, _)| p.as_str()).collect();
+        for (phrase, sk) in &wallets {
+            assert_eq!(phrase.split_whitespace().count(), 24);
+            assert_eq!(sk.to_bytes(), mnemonic_to_signing_key(phrase).to_bytes());
+            let entropy = hmac_sha512_empty_key(phrase.as_bytes());
+            let basic = pbkdf2_sha512(&entropy, b"TON seed version", PBKDF2_BASIC_ITER, 64);
+            assert_eq!(basic[0], 0, "every batch phrase must pass the acceptance filter");
+        }
+        phrases.sort_unstable();
+        phrases.dedup();
+        assert_eq!(phrases.len(), wallets.len(), "phrases must be distinct");
     }
 
     #[test]
