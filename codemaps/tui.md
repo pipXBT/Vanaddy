@@ -1,4 +1,4 @@
-> Generated: 2026-05-05 | Token-lean format for LLM context
+> Generated: 2026-08-24 | Token-lean format for LLM context
 
 # TUI
 
@@ -47,7 +47,7 @@ AppState::Configuring  ─── Enter (validate OK) ───►  AppState::Sea
 | `show_help` | `bool` | Help popup overlay |
 | `matches` | `Vec<Match>` | Found vanity addresses |
 | `selected_match` | `usize` | Highlighted row in match table / detail view source |
-| `counter` | `Arc<AtomicU64>` | Shared with workers — total candidates checked |
+| `counter` | `Arc<AtomicU64>` | Shared with workers — total candidates checked (advances by `Chain::BATCH`) |
 | `start_time` | `Option<Instant>` | Wall-clock start, for rate + ETA |
 | `stop` | `Arc<AtomicBool>` | Worker cancellation |
 | `rx` | `Option<mpsc::Receiver<Match>>` | Drained each tick |
@@ -57,7 +57,7 @@ AppState::Configuring  ─── Enter (validate OK) ───►  AppState::Sea
 
 ## Field Layout
 
-`field_count()` returns 5 normally, 6 when match_position is `StartsAndEndsWith`.
+`field_count()` (`app.rs:76`) returns 5 normally, 6 when match_position is `StartsAndEndsWith`.
 
 | Position | StartsWith / EndsWith | StartsAndEndsWith |
 |----------|----------------------|-------------------|
@@ -70,7 +70,7 @@ AppState::Configuring  ─── Enter (validate OK) ───►  AppState::Sea
 
 `is_text_field()` (`app.rs:84`): fields 2, 3 (when both), and the last field (threads).
 
-## Key Handling (`app.rs:335`)
+## Key Handling (`app.rs:336`)
 
 Top-level: `key.kind != Press` → ignored. Help popup dismissed by any key. `Ctrl+C` either stops search (Searching) or quits (Configuring). `h` toggles help unless typing in a text field.
 
@@ -86,7 +86,7 @@ Top-level: `key.kind != Press` → ignored. Help popup dismissed by any key. `Ct
 
 In `AppState::Searching`: `Up/Down` browse `selected_match`, `q` stops & quits, `Ctrl+C` stops to config.
 
-## Validation (`app.rs:173`)
+## Validation (`app.rs:174`)
 
 1. Pick `input_str` per `match_position` (suffix when `EndsWith`, otherwise prefix).
 2. Empty → `"Vanity string cannot be empty"`.
@@ -97,7 +97,7 @@ In `AppState::Searching`: `Up/Down` browse `selected_match`, `q` stops & quits, 
 
 `validated_thread_count` is populated for `start_search()` to consume.
 
-## Search Lifecycle (`app.rs:213`)
+## Search Lifecycle (`app.rs:214`)
 
 ```rust
 start_search:
@@ -108,26 +108,28 @@ start_search:
     pool = rayon::ThreadPoolBuilder::num_threads(N).build()
     pool.spawn(move || (0..N).par_iter().for_each(|_| chain.search(&matcher, &stop, &counter, &tx)))
 
-stop_search:
+stop_search:                                    // app.rs:264
     stop.store(true)
     rx = None       (drops sender side eventually)
-    thread_pool = None  (drops pool — workers exit on next stop check)
+    thread_pool = None  (drops pool — workers exit after their current batch)
     state = Configuring
 ```
 
-`detect_optimal_threads()` (line 318): if `logical > physical` (x86 hyperthreaded) → physical; otherwise (Apple Silicon) → logical.
+Workers check `stop` once per `generate_batch` (4 candidates; ~1 ms for BIP-39 chains, ~100 ms for TON).
 
-`drain_matches` (line 271): non-blocking `try_recv` loop. For each `Match`, opens CSV via `open_csv_secure()`, appends a row using `payload.chain / address / secret_hex / mnemonic`, pushes to `matches`, advances `selected_match`.
+`detect_optimal_threads()` (line 319): if `logical > physical` (x86 hyperthreaded) → physical; otherwise (Apple Silicon) → logical. Validation still allows up to `2 × num_cpus`, which measures slower than `num_cpus` on M1.
+
+`drain_matches` (line 272): non-blocking `try_recv` loop. For each `Match`, opens CSV via `open_csv_secure()`, appends a row using `payload.chain / address / secret_hex / mnemonic`, pushes to `matches`, advances `selected_match`.
 
 ## CSV Output
 
-Path: `vanity_wallets.csv` in CWD. Single chokepoint: `open_csv_secure()` (`src/app.rs:296`) — every open goes through it. The function:
+Path: `vanity_wallets.csv` in CWD. Single chokepoint: `open_csv_secure()` (`src/app.rs:297`) — every open goes through it. The function:
 1. `OpenOptions::create(true).append(true)`, with `mode(0o600)` on Unix.
 2. After open, re-asserts `0o600` via `set_permissions` in case the file pre-existed with looser perms.
 
 Header (`Chain, Address, Private Key (hex), Seed Phrase`) is written by `start_search` only when the file is empty. Rows appended one per match by `drain_matches`.
 
-## Stats / ETA (`ui.rs:201`, `app.rs:136-170`)
+## Stats / ETA (`ui.rs:201`, `app.rs:116-172`)
 
 | Stat | Source |
 |------|--------|
@@ -140,7 +142,7 @@ Header (`Chain, Address, Private Key (hex), Seed Phrase`) is written by `start_s
 
 `effective_alphabet_size`: 33/58 (Solana, Monero), 16/32 (EVM, where 32 = case-sensitive EIP-55), 32 (Bitcoin, lowercase only), 38/64 (TON).
 
-`single_thread_rate` carries historical per-chain throughput numbers (Solana 1750/s, EVM 1525/s, Bitcoin 1550/s, TON 19.6/s, Monero 28600/s) — used for ETA estimation when no live rate is yet available.
+`single_thread_rate` (`app.rs:149`) holds per-chain throughput measured on an M1 P-core with the 4-lane PBKDF2 path: Solana 3470/s, EVM 3115/s, Bitcoin 3115/s, TON 38.4/s, Monero 28600/s — used for ETA estimation when no live rate is yet available.
 
 `format_duration`: `< 1s`, `Ns`, `Nm Ns`, `Nh Nm`, `Nd Nh`, `N.Ny`, `>100y`.
 
@@ -155,11 +157,12 @@ Header (`Chain, Address, Private Key (hex), Seed Phrase`) is written by `start_s
 └─────────────────────┴───────────────────────────────────────┘
 ```
 
-Match table & detail view access `Match` fields by name (`.chain`, `.address`, `.secret_hex`, `.mnemonic`) — replaces the prior `.0/.1/.2/.3` tuple indexing.
+Match table (`ui.rs:340`) & detail view (`ui.rs:384`) access `Match` fields by name (`.chain`, `.address`, `.secret_hex`, `.mnemonic`).
 
 Help popup (`render_help_popup`, line 266): centered 56×26 `Block` with key bindings, dismissed by any key.
 
 ## Tests
 
 - `app::tests::start_stop_restart_does_not_leak_threads` — start/stop/restart cycle leaves `thread_pool == None`, `stop == true`.
+- `chains::tests::search_counts_whole_batches_and_honours_stop` — worker loop stops on the flag and counts in multiples of `BATCH`.
 - `ui::tests::*` — `format_count` and `format_duration` units.

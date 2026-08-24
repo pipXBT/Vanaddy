@@ -1,8 +1,8 @@
-> Generated: 2026-05-05 | Token-lean format for LLM context
+> Generated: 2026-08-24 | Token-lean format for LLM context
 
 # Chains
 
-The `Chain` trait (`src/chains/mod.rs:23`) is the per-chain contract. `ChainKind` is the runtime enum picked by the user; its `search()` method (`mod.rs:76`) dispatches once at thread-spawn into the monomorphized `search::<C: Chain>` hot loop (`mod.rs:93`).
+The `Chain` trait (`src/chains/mod.rs:23`) is the per-chain contract. `ChainKind` (`mod.rs:48`) is the runtime enum picked by the user; its `search()` method (`mod.rs:84`) dispatches once at thread-spawn into the monomorphized `search::<C: Chain>` hot loop (`mod.rs:101`).
 
 ## `Chain` Trait
 
@@ -11,11 +11,17 @@ pub trait Chain: Send + Sync + 'static {
     const LABEL: &'static str;          // "Solana", "EVM", ...
     const CHARSET: &'static str;        // valid vanity chars for this chain
     const MAX_VANITY: usize;            // upper bound on prefix/suffix length
+    const BATCH: usize = 1;             // candidates emitted per generate_batch call
 
     type AddressBytes: AsRef<[u8]>;
     type SecretRaw;
 
     fn generate() -> (Self::AddressBytes, Self::SecretRaw, String);
+    /// Default: one generate(). PBKDF2-bound chains override with LANES seeds at once.
+    fn generate_batch(mut emit: impl FnMut(Self::AddressBytes, Self::SecretRaw, String)) {
+        let (addr, secret, phrase) = Self::generate();
+        emit(addr, secret, phrase);
+    }
     fn encode_address(bytes: &Self::AddressBytes) -> String;
     fn encode_secret(raw: &Self::SecretRaw) -> String;
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool;
@@ -29,17 +35,39 @@ pub struct Match { chain, address, secret_hex, mnemonic: String }
 
 ## Per-Chain Summary
 
-| Chain | LABEL | CHARSET | MAX_VANITY | AddressBytes | SecretRaw | Vanity skips |
-|-------|-------|---------|-----------|--------------|-----------|--------------|
-| Solana | "Solana" | Base58 (58) | 9 | `[u8; 32]` | `ed25519_dalek::SigningKey` | none |
-| EVM | "EVM" | hex (0-9, a-f, A-F) | 8 | `[u8; 20]` | `libsecp256k1::SecretKey` | `0x` (encoded), 0 raw |
-| Bitcoin | "Bitcoin" | Bech32 (32) | 8 | `[u8; 20]` (HASH160) | `libsecp256k1::SecretKey` | `bc1q` (4 chars) |
-| TON | "TON" | Base64url (64) | 4 | `[u8; 36]` | `ed25519_dalek::SigningKey` | `UQ` (2 chars) |
-| Monero | "Monero" | Base58 (58) | 4 | `[u8; 65]` | `MoneroKeypair` (zeroized) | `4` (1 char) |
+| Chain | LABEL | CHARSET | MAX_VANITY | BATCH | AddressBytes | SecretRaw | Vanity skips |
+|-------|-------|---------|-----------|-------|--------------|-----------|--------------|
+| Solana | "Solana" | Base58 (58) | 9 | 4 (`LANES`) | `[u8; 32]` | `ed25519_dalek::SigningKey` | none |
+| EVM | "EVM" | hex (0-9, a-f, A-F) | 8 | 4 | `[u8; 20]` | `secp256k1::SecretKey` | `0x` (encoded), 0 raw |
+| Bitcoin | "Bitcoin" | Bech32 (32) | 8 | 4 | `[u8; 20]` (HASH160) | `secp256k1::SecretKey` | `bc1q` (4 chars) |
+| TON | "TON" | Base64url (64) | 4 | 4 | `[u8; 36]` | `ed25519_dalek::SigningKey` | `UQ` (2 chars) |
+| Monero | "Monero" | Base58 (58) | 4 | 1 (default) | `[u8; 65]` | `MoneroKeypair` (zeroized) | `4` (1 char) |
+
+## Batch Pattern (Solana / EVM / Bitcoin)
+
+Each of the three BIP-39 chains has a private `from_seed(&[u8; 64]) -> (AddressBytes, SecretRaw)` (`solana.rs:13`, `evm.rs:36`, `bitcoin.rs:46`) used by both paths:
+
+```rust
+fn generate() {                       // single candidate, ring PBKDF2
+    let m = Mnemonic::new(Words12, English);
+    let (addr, secret) = Self::from_seed(&derive_seed(&m));
+    (addr, secret, m.phrase().to_string())
+}
+fn generate_batch(mut emit) {         // LANES candidates, 4-lane hardware PBKDF2
+    let mnemonics: [Mnemonic; LANES] = array::from_fn(|_| Mnemonic::new(Words12, English));
+    let seeds = derive_seeds(&mnemonics);
+    for (m, seed) in mnemonics.iter().zip(seeds.iter()) {
+        let (addr, secret) = Self::from_seed(seed);
+        emit(addr, secret, m.phrase().to_string());
+    }
+}
+```
+
+`generate_batch_emits_lane_count_candidates_matching_single_path` (per chain) re-derives every emitted candidate via `Mnemonic::from_phrase → derive_seed → from_seed` and requires identical address + secret.
 
 ## Match Logic Pattern
 
-After cleanup, all four BIP-39/Base58/Bech32/Base64 chains share the same shape in `matches_raw`:
+All four Base58/Bech32/Base64 chains share the same shape in `matches_raw`:
 
 ```rust
 let addr = Self::encode_address(bytes);
@@ -54,8 +82,8 @@ matcher.prefix_matches(vanity_target) && matcher.suffix_matches(&addr)
 | Step | Detail |
 |------|--------|
 | Mnemonic | BIP-39 12-word English (`Mnemonic::new(Words12)`) |
-| Seed | `seed::derive_seed` → PBKDF2-HMAC-SHA512 × 2048 |
-| Derivation | `slip10_derive_ed25519` at `PHANTOM_SOLANA_PATH = m/44'/501'/0'/0'` (all hardened) |
+| Seed | `seed::derive_seed` (single) / `seed::derive_seeds` (batch) → PBKDF2-HMAC-SHA512 × 2048 |
+| Derivation | `from_seed`: `slip10_derive_ed25519` at `PHANTOM_SOLANA_PATH = m/44'/501'/0'/0'` (all hardened) |
 | Address | 32-byte ed25519 pubkey, Base58-encoded |
 | Secret format | 64-byte hex: `secret_key (32) || public_key (32)` (Phantom keypair format) |
 | Match | `matcher.prefix_matches(&addr) && matcher.suffix_matches(&addr)` |
@@ -66,22 +94,22 @@ matcher.prefix_matches(vanity_target) && matcher.suffix_matches(&addr)
 | Step | Detail |
 |------|--------|
 | Mnemonic | BIP-39 12-word English |
-| Derivation | `bip32_derive_secp256k1` at `EVM_PATH = m/44'/60'/0'/0/0` |
-| Address | `Keccak256(uncompressed_pubkey[1..])[12..]` → 20 bytes, displayed as `0x` + hex |
-| Secret format | 32-byte hex (raw secp256k1 scalar) |
+| Derivation | `from_seed`: `bip32_derive_secp256k1` at `EVM_PATH = m/44'/60'/0'/0/0`, pubkey via `PublicKey::from_secret_key_global` |
+| Address | `Keccak256(serialize_uncompressed()[1..])[12..]` → 20 bytes, displayed as `0x` + hex |
+| Secret format | 32-byte hex (`SecretKey::secret_bytes()`) |
 | Fast-path | `Matcher::matches_evm_raw` checks `evm_prefix`/`evm_suffix` byte tuples (full bytes + odd nibble). Does NOT use the `prefix_matches`/`suffix_matches` helpers. |
 | Case-sensitive | Computes `eip55_encode(addr) → [u8; 40]` then compares prefix/suffix chars (mixed case) |
-| Pinned | EIP-55 spec vectors `5aAeb6053F3E94...` and `fB6916095ca1df...` |
+| Pinned | EIP-55 spec vectors `5aAeb6053F3E94...`, `fB6916095ca1df...`; BIP-44 "abandon...about" → `0x9858EfFD232B4033E47d90003D41EC34EcaEda94` |
 
-`eip55_encode` (line 14) hashes the lowercase hex form, then uppercases hex letters whose corresponding nibble of `Keccak256(lower)` is ≥ 8.
+`eip55_encode` (line 15) hashes the lowercase hex form, then uppercases hex letters whose corresponding nibble of `Keccak256(lower)` is ≥ 8.
 
 ## Bitcoin — `chains/bitcoin.rs`
 
 | Step | Detail |
 |------|--------|
 | Mnemonic | BIP-39 12-word English |
-| Derivation | `bip32_derive_secp256k1` at `BTC_BIP84_PATH = m/84'/0'/0'/0/0` |
-| Address | HASH160 (`Ripemd160(Sha256(compressed_pubkey))`) → 20 bytes |
+| Derivation | `from_seed`: `bip32_derive_secp256k1` at `BTC_BIP84_PATH = m/84'/0'/0'/0/0` |
+| Address | HASH160 (`Ripemd160(Sha256(PublicKey::serialize()))`, 33-byte compressed key) → 20 bytes |
 | Encoding | Bech32 P2WPKH: hrp=`bc`, witness version 0, program=HASH160 → `bc1q...` |
 | Secret format | 32-byte hex |
 | Fast-path | `expand_5bit(bytes) → [u8; 32]` (stack-buffer 5-bit groups) compared to `Matcher::bech32_prefix_5bit` before string encode |
@@ -95,16 +123,18 @@ matcher.prefix_matches(vanity_target) && matcher.suffix_matches(&addr)
 | Step | Detail |
 |------|--------|
 | Mnemonic | TON-native 24-word (BIP-39 wordlist, **non-BIP-39** derivation) |
-| Acceptance | Loop until `pbkdf2(entropy, "TON seed version", 390, 64)[0] == 0` (~1/256) |
 | Entropy | `HMAC-SHA512(key=phrase, msg="")` |
+| Acceptance | `pbkdf2(entropy, "TON seed version", 390, 64)[0] == 0` (~1/256 of phrases) |
 | Seed | `pbkdf2(entropy, "TON default seed", 100_000, 32)` |
-| Address | 36 bytes: `tag(0x51 = UQ non-bounceable mainnet) \|\| workchain(0x00) \|\| account_id(32) \|\| crc16_xmodem(2)` |
+| Single path | `generate_ton_wallet()` (`ton_mnemonic.rs:57`): loop until accepted, ring PBKDF2 |
+| Batch path | `generate_ton_wallets() -> [(String, SigningKey); LANES]` (`:88`): phase 1 runs the 390-iter filter on 4 trial phrases at a time until 4 are accepted; phase 2 runs the 100k-iter PBKDF2 for all 4 in one 4-lane call |
+| Address | `Ton::address_bytes(pubkey)` (`ton.rs:46`): `tag(0x51 = UQ non-bounceable mainnet) \|\| workchain(0x00) \|\| account_id(32) \|\| crc16_xmodem(2)` |
 | `account_id` | Representation hash of W5 (`wallet-v5r1`) StateInit cell |
 | Encoding | URL-safe base64 (no pad) — always 48 chars, starts with `UQ` |
 | Final match | `matcher.prefix_matches(vanity_target) && matcher.suffix_matches(&encoded)` (vanity_target = `&encoded[2..]`) |
-| Pinned | A 24-word phrase yields exact Tonkeeper-displayed `UQAkFCMtkN0Q1TNP6Gk9SqYWsBFc6Aglwckj6ES4AeBEzWja` |
+| Pinned | A 24-word phrase yields exact Tonkeeper-displayed `UQAkFCMtkN0Q1TNP6Gk9SqYWsBFc6Aglwckj6ES4AeBEzWja`; batch wallets must equal `mnemonic_to_signing_key(phrase)` and pass the filter |
 
-Why slow: 100k PBKDF2 iters × ~256 retries × per-thread → ~50 ms/wallet, ~20/s/thread.
+Why slow: ~256 trial phrases × 390 iters + 100k iters per wallet → ~26 ms/wallet (~38/s/thread) with 4-lane PBKDF2; was ~51 ms single-stream.
 
 ### W5 cell hashing (`ton_cell.rs`)
 
@@ -113,7 +143,7 @@ Why slow: 100k PBKDF2 iters × ~256 retries × per-thread → ~50 ms/wallet, ~20
 | `WALLET_V5R1_CODE.hash` | `20834b7b...52d2b72f` (root cell of `@ton/ton` v5r1 BOC) | `pub` |
 | `WALLET_V5R1_CODE.max_depth` | 6 | `pub` |
 | `W5_MAINNET_WALLET_ID` | `0x7FFF_FF11` (= `global_id(-239) ^ context_id` for mainnet defaults) | `pub` |
-| `WALLET_V3R2_CODE`, `wallet_v3r2_*` | (unchanged values) | **`#[cfg(test)]`-only** — kept for regression coverage of cell-hashing pipeline; no production caller |
+| `WALLET_V3R2_CODE`, `wallet_v3r2_*` | (unchanged values) | **`#[cfg(test)]`-only** — regression coverage of the cell-hashing pipeline; no production caller |
 
 `Cell::repr` = `refs_desc || bits_desc || augmented_data || for_each_ref(max_depth_be) || for_each_ref(hash)`. `Cell::hash` = `SHA-256(repr)`.
 
@@ -135,27 +165,29 @@ Why slow: 100k PBKDF2 iters × ~256 retries × per-thread → ~50 ms/wallet, ~20
 | Final | 95-char Base58 starting with `4` |
 | Secret format | `"{spend_hex}:{view_hex}"` (importable via `monero-wallet-cli --generate-from-keys`) |
 | Final match | `matcher.prefix_matches(vanity_target) && matcher.suffix_matches(&addr)` (vanity_target = `&addr[1..]`) |
+| Batch | default `generate_batch` (BATCH = 1) — no PBKDF2 to amortize |
 | Zeroize | `MoneroKeypair: Zeroize + ZeroizeOnDrop` — discarded candidates wiped |
 
 `monero_seed_phrase` (line 55): for each of 8 little-endian u32 chunks, derive 3 wordlist indices via mod-1626 arithmetic; the 25th word is the first 3 chars of the 24 trimmed words CRC32-hashed mod 24.
 
 ## Hot Loop
 
-`search::<C>` (`mod.rs:93`) is the only function that runs per-candidate:
+`search::<C>` (`mod.rs:101`) is the only function that runs per-candidate:
 
 ```rust
 while !stop.load(Relaxed) {
-    let (addr_bytes, secret_raw, phrase) = C::generate();
-    counter.fetch_add(1, Relaxed);
-    if C::matches_raw(matcher, &addr_bytes) {
-        let _ = tx.send(Match {
-            chain: C::LABEL.to_string(),
-            address: C::encode_address(&addr_bytes),
-            secret_hex: C::encode_secret(&secret_raw),
-            mnemonic: phrase,
-        });
-    }
+    C::generate_batch(|addr_bytes, secret_raw, phrase| {
+        if C::matches_raw(matcher, &addr_bytes) {
+            let _ = tx.send(Match {
+                chain: C::LABEL.to_string(),
+                address: C::encode_address(&addr_bytes),
+                secret_hex: C::encode_secret(&secret_raw),
+                mnemonic: phrase,
+            });
+        }
+    });
+    counter.fetch_add(C::BATCH as u64, Relaxed);
 }
 ```
 
-`encode_address` and `encode_secret` are only called on matches; the per-candidate cost is `generate()` + `matches_raw()`.
+`encode_address` and `encode_secret` are only called on matches; the per-candidate cost is `generate_batch()` / `BATCH` + `matches_raw()`. `chains::tests::search_counts_whole_batches_and_honours_stop` pins the counter granularity and stop behaviour.
