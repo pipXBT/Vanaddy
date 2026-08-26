@@ -7,6 +7,8 @@
 // milestone 6. Remove this attribute then.
 #![allow(dead_code)]
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::OnceLock;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub mod selftest;
@@ -145,6 +147,55 @@ impl SeedBlock {
 
 pub type GpuRx = crossbeam_channel::Receiver<Box<SeedBlock>>;
 
+/// Shared, lock-free-on-the-read-path health cell. Never a `Mutex` on the UI
+/// path: `drain_matches` reads this from the render loop every 100 ms, and a
+/// worker that panicked while holding a `Mutex` would poison it and turn a GPU
+/// fault into a UI-thread `unwrap` panic inside raw mode.
+pub struct GpuHealth {
+    pub disable: AtomicBool,
+    /// Set-once, so the FIRST fault is the one reported. A later, derivative
+    /// failure (the producer noticing `disable` and exiting) must not overwrite
+    /// the root cause. `OnceLock` also cannot be poisoned.
+    reason: OnceLock<GpuDisableReason>,
+    pub seeds_delivered: AtomicU64,
+    pub blocks_dropped: AtomicU64,
+    pub verify_rejections: AtomicU64,
+}
+
+impl GpuHealth {
+    pub fn new() -> Self {
+        GpuHealth {
+            disable: AtomicBool::new(false),
+            reason: OnceLock::new(),
+            seeds_delivered: AtomicU64::new(0),
+            blocks_dropped: AtomicU64::new(0),
+            verify_rejections: AtomicU64::new(0),
+        }
+    }
+
+    /// Publish the reason BEFORE flipping the flag. Readers load `disable`
+    /// Relaxed, so a reader can still observe `disable == true` one instant
+    /// before `take_reason()` is `Some`; callers must treat `None` as "not yet"
+    /// and re-read on the next tick, never as "no reason".
+    pub fn raise(&self, r: GpuDisableReason) {
+        let _ = self.reason.set(r);
+        self.disable.store(true, Ordering::Release);
+    }
+
+    /// Clones; does NOT consume. Never unwraps a lock. Named `take_reason` per
+    /// the design spec even though it leaves the reason in place - the UI reads
+    /// it on every 100 ms tick.
+    pub fn take_reason(&self) -> Option<GpuDisableReason> {
+        self.reason.get().cloned()
+    }
+}
+
+impl Default for GpuHealth {
+    fn default() -> Self {
+        GpuHealth::new()
+    }
+}
+
 /// `App` owns a `GpuEngine` and hands `SeedBlock`s to Rayon workers, so a
 /// refactor that smuggled an Objective-C type into either must fail to compile
 /// here rather than at the point of use.
@@ -152,11 +203,13 @@ const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<GpuEngine>();
     assert_send_sync::<SeedBlock>();
+    assert_send_sync::<GpuHealth>();
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn wave_geometry_is_self_consistent() {
@@ -298,5 +351,48 @@ mod tests {
         producer.join().expect("producer thread did not panic");
         assert_eq!(got.len(), BLOCK);
         assert_eq!(got.chunks(64).next().unwrap()[3].entropy, [3u8; 16]);
+    }
+
+    #[test]
+    fn raise_records_the_first_reason_and_never_overwrites_it() {
+        let h = GpuHealth::new();
+        assert!(!h.disable.load(Ordering::Relaxed));
+        assert_eq!(h.take_reason(), None);
+        h.raise(GpuDisableReason::AuditMismatch { index: 5183 });
+        h.raise(GpuDisableReason::Panicked);
+        assert!(h.disable.load(Ordering::Relaxed));
+        assert_eq!(
+            h.take_reason(),
+            Some(GpuDisableReason::AuditMismatch { index: 5183 })
+        );
+    }
+
+    #[test]
+    fn take_reason_does_not_consume_the_reason() {
+        let h = GpuHealth::new();
+        h.raise(GpuDisableReason::NoDevice);
+        assert_eq!(h.take_reason(), Some(GpuDisableReason::NoDevice));
+        assert_eq!(h.take_reason(), Some(GpuDisableReason::NoDevice));
+    }
+
+    #[test]
+    fn health_counters_add_across_threads_through_an_arc() {
+        let h = Arc::new(GpuHealth::default());
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let h = Arc::clone(&h);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..1_000 {
+                    h.seeds_delivered.fetch_add(1, Ordering::Relaxed);
+                }
+            }));
+        }
+        for t in handles {
+            t.join().expect("counter thread did not panic");
+        }
+        assert_eq!(h.seeds_delivered.load(Ordering::Relaxed), 4_000);
+        assert_eq!(h.blocks_dropped.load(Ordering::Relaxed), 0);
+        assert_eq!(h.verify_rejections.load(Ordering::Relaxed), 0);
+        assert!(!h.disable.load(Ordering::Relaxed));
     }
 }
