@@ -173,10 +173,11 @@ impl GpuHealth {
         }
     }
 
-    /// Publish the reason BEFORE flipping the flag. Readers load `disable`
-    /// Relaxed, so a reader can still observe `disable == true` one instant
-    /// before `take_reason()` is `Some`; callers must treat `None` as "not yet"
-    /// and re-read on the next tick, never as "no reason".
+    /// Publish the reason BEFORE flipping the flag. Callers elsewhere may keep
+    /// loading `disable` `Relaxed` (19+ producer/worker sites only care whether
+    /// to keep draining, never touch the reason) - the ordering this needs is
+    /// established on the READ side, in `take_reason`'s own internal `Acquire`
+    /// load, not here. See that function's doc comment for why that's enough.
     pub fn raise(&self, r: GpuDisableReason) {
         let _ = self.reason.set(r);
         self.disable.store(true, Ordering::Release);
@@ -186,6 +187,14 @@ impl GpuHealth {
     /// the design spec even though it leaves the reason in place - the UI reads
     /// it on every 100 ms tick.
     pub fn take_reason(&self) -> Option<GpuDisableReason> {
+        // Acquire, paired with `raise`'s Release store of `disable`. Atomic
+        // coherence means a thread that has already observed `disable == true`
+        // by ANY load - including a Relaxed one elsewhere - also observes
+        // `true` here, so this load synchronises-with `raise` and the reason
+        // set before that store is guaranteed visible. This is why callers may
+        // keep loading `disable` Relaxed: the ordering is established on this
+        // side.
+        let _ = self.disable.load(Ordering::Acquire);
         self.reason.get().cloned()
     }
 }
