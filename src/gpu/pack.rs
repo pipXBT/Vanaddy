@@ -4,6 +4,7 @@
 //! Rust, where it is testable with no GPU. The kernel therefore contains zero
 //! endianness code and zero padding code.
 
+use crate::gpu::GpuError;
 use zeroize::Zeroize;
 
 /// One zero-padded HMAC key block, decoded to 16 big-endian u64 words.
@@ -30,6 +31,24 @@ pub fn pack_key_block(password: &[u8]) -> KeyBlock {
     // `b` held the plaintext seed phrase; do not leave it on the stack.
     b.zeroize();
     packed
+}
+
+/// Byte-exact mirror of `padded_block(&salted[..salt.len()+4], 128)`
+/// at src/pbkdf2_lanes.rs:259-262. Fallible, mirroring the CPU's MAX_SALT_LEN
+/// assert at src/pbkdf2_lanes.rs:21-25.
+pub fn pack_salt_block(salt: &[u8]) -> Result<[u64; 16], GpuError> {
+    if salt.len() > crate::pbkdf2_lanes::MAX_SALT_LEN {
+        return Err(GpuError::SaltTooLong { len: salt.len() });
+    }
+    let mut b = [0u8; 128];
+    b[..salt.len()].copy_from_slice(salt);
+    b[salt.len()..salt.len() + 4].copy_from_slice(&1u32.to_be_bytes()); // INT(1)
+    b[salt.len() + 4] = 0x80;
+    let bits = ((128 + salt.len() + 4) as u128) * 8;
+    b[112..].copy_from_slice(&bits.to_be_bytes());
+    Ok(std::array::from_fn(|i| {
+        u64::from_be_bytes(b[8 * i..8 * i + 8].try_into().unwrap())
+    }))
 }
 
 #[cfg(test)]
@@ -132,5 +151,96 @@ mod tests {
             assert_eq!(gpu_ipad, cpu_ipad, "ipad diverges, {}-byte key", pw.len());
             assert_eq!(gpu_opad, cpu_opad, "opad diverges, {}-byte key", pw.len());
         }
+    }
+
+    /// Literal transcription of `padded_block` (src/pbkdf2_lanes.rs:210-219)
+    /// applied to `salted[..salt.len()+4]` exactly as `hw::pbkdf2_lanes` does at
+    /// src/pbkdf2_lanes.rs:259-262. If the CPU padding ever changes, this
+    /// transcription and `pack_salt_block` must be changed together.
+    fn cpu_reference_salt_block(salt: &[u8]) -> [u8; 128] {
+        let mut salted = [0u8; 111];
+        salted[..salt.len()].copy_from_slice(salt);
+        salted[salt.len()..salt.len() + 4].copy_from_slice(&1u32.to_be_bytes());
+        let tail = &salted[..salt.len() + 4];
+        let prior_len = 128usize;
+
+        let mut block = [0u8; 128];
+        block[..tail.len()].copy_from_slice(tail);
+        block[tail.len()] = 0x80;
+        let bit_len = ((prior_len + tail.len()) as u128) * 8;
+        block[112..].copy_from_slice(&bit_len.to_be_bytes());
+        block
+    }
+
+    #[test]
+    fn salt_block_matches_the_cpu_padded_block_byte_for_byte() {
+        for len in [0usize, 1, 8, 32, 64, 100, 106, 107] {
+            let salt: Vec<u8> = (0..len).map(|i| (i % 251) as u8 | 1).collect();
+            let packed = pack_salt_block(&salt).expect("within MAX_SALT_LEN");
+            assert_eq!(
+                words_to_bytes(&packed),
+                cpu_reference_salt_block(&salt),
+                "salt len {len}"
+            );
+        }
+    }
+
+    #[test]
+    fn salt_block_places_int1_the_terminator_and_the_length_field_correctly() {
+        for len in [0usize, 8, 107] {
+            let salt: Vec<u8> = (0..len).map(|i| (i % 251) as u8 | 1).collect();
+            let bytes = words_to_bytes(&pack_salt_block(&salt).unwrap());
+            assert_eq!(&bytes[..len], salt.as_slice());
+            assert_eq!(&bytes[len..len + 4], &[0, 0, 0, 1], "INT(1) at len {len}");
+            assert_eq!(bytes[len + 4], 0x80, "terminator at len {len}");
+            assert!(
+                bytes[len + 5..112].iter().all(|&x| x == 0),
+                "gap at len {len}"
+            );
+            // One 128-byte key block has already been absorbed, hence 128 + ..
+            assert_eq!(
+                u128::from_be_bytes(bytes[112..].try_into().unwrap()),
+                ((128 + len + 4) as u128) * 8,
+                "length field at len {len}"
+            );
+        }
+    }
+
+    #[test]
+    fn salt_block_for_bip39_matches_the_pinned_words() {
+        let packed = pack_salt_block(crate::seed::BIP39_SALT).unwrap();
+        let want: [u64; 16] = [
+            0x6d6e_656d_6f6e_6963, // "mnemonic"
+            0x0000_0001_8000_0000, // INT(1) then 0x80
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0x0000_0000_0000_0460, // (128 + 8 + 4) * 8 = 1120 bits
+        ];
+        assert_eq!(packed, want);
+    }
+
+    #[test]
+    fn salt_block_rejects_a_salt_longer_than_max_salt_len() {
+        const MAX: usize = crate::pbkdf2_lanes::MAX_SALT_LEN;
+        assert!(pack_salt_block(&[0x73u8; MAX]).is_ok());
+        assert_eq!(
+            pack_salt_block(&[0x73u8; MAX + 1]),
+            Err(GpuError::SaltTooLong { len: MAX + 1 })
+        );
+        assert_eq!(
+            pack_salt_block(&[0x73u8; 200]),
+            Err(GpuError::SaltTooLong { len: 200 })
+        );
     }
 }
