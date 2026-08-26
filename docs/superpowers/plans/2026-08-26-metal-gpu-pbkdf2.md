@@ -1712,10 +1712,25 @@ an environment gap into a milestone-gate failure.
 - [ ] **Step 4: Every pinned vector from CLAUDE.md still passes, by name.**
 
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test 2>&1 | grep -E 'derive_seed_matches_bip39_vector|derive_seeds_matches_derive_seed_per_lane|every_lane_matches_bip39_canonical_vector|distinct_lanes_match_ring_reference|ton_salts_and_iteration_counts_match_ring|slip10_ed25519_test_vector|solana_phantom_derivation_from_canonical_phrase|bip84_canonical_vector|eip55_canonical_vector|eip55_second_vector|bip44_canonical_vector|generate_batch_emits_lane_count|ton_tonkeeper_round_trip_vector|wallet_v5r1_matches_tonkeeper_vector|keccak256_empty_vector' | sort
+cd /Users/shawnhopkinson/Rust/Vanaddy && cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test 2>&1 | grep -E '::(derive_seed_matches_bip39_vector|derive_seeds_matches_derive_seed_per_lane|every_lane_matches_bip39_canonical_vector|distinct_lanes_match_ring_reference|ton_salts_and_iteration_counts_match_ring|slip10_ed25519_test_vector_1_m_0h|slip10_ed25519_test_vector_1_m_0h_1h|solana_phantom_derivation_from_canonical_phrase|bip84_canonical_vector|eip55_canonical_vector|eip55_second_vector|bip44_canonical_vector|generate_batch_emits_lane_count_candidates_matching_single_path|generate_batch_emits_lane_count_wallets_with_consistent_addresses|ton_tonkeeper_round_trip_vector|wallet_v5r1_matches_tonkeeper_vector|keccak256_empty_vector) \.\.\. ok$' | sort
 ```
 
-Expected: 19 lines, every one ending `... ok`. (19, not 17: `slip10_ed25519_test_vector` matches both `slip10_ed25519_test_vector_1_m_0h` and `slip10_ed25519_test_vector_1_m_0h_1h`, and `generate_batch_emits_lane_count` matches the Solana, EVM, Bitcoin and TON variants — four tests, not one.)
+Expected: exactly **19** lines. Every name is matched WHOLE — anchored on `::` before it
+and ` ... ok` after — never as a substring.
+
+That anchoring is load-bearing, not style. The earlier substring form
+(`grep -E 'bip44_canonical_vector|...'`) silently returned **20** once Task 2.1 added
+`from_gpu_seed_and_verify_agree_with_the_bip44_canonical_vector`, whose name *contains* a
+pinned vector's name. This branch keeps adding tests named after the vectors they
+exercise, so substring matching over-counts by construction.
+
+**If this prints anything other than 19, do NOT adjust the expected number.** A count above
+19 means a new test name collides with a pinned one — fix the pattern. A count below 19
+means a pinned vector is missing or failing — stop and find out which, because that is the
+cryptographic guarantee this whole branch rests on. The 19 are: 2 in `seed`, 3 in
+`pbkdf2_lanes`, 2 in `slip10`, 1 `solana_phantom…`, 1 `bip84…`, 3 in `evm` (two EIP-55 +
+BIP-44), 4 `generate_batch_emits_lane_count…` (Solana, EVM, Bitcoin, TON), 2 in `ton`/
+`ton_cell`, and 1 `keccak256_empty_vector`.
 
 - [ ] **Step 5: No clippy diagnostics anywhere in `src/gpu/`, and the pre-existing 12 unchanged.**
 
