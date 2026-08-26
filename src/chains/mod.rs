@@ -13,7 +13,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 
 /// Channel payload emitted when a vanity address is found.
-#[derive(Clone)]
 pub struct Match {
     pub chain: String,
     pub address: String,
@@ -302,6 +301,37 @@ mod tests {
                 m.address
             );
         }
+    }
+
+    /// Regression guard, not a driver: it passes the moment this file exists.
+    /// Its job is to FAIL LATER, if someone re-adds a `Clone`/`Copy` derive to
+    /// `Match` — that would let a caller build `let mut fake = real.clone();
+    /// fake.address = "...".to_string();`, keeping the original's minted
+    /// `Verified` token while attesting to unrelated data. See
+    /// `verify::Verified`'s module doc for the forgery this closes.
+    ///
+    /// A `compile_fail` doc test would be the natural spelling, but this crate
+    /// is binary-only (no `lib.rs`, see CLAUDE.md), and `cargo test` never runs
+    /// doc tests for a bin target — the doctest would silently never execute.
+    /// So the property is pinned at the source level, like
+    /// `verify::tests::verify_source_pins_the_private_field_declaration`.
+    #[test]
+    fn match_source_pins_the_absence_of_a_forging_derive() {
+        let src = include_str!("mod.rs");
+        // Assembled with concat! so this test's OWN source text does not
+        // contain the needle (a real newline once concat! resolves it, never
+        // spelled contiguously in this file) — otherwise the assertion would
+        // match itself and prove nothing.
+        let undecorated = concat!(
+            "/// Channel payload emitted when a vanity address is found.\n",
+            "pub struct Match {"
+        );
+        assert!(
+            src.contains(undecorated),
+            "Match must declare with no #[derive(...)] directly above it — Clone would let a \
+             caller clone an existing Match, keeping its minted token while swapping in \
+             unrelated data"
+        );
     }
 
     /// Deterministic entropy so a red build replays exactly. Every 16-byte array

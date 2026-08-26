@@ -6,27 +6,32 @@
 //!
 //! ## Limitations
 //!
-//! What this guarantees: a `Match` cannot be constructed anywhere in the crate
-//! without a `Verified` minted by this module — there is no way to produce a
-//! `Match` value at all without calling `Verified::cpu_reference()` (or a future
-//! GPU-path minting function) first.
+//! What this guarantees: every `Match` that exists carries a `Verified` that
+//! was minted for it, and that token cannot be duplicated onto a different
+//! `Match`. Neither `Match` nor `Verified` derives `Clone` or `Copy` — there is
+//! no `.clone()` to call on either, and no implicit copy of a `Verified` out of
+//! a shared `&Match`. `Verified`'s only field is a private unit, so the only way
+//! to obtain a value of this type anywhere in the crate is to call
+//! `Verified::cpu_reference()` or `Verified::gpu_reverified()`, both
+//! `pub(crate)` and both defined in this module. Concretely: the forgery
+//! `let mut fake = real.clone(); fake.address = "...".to_string();`, which
+//! compiled and ran cleanly while `Match` derived `Clone`, no longer compiles
+//! at all (`error[E0599]: no method named 'clone' found for struct
+//! 'chains::Match'`).
 //!
-//! What this does NOT guarantee: that the token corresponds to *this specific*
-//! `Match`'s own `address`/`secret_hex`/`mnemonic`. `Verified` carries no binding
-//! to the data it attests to, `Match::verified` is `pub`, and `Verified` is
-//! `Copy` — so any code already holding a legitimately-minted token (which only
-//! needs a shared `&Match` reference, thanks to `Copy`) could in principle copy
-//! that token onto an unrelated, fabricated `Match` literal. Nothing in the type
-//! system prevents this. No code in the tree does this today (as of Task 2.2,
-//! the only mint site is `cpu_reference()`, called exactly once per genuine
-//! CPU-derived match), but the gap is real and becomes more consequential once
-//! a second mint site (the GPU path) exists and a batch loop could reuse one
-//! candidate's token across others.
-//!
-//! Whether `Verified` should drop `Copy`, or bind to a fingerprint of the data
-//! it attests to, is an open decision **deferred to Task 2.4** (where the GPU
-//! path's `emit_gpu_match` mint site lands) rather than decided speculatively
-//! here.
+//! What this does NOT guarantee: `Verified` still carries no binding to the
+//! data it attests to — the token proves "some CPU-reference derivation
+//! happened," not "*this* `address`/`secret_hex`/`mnemonic` is what it
+//! produced." And moving is still possible where cloning is not: code that
+//! owns a `Match` outright (not just a `&Match`) could destructure it —
+//! `let Match { verified, .. } = m;` — and move that `verified` into a
+//! differently-built `Match` literal, since Rust permits a partial move out of
+//! a non-`Copy` struct with no `Drop` impl. No code in the tree does this: both
+//! mint sites (`search_cpu_step` in `chains/mod.rs`, `emit_gpu_match`) build
+//! their `Match` immediately from a token obtained in the same expression, and
+//! neither destructures an existing one. But it remains a deliberate act a
+//! future maintainer could still write — unlike the accidental-looking
+//! `.clone()` this change closes off entirely.
 
 /// Proof that a Match's phrase re-derives to its address and secret via the
 /// reference (`ring`) path — either because the CPU path produced it directly
@@ -36,7 +41,6 @@
 /// will be unable to receive a row without one, once that gate lands (Task
 /// 2.5) — no such call site exists yet. See the module doc's Limitations
 /// section above for what this token does and does not guarantee.
-#[derive(Clone, Copy)]
 pub struct Verified(());
 
 impl Verified {
@@ -210,6 +214,34 @@ mod tests {
         assert!(
             !src.contains(forged),
             "Verified's field must never become pub — any module could then forge a proof"
+        );
+    }
+
+    /// Regression guard, not a driver: it passes the moment this file exists.
+    /// Its job is to FAIL LATER, if someone re-adds a `Clone`/`Copy` derive to
+    /// `Verified` — that would let a caller holding one `&Match` copy its token
+    /// onto a different, fabricated `Match`. See this module's `## Limitations`
+    /// doc for the forgery this closes.
+    ///
+    /// A `compile_fail` doc test would be the natural spelling, but this crate
+    /// is binary-only (no `lib.rs`, see CLAUDE.md), and `cargo test` never runs
+    /// doc tests for a bin target — the doctest would silently never execute.
+    /// So the property is pinned at the source level, like the test above.
+    #[test]
+    fn verified_source_pins_the_absence_of_a_forging_derive() {
+        let src = include_str!("verify.rs");
+        // Assembled with concat! for the same anti-self-match reason as the
+        // test above: the needle contains a real newline once concat! resolves
+        // it, but this test's own source only ever spells that span across two
+        // separate string literals, so it cannot match itself.
+        let undecorated = concat!(
+            "/// section above for what this token does and does not guarantee.\n",
+            "pub struct Verified(());"
+        );
+        assert!(
+            src.contains(undecorated),
+            "Verified must declare with no #[derive(...)] directly above it — Clone or Copy \
+             would let a caller duplicate a minted token onto unrelated data"
         );
     }
 }
