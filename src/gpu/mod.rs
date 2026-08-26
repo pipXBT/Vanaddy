@@ -406,3 +406,5 @@ mod tests {
         assert!(!h.disable.load(Ordering::Relaxed));
     }
 }
+
+pub mod kernel_src;
