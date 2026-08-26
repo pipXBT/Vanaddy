@@ -107,13 +107,19 @@ and under `--no-default-features`.
    `src/gpu/`*, with those 12 unchanged. Never write or expect "no warnings" — the
    clean baseline is not warning-free. The exact command and the exact 12 lines are
    in Task 1.8 Step 5.
-3. **`ba07199` is NOT this branch's base.** `git log --oneline ba07199..HEAD` prints
-   two commits that are not part of this work: `4854a59`
-   (`ui: move key hints to a full-width bottom row`, which edits `src/ui.rs` and
-   `src/app.rs`) and `beced09` (`docs: design spec …`). Diff and check out against
-   `beced09` — the branch HEAD this milestone starts from — never against `ba07199`,
-   which would report those two commits as milestone drift and, if "recovered" with
-   `git checkout ba07199 -- …`, would silently revert legitimate committed work.
+3. **Neither `ba07199` nor `beced09` is this milestone's base — `7e49a54` is.**
+   `git log --oneline ba07199..HEAD` prints four commits that are not part of this
+   work: `4854a59` (`ui: move key hints to a full-width bottom row`, which edits
+   `src/ui.rs` and `src/app.rs`), `beced09` (`docs: design spec …`), and the two
+   plan-document commits `094e8c3` and `7e49a54`. Diff and check out against
+   `7e49a54` — the current branch HEAD, the tree this milestone starts from — never
+   against `ba07199`, which would report `4854a59` as milestone drift and, if
+   "recovered" with `git checkout ba07199 -- …`, would silently revert legitimate
+   committed work. `beced09` is not the base either: `094e8c3` and `7e49a54` sit
+   between it and the tip, so `beced09..HEAD` reports
+   `docs/superpowers/plans/2026-08-26-metal-gpu-pbkdf2.md` as drift before you have
+   written a line. (Task 1.8 Step 8 additionally passes `-- . ':(exclude)docs/'`, so
+   plan-file churn can never register as source drift at all.)
 
 Baseline: `cargo test` at `beced09` (HEAD of `feat/metal-gpu-pbkdf2`) reports
 `63 passed`. This milestone ends at `83 passed`.
@@ -428,8 +434,15 @@ an `unexpected_cfgs` warning on every build.
   - `pub enum GpuStatus { Unavailable(String), Ready { device: String }, Initializing, Running { device: String }, Disabled(GpuDisableReason) }`
   - `pub enum GpuDisableReason { .. }`
   - `pub enum SelfTestError { .. }` (in `crate::gpu::selftest`, re-exported as `crate::gpu::SelfTestError`)
-  - `impl GpuEngine { pub fn probe() -> GpuStatus }` (stub backend)
-  - `pub fn probe() -> GpuStatus` (module-level convenience wrapper)
+  - `pub fn probe() -> GpuStatus` (a *free* function in the stub backend, re-exported
+    from `crate::gpu` by `pub use backend::{probe, GpuEngine};` — the design spec's
+    `mod.rs` form, written this way from the start so milestone 3 has no module-level
+    wrapper to delete. Note the brace order: rustfmt sorts the spec's literal
+    `{GpuEngine, probe}` to `{probe, GpuEngine}`, and Task 1.8 Step 6 requires
+    `src/gpu/mod.rs` to be rustfmt-clean.)
+  - `impl GpuEngine { pub fn probe() -> GpuStatus }` (stub backend; delegates to the
+    free `probe()`, so the two spellings can never diverge and Step 1's test can go on
+    asserting `probe() == GpuEngine::probe()` unchanged)
 
 - [ ] **Step 1: Create `src/gpu/mod.rs` containing only the failing tests.** Write exactly this file to `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs`:
 
@@ -555,7 +568,12 @@ pub enum SelfTestError {
 }
 ```
 
-- [ ] **Step 5: Create `src/gpu/stub.rs`.** Write exactly:
+- [ ] **Step 5: Create `src/gpu/stub.rs`.** The uninhabited `GpuEngine` below is a
+**placeholder only**: Task 3.3 Step 5 overwrites this whole file and deletes it, and
+Milestone 4 Task 4.7 Step 6 replaces it with a *constructible* unit struct
+(`pub struct GpuEngine;` whose `start` raises `GpuDisableReason::NotSupported`), which
+is the form the rest of the plan depends on — do not restore the uninhabited form at
+Task 4.7. Write exactly:
 
 ```rust
 //! No-op GPU backend. Compiled on every target that is not Apple Silicon with
@@ -565,6 +583,15 @@ pub enum SelfTestError {
 use super::GpuStatus;
 use std::convert::Infallible;
 
+/// The backend's probe entry point, as a *free* function: `src/gpu/mod.rs`
+/// re-exports this one as `crate::gpu::probe`, which is the design spec's
+/// `mod.rs` form (`pub use backend::{GpuEngine, probe};`). Milestone 3 swaps
+/// this file for `metal.rs`, which defines the same free function, so the
+/// re-export never changes shape.
+pub fn probe() -> GpuStatus {
+    GpuStatus::Unavailable("no Metal backend in this build".to_string())
+}
+
 /// Uninhabited by construction: on a target with no backend, a live engine must
 /// be *impossible*, not merely unused. Every method below is therefore
 /// statically unreachable and needs no panic.
@@ -573,8 +600,10 @@ pub struct GpuEngine {
 }
 
 impl GpuEngine {
+    /// Delegates to the free `probe()` above. `self::` is the module path, not
+    /// `Self::`, so this resolves to that function and is not recursion.
     pub fn probe() -> GpuStatus {
-        GpuStatus::Unavailable("no Metal backend in this build".to_string())
+        self::probe()
     }
 
     pub fn status(&self) -> GpuStatus {
@@ -598,7 +627,9 @@ impl GpuEngine {
 (`match self._never {}` is an exhaustive match on an uninhabited type — it type-checks
 as `!` and coerces to any return type, so these are unreachable *without* a panic.
 `Infallible` is `Copy`, so matching through `&self` is a copy, not a move.
-`GpuEngine::start` is added in Task 1.5, once `SeedBlock` and `GpuHealth` exist.)
+There is deliberately **no** `GpuEngine::start` on this placeholder: Task 3.3 Step 5
+overwrites this file wholesale, and Milestone 4 Task 4.7 Step 6 is where the stub's
+constructible `GpuEngine` and its `start` actually land.)
 
 - [ ] **Step 6: Fill in `src/gpu/mod.rs` above the test module.** Replace the single
 doc-comment line at the top of `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs`
@@ -626,13 +657,14 @@ pub use selftest::SelfTestError;
 // declaring the feature now would only add an `unexpected_cfgs` warning.
 #[path = "stub.rs"]
 mod backend;
-pub use backend::GpuEngine;
 
 /// `main()` probes through the module, not the type, so milestone 6 does not
-/// have to know which backend it got.
-pub fn probe() -> GpuStatus {
-    GpuEngine::probe()
-}
+/// have to know which backend it got. This is the design spec's `mod.rs` form
+/// (`pub use backend::{GpuEngine, probe};`) written from the start - rustfmt
+/// sorts the braces to `{probe, GpuEngine}` - so milestone 3 only has to widen
+/// `mod backend;` to `pub mod backend;` and swap the `#[path]` for the two
+/// `cfg_attr`s. It never has to delete a wrapper.
+pub use backend::{probe, GpuEngine};
 
 pub const WAVE: usize = 8_192; // candidates per GPU wave
 pub const BLOCK: usize = 512; // candidates per channel message (16/wave)
@@ -961,7 +993,7 @@ MSG
 
 ---
 
-### Task 1.5: `GpuHealth`, and the stub's `start`
+### Task 1.5: `GpuHealth`
 
 The one place a GPU fault is recorded. **Never a `Mutex`**: `drain_matches` reads this
 from the render loop every 100 ms, and a worker that panicked while holding a mutex
@@ -970,17 +1002,21 @@ with the alternate screen still active. `OnceLock` is set-once and cannot be poi
 so the *first* fault is the one reported — a later derivative failure (the producer
 noticing `disable` and exiting) must not overwrite the root cause.
 
+The stub backend gets **no** `start` in this milestone. Nothing between here and
+Task 3.3 calls it; Task 3.3 Step 5 overwrites `src/gpu/stub.rs` wholesale; and
+Milestone 4 Task 4.7 Step 6 is where the stub's real, *constructible* `GpuEngine`
+lands — the one Task 8.4 Step 1's lifecycle test exercises. Adding an
+`unreachable!()` `start` here would only be deleted twice over.
+
 **Files:**
 - Modify: `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs` (add imports, `GpuHealth`, extend the `const _` assertion, add three tests)
-- Modify: `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/stub.rs` (add imports and `GpuEngine::start`)
 
 **Interfaces:**
-- Consumes: `pub struct SeedBlock` (Task 1.4), `pub enum GpuDisableReason` (Task 1.3), `crossbeam_channel::Sender`
+- Consumes: `pub struct SeedBlock` (Task 1.4), `pub enum GpuDisableReason` (Task 1.3)
 - Produces:
   - `pub struct GpuHealth { pub disable: AtomicBool, reason: OnceLock<GpuDisableReason>, pub seeds_delivered: AtomicU64, pub blocks_dropped: AtomicU64, pub verify_rejections: AtomicU64 }`
   - `impl GpuHealth { pub fn new() -> Self; pub fn raise(&self, r: GpuDisableReason); pub fn take_reason(&self) -> Option<GpuDisableReason> }`
   - `impl Default for GpuHealth`
-  - `impl GpuEngine { pub fn start(tx: Sender<Box<SeedBlock>>, health: Arc<GpuHealth>) -> GpuEngine }` (stub backend)
 
 - [ ] **Step 1: Write the three failing tests.** In
 `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs`, inside `mod tests`, append after
@@ -1127,30 +1163,7 @@ const _: fn() = || {
 };
 ```
 
-- [ ] **Step 6: Add `start` to the stub backend.** In
-`/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/stub.rs`, replace the import line
-`use super::GpuStatus;` with:
-
-```rust
-use super::{GpuHealth, GpuStatus, SeedBlock};
-use crossbeam_channel::Sender;
-use std::convert::Infallible;
-use std::sync::Arc;
-```
-
-(delete the now-duplicated `use std::convert::Infallible;` line further down). Then
-insert this method into `impl GpuEngine`, directly after `pub fn probe()`:
-
-```rust
-    /// `App::gpu_effective()` requires a `Ready`/`Initializing`/`Running`
-    /// status, and `probe()` here only ever returns `Unavailable`, so this is
-    /// unreachable from the application.
-    pub fn start(_tx: Sender<Box<SeedBlock>>, _health: Arc<GpuHealth>) -> GpuEngine {
-        unreachable!("gpu::GpuEngine::start on the stub backend: probe() only returns Unavailable")
-    }
-```
-
-- [ ] **Step 7: Run the tests and watch them pass.**
+- [ ] **Step 6: Run the tests and watch them pass.**
 
 ```sh
 cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test
@@ -1159,26 +1172,28 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test
 Expected: `test result: ok. 73 passed; 0 failed`, including
 `gpu::tests::raise_records_the_first_reason_and_never_overwrites_it`.
 
-- [ ] **Step 8: Format and check clippy.**
+- [ ] **Step 7: Format and check clippy.**
 
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 src/gpu/mod.rs src/gpu/stub.rs && cargo clippy --all-targets 2>&1 | grep -- '--> src/gpu/' ; echo "gpu-diagnostics-exit=$?"
+cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 src/gpu/mod.rs && cargo clippy --all-targets 2>&1 | grep -- '--> src/gpu/' ; echo "gpu-diagnostics-exit=$?"
 ```
 
 Expected: `gpu-diagnostics-exit=1`. (`GpuHealth::new()` needs the `Default` impl added
-in Step 4 — without it clippy's `new_without_default` fires here.)
+in Step 4 — without it clippy's `new_without_default` fires here. `src/gpu/stub.rs` is
+untouched by this task, so it is not in the rustfmt list.)
 
-- [ ] **Step 9: Commit.**
+- [ ] **Step 8: Commit.**
 
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && git add src/gpu/mod.rs src/gpu/stub.rs && git commit -F - <<'MSG'
+cd /Users/shawnhopkinson/Rust/Vanaddy && git add src/gpu/mod.rs && git commit -F - <<'MSG'
 feat(gpu): add GpuHealth, the set-once fault cell
 
 OnceLock rather than Mutex: the UI thread reads this every 100 ms inside
 raw mode, and a poisoned lock would turn a GPU fault into a UI-thread
 panic. Set-once means the first fault is the reported one, never the
-derivative failure that follows it. Also adds the stub GpuEngine::start,
-which is statically unreachable because stub probe() is always Unavailable.
+derivative failure that follows it. The stub backend deliberately gets no
+GpuEngine::start here: Task 3.3 overwrites stub.rs wholesale and Task 4.7
+lands the real, constructible one.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 MSG
@@ -1747,14 +1762,21 @@ yet.
 
 - [ ] **Step 8: Confirm the milestone diff is exactly nine files.**
 
-Diff against `beced09` — this branch's HEAD *before* milestone 1 — **not** against
-`ba07199`. `ba07199..HEAD` also contains `4854a59`
-(`ui: move key hints to a full-width bottom row`, which edits `src/ui.rs` and
-`src/app.rs`) and `beced09` (the design spec), so it is not this milestone's diff and
-would report both as drift. Confirm the base first, then diff:
+Diff against `7e49a54` — the current branch HEAD, i.e. this branch's tip *before*
+milestone 1 — **not** against `ba07199` and **not** against `beced09`.
+`ba07199..HEAD` also contains `4854a59` (`ui: move key hints to a full-width bottom
+row`, which edits `src/ui.rs` and `src/app.rs`), so it is not this milestone's diff
+and would report that commit as drift. `beced09..HEAD` fails from the other side: the
+two plan-document commits `094e8c3` and `7e49a54` sit between `beced09` and the tip,
+so it reports `docs/superpowers/plans/2026-08-26-metal-gpu-pbkdf2.md` as milestone
+drift before a single line of milestone-1 code exists. The `-- . ':(exclude)docs/'`
+pathspec below is belt-and-braces on top of the corrected base: no plan-file churn —
+yours or anyone else's — can ever be read as source drift. Confirm the base first,
+then diff (verified: with no milestone work committed yet, both halves print nothing
+at all):
 
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && git log --oneline beced09..HEAD && git diff --stat beced09..HEAD
+cd /Users/shawnhopkinson/Rust/Vanaddy && git log --oneline 7e49a54..HEAD -- . ':(exclude)docs/' && git diff --stat 7e49a54..HEAD -- . ':(exclude)docs/'
 ```
 
 Expected: the log lists only this milestone's own commits (Tasks 1.1-1.7, plus the
@@ -1763,7 +1785,7 @@ optional `Cargo.lock` commit in Step 9), and the diffstat names exactly `Cargo.l
 `src/gpu/stub.rs`, `src/main.rs`, `src/pbkdf2_lanes.rs`, `src/seed.rs` — nine files
 and nothing else. In particular **no** `src/app.rs`, `src/ui.rs`, or `src/chains/*`
 (a stray `cargo fmt` is the only thing that puts them there; if they appear, recover
-with `git checkout beced09 -- src/app.rs src/ui.rs src/chains` and re-run Step 1).
+with `git checkout 7e49a54 -- src/app.rs src/ui.rs src/chains` and re-run Step 1).
 **Never** `git checkout ba07199 -- src/app.rs src/ui.rs src/chains` — that would
 silently revert commit `4854a59`, a legitimate change already on this branch.
 
@@ -2813,7 +2835,7 @@ byte-for-byte unchanged.
 - [ ] **Step 6: Run all four and see them fail.**
 
 ```sh
-cargo test gpu_block_is_consumed_counted_and_cpu_verified corrupted_gpu_seed_raises_fault_and_emits_nothing
+cargo test -- gpu_block_is_consumed_counted_and_cpu_verified corrupted_gpu_seed_raises_fault_and_emits_nothing
 ```
 
 Expect a compile error, not test failures:
@@ -3167,7 +3189,7 @@ cargo fetch
 - [ ] **Step 3: Run them and see them fail.**
 
 ```sh
-cargo test open_csv_secure_reasserts_0600_on_preexisting_0644 unverified_match_is_never_written_to_csv verified_match_is_written_and_file_is_0600
+cargo test -- open_csv_secure_reasserts_0600_on_preexisting_0644 unverified_match_is_never_written_to_csv verified_match_is_written_and_file_is_0600
 ```
 
 Expect compile errors, not test failures:
@@ -3423,7 +3445,7 @@ legs must be identical.
 - [ ] **Step 3: Confirm the trust boundary is fully covered with no Metal in the tree.**
 
 ```sh
-cargo test verify_gpu_ gpu_block_is_consumed corrupted_gpu_seed gpu_drain_honours_stop search_with_no_gpu_source unverified_match_is_never_written open_csv_secure_reasserts verified_match_is_written verified_token_field_is_private cpu_step_emits_matches from_gpu_seed_and_verify
+cargo test -- verify_gpu_ gpu_block_is_consumed corrupted_gpu_seed gpu_drain_honours_stop search_with_no_gpu_source unverified_match_is_never_written open_csv_secure_reasserts verified_match_is_written verified_token_field_is_private cpu_step_emits_matches from_gpu_seed_and_verify
 ```
 
 Expect every one of these to run and pass.
@@ -4294,19 +4316,20 @@ mod tests {
 ```
 
 - [ ] **Step 6: Wire the backend module.** In `src/gpu/mod.rs`, **delete** the
-      Milestone 1 Task 1.3 placeholder block — all three items, exactly as they
-      appear there:
+      Milestone 1 Task 1.3 placeholder block — the `#[path]`ed module and its
+      re-export, exactly as they appear there:
 
 ```rust
 #[path = "stub.rs"]
 mod backend;
-pub use backend::GpuEngine;
 
 /// `main()` probes through the module, not the type, so milestone 6 does not
-/// have to know which backend it got.
-pub fn probe() -> GpuStatus {
-    GpuEngine::probe()
-}
+/// have to know which backend it got. This is the design spec's `mod.rs` form
+/// (`pub use backend::{GpuEngine, probe};`) written from the start - rustfmt
+/// sorts the braces to `{probe, GpuEngine}` - so milestone 3 only has to widen
+/// `mod backend;` to `pub mod backend;` and swap the `#[path]` for the two
+/// `cfg_attr`s. It never has to delete a wrapper.
+pub use backend::{probe, GpuEngine};
 ```
 
       and put in its place exactly:
@@ -4328,12 +4351,14 @@ pub mod backend;
 pub use backend::probe;
 ```
 
-      **The module-level `pub fn probe()` must go.** `crate::gpu::probe` is now
-      the re-exported free function that each backend defines. Keeping the
-      Milestone 1 wrapper as well is
-      `error[E0255]: the name 'probe' is defined multiple times`.
+      **`probe` needs no surgery.** Milestone 1 Task 1.3 already wrote the
+      re-export form, so `crate::gpu::probe` has always resolved to the free
+      function each backend defines; the only thing changing here is which file
+      `backend` resolves to. There is no module-level wrapper left over to collide
+      with it, so `error[E0255]: the name 'probe' is defined multiple times` is not
+      reachable from this edit.
 
-      **`GpuEngine` must go too, for now.** It is the handle to the producer
+      **`GpuEngine` must go, for now.** It is the handle to the producer
       thread, and the producer thread is Milestone 4; neither `src/gpu/metal.rs`
       nor the rewritten `src/gpu/stub.rs` defines it at the end of this
       milestone, so `pub use backend::GpuEngine;` would be `error[E0432]`. Also
@@ -5551,9 +5576,13 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Consumes: `MetalPbkdf2::derive` (Task 3.4); `deterministic_corpus` (Task 3.7)
 - Produces: `pub fn MetalPbkdf2::raw_seed_slot(&self, i: usize) -> [u8; 64]`
 
-Three properties, one implementation addition. `dispatchThreads` on Apple GPUs
-issues a non-uniform final threadgroup, and the kernel's `if (tid >= p.count)
-return;` is the only thing that keeps threads past the live count from writing.
+Three properties, one implementation addition. `run_wave` dispatches with
+`dispatchThreads_threadsPerThreadgroup` and a grid width of exactly `count`, so
+Metal shrinks the trailing threadgroup and never creates a thread with
+`tid >= p.count`; the kernel's `if (tid >= p.count) return;` is therefore
+defence-in-depth against a future switch to `dispatchThreadgroups` (Step 5), not
+live logic here. What these tests pin is the observable contract: after a wave of
+count `n`, every slot from `n` to `WAVE - 1` still reads its `0xA5` poison.
 `raw_seed_slot` is the only way to look at a slot `run_wave` deliberately refuses
 to return, which is exactly what makes it worth having.
 
@@ -5651,8 +5680,8 @@ error[E0599]: no method named `raw_seed_slot` found for struct `MetalPbkdf2` in 
 ```rust
     /// Raw read of one 64-byte slot of the `seeds` buffer, INCLUDING slots past
     /// the live count that `run_wave` refuses to return. Exists so
-    /// `gpu_slots_beyond_count_keep_their_poison` can prove the kernel's
-    /// `if (tid >= p.count) return;` guard actually holds — the only way to
+    /// `gpu_slots_beyond_count_keep_their_poison` can prove that nothing wrote
+    /// past the live count and the 0xA5 poison survived there — the only way to
     /// observe a slot the safe API deliberately hides.
     pub fn raw_seed_slot(&self, i: usize) -> [u8; 64] {
         assert!(i < WAVE, "slot {i} is outside the {WAVE}-candidate wave");
@@ -5674,33 +5703,41 @@ cargo test gpu_repeat_wave_is_bit_identical
 
 Expected: `ok. 1 passed` for each.
 
-- [ ] **Step 5: Prove the poison guard bites.** Temporarily remove the bounds guard
-      from the kernel — in `src/gpu/pbkdf2_bip39.metal`, in `pbkdf2_iterate` only
-      (line 140), change:
+- [ ] **Step 5: Record why the `tid >= p.count` guard is unreachable under this
+      dispatch — there is no mutation to run here.** It is tempting to "prove the
+      guard bites" by editing `src/gpu/pbkdf2_bip39.metal` — in `pbkdf2_iterate`
+      (line 140), `if (tid >= p.count) return;` → `if (tid >= 8192u) return;` —
+      and watching `gpu_slots_beyond_count_keep_their_poison` go red. **It will
+      not go red.** `run_wave` dispatches with
+      `enc.dispatchThreads_threadsPerThreadgroup(...)` and a grid width of
+      exactly `count`, and `dispatchThreads` launches exactly `count` threads:
+      Metal shrinks the trailing threadgroup rather than rounding the grid up to
+      a whole number of threadgroups. No thread with `tid >= p.count` is ever
+      created, so removing the guard changes nothing observable — the mutation
+      would report "still green" and leave you unable to tell whether the test,
+      the kernel or the mutation was at fault. Do not perform it.
 
-```c
-    if (tid >= p.count) return;
-```
+      State instead the two facts this task actually establishes:
 
-to:
+      1. **The guard is retained as defence-in-depth, not as live logic.** If
+         anyone ever switches this dispatch to
+         `dispatchThreadgroups_threadsPerThreadgroup` — which DOES round the grid
+         up to a whole number of threadgroups, and so WOULD create surplus
+         threads with `tid >= p.count` — that one line is what keeps those
+         threads from writing past the live count. It costs nothing today and is
+         the difference between correct and silently corrupt then.
+      2. **`gpu_slots_beyond_count_keep_their_poison` pins the poison contract,
+         not the guard.** What it proves is that after a wave of count `n`, every
+         slot from `n` to `WAVE - 1` still reads `0xA5` — i.e. `run_wave`
+         re-poisons `seeds` before every wave and nothing wrote past `count`,
+         whatever the mechanism. That is precisely the property a later,
+         larger-count wave depends on, and it holds under either dispatch API.
 
-```c
-    if (tid >= 8192u) return;
-```
+      Nothing to run in this step. Leave `src/gpu/pbkdf2_bip39.metal` untouched.
 
-then run:
-
-```sh
-cargo test gpu_slots_beyond_count_keep_their_poison
-```
-
-Expected failure:
-
-```
-assertion `left == right` failed: slot 1 was written by a wave of count 1
-```
-
-- [ ] **Step 6: Restore the kernel byte-exactly and confirm green.**
+- [ ] **Step 6: Confirm the kernel is still byte-exact and both tests are green.**
+      Step 5 changed nothing, so the regeneration below is a no-op — run it anyway,
+      as the cheap proof that no stray edit reached the kernel:
 
 ```sh
 awk '/^\/\/ A\/B ONLY \(not shipped\)/{exit} {print}' \
@@ -5747,7 +5784,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Modify: `src/gpu/metal.rs` (two `Cell` fields, `inject_command_buffer_fault`, the fault branch in `check_status`, a counter reset in `run_wave`; one test)
 
 **Interfaces:**
-- Consumes: `MetalPbkdf2::check_status`, `MetalPbkdf2::run_wave` (Task 3.4)
+- Consumes: `MetalPbkdf2::check_status` (Task 3.4); `MetalPbkdf2::run_wave(&mut self, keys: &[KeyBlock], salt_block: &[u64; 16], total_iters: u32, schedule: Schedule, stop: &AtomicBool) -> Result<Option<&[[u8; 64]]>, GpuError>` — the six-parameter form Task 3.6 produced by inserting `schedule: Schedule` before `stop`, not Task 3.4's five-parameter original
 - Produces: `pub fn MetalPbkdf2::inject_command_buffer_fault(&self, nth: u32)` (`#[cfg(test)]`)
 
 A real GPU fault cannot be provoked on demand, and the rule it exercises — a
@@ -6059,8 +6096,18 @@ Expected failure, verbatim:
 error[E0425]: cannot find function `self_test` in this scope
 ```
 
-- [ ] **Step 4: Fill in the rest of `src/gpu/selftest.rs`.** The listing below is
-      the finished file. Its `SelfTestError` is Milestone 1 Task 1.3's enum with
+- [ ] **Step 4: Replace `src/gpu/selftest.rs` wholesale — the listing below is
+      the finished file, and it REPLACES the `mod tests` block Step 1 appended.**
+      Write the listing over the file's entire current contents. Do **not** append
+      it: appending would leave two `#[cfg(test)] mod tests` blocks in one module,
+      each defining `fn reference` and `#[test] fn accepts_a_correct_derive_fn`,
+      and the compiler would stop at `error[E0428]` — *the name* `tests` *is
+      defined multiple times*. Nothing Step 1 wrote is lost: its three `use` lines
+      are reproduced at the top of the listing, and its `reference` helper and
+      `accepts_a_correct_derive_fn` reappear verbatim inside the single surviving
+      `mod tests`, joined there by the nine further fault-detection tests. After
+      this step the file must contain exactly one `mod tests` and exactly one
+      `accepts_a_correct_derive_fn`. Its `SelfTestError` is Milestone 1 Task 1.3's enum with
       exactly one variant added — `DuplicateEntropy`, between `ScheduleDivergence`
       and `Backend`. Everything else in the enum must match what is already there
       byte for byte; if it does not, you have drifted from Milestone 1 and
@@ -6713,7 +6760,8 @@ Also expected, on all legs: every one of the 63 pre-existing tests still passing
 `pbkdf2_lanes::every_lane_matches_bip39_canonical_vector`,
 `pbkdf2_lanes::distinct_lanes_match_ring_reference`,
 `pbkdf2_lanes::ton_salts_and_iteration_counts_match_ring`,
-`slip10::slip10_ed25519_test_vector_1`, `slip10::slip10_ed25519_test_vector_2`,
+`slip10::slip10_ed25519_test_vector_1_m_0h`,
+`slip10::slip10_ed25519_test_vector_1_m_0h_1h`,
 `solana::solana_phantom_derivation_from_canonical_phrase`,
 `bitcoin::bip84_canonical_vector`, `evm::eip55_canonical_vector`,
 `evm::eip55_second_vector`, `evm::bip44_canonical_vector`, the three
@@ -6808,10 +6856,17 @@ Every failure the producer can hit arrives as either a `GpuError` (from the Meta
 - Test: `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/producer.rs` (in-module `#[cfg(test)] mod tests`)
 
 **Interfaces:**
-- Consumes: `pub enum GpuError { NoDevice, ShaderCompile(String), PipelineCreate(String), BufferAlloc, BadConfig(String), SaltTooLong { len: usize }, CommandBuffer { status: i64, message: String } }` (Milestone 1, `src/gpu/mod.rs`); `pub enum GpuDisableReason` and `pub enum GpuStatus` (Milestone 1, pinned contract)
+- Consumes: `pub enum GpuError { NoDevice, ShaderCompile(String), PipelineCreate(String), BufferAlloc, BadConfig(String), SaltTooLong { len: usize }, CommandBuffer { status: i64, message: String } }` (**Task 3.2**, `src/gpu/mod.rs`); `impl From<GpuError> for GpuDisableReason` (**Task 3.2**, `src/gpu/mod.rs`); `pub enum GpuDisableReason` and `pub enum GpuStatus` (Milestone 1, pinned contract)
 - Produces: `pub(crate) fn reason_from(e: GpuError) -> GpuDisableReason`; `pub(crate) fn set_status(cell: &Mutex<GpuStatus>, next: GpuStatus)`; `pub(crate) fn read_status(cell: &Mutex<GpuStatus>) -> GpuStatus`
 
-- [ ] **Step 1: Declare the module.** Open `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs` and add this line immediately above the `#[cfg_attr(...)] mod backend;` declaration:
+Both consumed items come from **Milestone 3 Task 3.2**, not Milestone 1. Task 1.3
+wrote only a one-variant `GpuError` stub and no `From` impl at all; Task 3.2
+replaces the enum with the seven-variant shape above and adds
+`impl From<GpuError> for GpuDisableReason`. That is why **Milestone 3 must land
+before Milestone 4**: Step 5's `reason_from` is a one-line delegate to that `From`
+impl and does not compile without it.
+
+- [ ] **Step 1: Declare the module.** Open `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs` and add this line immediately above the `#[cfg_attr(...)]` attribute stack that precedes the `pub mod backend;` declaration — it is the `pub` spelling you are looking for, because Task 3.3 Step 6 promoted `mod backend;` to `pub mod backend;`, so a grep for the Milestone 1 spelling will miss it:
 
 ```rust
 pub(crate) mod producer;
@@ -7157,41 +7212,35 @@ This is the single point in the whole design where entropy and seeds are paired.
 Backpressure is a retry, not a drop. A wave emits all 8,192 seeds as one burst; 8 workers absorb 8,192 × 50.5 µs = 414 core-ms ≈ 52 ms of wall time against a ~600 ms wave, so the bounded(32) queue drains with enormous margin and the timeout essentially never fires. When it does — Threads = 1 on an E-core, or a stalled worker — the producer self-throttles to exactly the rate the workers can absorb, which is the correct behaviour when the CPU is the binding constraint, and nothing is discarded.
 
 **Files:**
-- Modify: `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs` — the `impl SeedBlock` block from Milestone 1 (locate with `grep -n "impl SeedBlock" src/gpu/mod.rs`)
+- Read-only: `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs` (`SeedBlock::with_capacity` and `SeedBlock::push` were written by Milestone 1 Task 1.4 Step 4 inside the existing `impl SeedBlock` block; this task only verifies they are present and MUST NOT re-add them — a second copy is `error[E0592]: duplicate definitions with name with_capacity`)
 - Modify: `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/producer.rs` — the `use` block, and append one function before `#[cfg(test)] mod tests`
 - Test: `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/producer.rs` (in-module `tests`)
 
 **Interfaces:**
-- Consumes: `pub const BLOCK: usize = 512`, `pub const CHANNEL_CAPACITY: usize = 32`, `pub struct GpuCandidate { pub entropy: [u8; 16], pub seed: [u8; 64] }`, `pub struct SeedBlock(Vec<GpuCandidate>)`, `pub struct GpuHealth` (Milestone 1)
-- Produces: `pub(crate) fn SeedBlock::with_capacity(n: usize) -> SeedBlock`; `pub(crate) fn SeedBlock::push(&mut self, candidate: GpuCandidate)`; `pub(crate) fn carve_and_send(tx: &Sender<Box<SeedBlock>>, entropy: &[[u8; 16]], seeds: &[[u8; 64]], stop: &AtomicBool, health: &GpuHealth) -> bool`
+- Consumes: `pub const BLOCK: usize = 512`, `pub const CHANNEL_CAPACITY: usize = 32`, `pub struct GpuCandidate { pub entropy: [u8; 16], pub seed: [u8; 64] }`, `pub struct SeedBlock(Vec<GpuCandidate>)`, `pub struct GpuHealth` (Milestone 1); `pub(crate) fn SeedBlock::with_capacity(n: usize) -> SeedBlock` and `pub(crate) fn SeedBlock::push(&mut self, candidate: GpuCandidate)` (**Milestone 1 Task 1.4 Step 4** — already inside `impl SeedBlock` in `src/gpu/mod.rs`; consumed here, never re-declared)
+- Produces: `pub(crate) fn carve_and_send(tx: &Sender<Box<SeedBlock>>, entropy: &[[u8; 16]], seeds: &[[u8; 64]], stop: &AtomicBool, health: &GpuHealth) -> bool`
 
-- [ ] **Step 1: Check whether Milestone 2 already added the constructor.**
+`SeedBlock::with_capacity` and `SeedBlock::push` are deliberately NOT listed as
+produced here. Task 1.4 Step 4 already wrote both as `pub(crate) fn` inside the
+one and only `impl SeedBlock` block, and `src/gpu/producer.rs` is a descendant of
+`crate::gpu`, so that visibility is already sufficient and must not be widened.
+Re-adding them is `error[E0592]: duplicate definitions with name with_capacity`.
+
+- [ ] **Step 1: Verify Milestone 1 Task 1.4 already made `SeedBlock` fillable.** This is a pure verification step — it edits nothing, and `src/gpu/mod.rs` must leave this task byte-for-byte unchanged.
 
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && grep -n "fn with_capacity\|fn push" src/gpu/mod.rs
+cd /Users/shawnhopkinson/Rust/Vanaddy && grep -n "pub(crate) fn with_capacity(n: usize) -> Self" src/gpu/mod.rs \
+  && grep -n "pub(crate) fn push(&mut self, candidate: GpuCandidate)" src/gpu/mod.rs \
+  && echo SEEDBLOCK-CONSTRUCTOR-PRESENT
 ```
 
-  If this prints two matches with the exact signatures `pub(crate) fn with_capacity(n: usize) -> Self` and `pub(crate) fn push(&mut self, candidate: GpuCandidate)`, skip Step 2. If it prints nothing, do Step 2. If it prints something with *different* signatures, change them to the ones in Step 2 and fix the call sites `cargo test` then reports.
+  Expected: one hit from each `grep`, both pointing inside the single `impl SeedBlock { ... }` block, followed by `SEEDBLOCK-CONSTRUCTOR-PRESENT`.
 
-- [ ] **Step 2: Add the build-then-freeze constructor.** In `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs`, inside the existing `impl SeedBlock { ... }` block, immediately after `chunks`, add:
+- [ ] **Step 2: If that grep did not print `SEEDBLOCK-CONSTRUCTOR-PRESENT`, stop — do not add the methods here.** The `&&` chain above fails loudly: a missing method means the marker never prints. In that case go back and finish **Milestone 1 Task 1.4 Step 4**, which is the one place both methods are written, and then re-run Step 1.
 
-```rust
-    /// Build-then-freeze: the ONLY way a block gains candidates.
-    ///
-    /// There is deliberately no `remove`, `sort`, `retain` or `iter_mut`. The
-    /// entropy<->seed pairing established by the single `zip` in
-    /// `producer::carve_and_send` is never allowed to be re-ordered afterwards
-    /// (design invariant 4); a re-ordered block would hand a worker a phrase
-    /// belonging to a different seed, and the CSV row it wrote would be a
-    /// wallet nobody controls.
-    pub(crate) fn with_capacity(n: usize) -> Self {
-        SeedBlock(Vec::with_capacity(n))
-    }
+  Do **not** patch `src/gpu/mod.rs` from this task. Adding a second `impl SeedBlock { ... }` block carrying `with_capacity`/`push` is `error[E0592]: duplicate definitions with name with_capacity` — the same failure Task 2.4 Step 1 already warns about — and adding them a second time inside the existing block is the same error.
 
-    pub(crate) fn push(&mut self, candidate: GpuCandidate) {
-        self.0.push(candidate);
-    }
-```
+  Task 1.4's doc comment on `with_capacity` already carries the invariant this task depends on (build-then-freeze; no `remove`, `sort`, `retain` or `iter_mut`; the entropy<->seed pairing established by the single `zip` in the producer is never re-ordered — design invariant 4). If the wording in the file differs from that summary, leave it alone: the comment is not load-bearing, and rewriting it here would put this task's diff into a file it must not touch.
 
 - [ ] **Step 3: Widen the imports.** In `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/producer.rs`, replace:
 
@@ -8101,36 +8150,23 @@ The stop flag is created *inside* `start` and belongs to the producer alone. It 
     }
 ```
 
-- [ ] **Step 1b: Restore the `GpuEngine` re-export and the `Send + Sync` pin.** Task 3.3 Step 6 deliberately left `GpuEngine` un-re-exported and dropped it from the assertion, saying Milestone 4 restores both. This is that moment, and it has to happen *before* Step 2: without it the `use crate::gpu::GpuEngine;` you just wrote is `error[E0432]: unresolved import`, not the E0599 Step 2 is looking for, and Task 5.3 and Task 6.1 would fail the same way later. In `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs`, immediately after `pub use backend::probe;`, add:
-
-```rust
-pub use backend::GpuEngine;
-```
-
-  and restore the assertion Task 3.3 Step 6 shortened, so it reads:
-
-```rust
-const _: fn() = || {
-    fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<GpuEngine>();
-    assert_send_sync::<SeedBlock>();
-    assert_send_sync::<GpuHealth>();
-};
-```
-
-  `GpuEngine` holds only `Arc`s and an `Option<JoinHandle<()>>` — no Objective-C type — so this compiles on both backends, and it is exactly what stops a later refactor from smuggling a Metal object into `App`.
-
 - [ ] **Step 2: Run the tests and watch them fail to build.**
 
 ```sh
 cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test --release signal_stop_finishes_the_producer 2>&1 | head -20
 ```
 
-  Expect:
+  Expect the *import* to be the failure, because Task 3.3 Step 6 deliberately left `GpuEngine` un-re-exported and no backend defines it yet:
 
 ```
-error[E0599]: no function or associated item named `start` found for struct `GpuEngine`
+error[E0432]: unresolved import `crate::gpu::GpuEngine`
+  --> src/gpu/producer.rs:...
+   |
+   |     use crate::gpu::GpuEngine;
+   |         ^^^^^^^^^^^^^^^^^^^^^ no `GpuEngine` in `gpu`
 ```
+
+  This is the red. Do **not** try to make it an `error[E0599]` about a missing `start` by adding the re-export now: `pub use backend::GpuEngine;` in `src/gpu/mod.rs` while neither `metal.rs` nor `stub.rs` defines the type is itself `error[E0432]: unresolved import backend::GpuEngine`, plus `error[E0412]: cannot find type GpuEngine in this scope` in the `Send + Sync` pin — a worse red that says nothing about the tests. The definition lands first (Steps 3–4), the re-export second (Step 4b), and the tests go green in Step 5.
 
 - [ ] **Step 3: Write the Metal `GpuEngine`.** In `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/metal.rs`, Task 3.3 Step 6 deliberately left NO `GpuEngine` in this file, so there should be nothing to delete — if some region is there anyway, remove it. The free `fn probe()` stays either way; do not delete that. Append:
 
@@ -8238,6 +8274,25 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 ```
 
+- [ ] **Step 4b: Restore the `GpuEngine` re-export and the `Send + Sync` pin.** Now — and not before — `backend::GpuEngine` exists, so the re-export resolves. Task 3.3 Step 6 deliberately left `GpuEngine` un-re-exported and dropped it from the assertion, saying Milestone 4 restores both; this is that moment, and it must land before Step 5 because the `use crate::gpu::GpuEngine;` in the tests, and Task 5.3 and Task 6.1 later, all resolve through it. In `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs`, immediately after `pub use backend::probe;`, add:
+
+```rust
+pub use backend::GpuEngine;
+```
+
+  and restore the assertion Task 3.3 Step 6 shortened, so it reads:
+
+```rust
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<GpuEngine>();
+    assert_send_sync::<SeedBlock>();
+    assert_send_sync::<GpuHealth>();
+};
+```
+
+  `GpuEngine` holds only `Arc`s and an `Option<JoinHandle<()>>` — no Objective-C type — so this compiles on both backends, and it is exactly what stops a later refactor from smuggling a Metal object into `App`. On this machine the Metal backend is the one selected, so the tree compiles here even though `src/gpu/stub.rs` does not gain its `GpuEngine` until Step 6; Step 7's `--no-default-features` build is what proves the stub leg.
+
 - [ ] **Step 5: Run the lifecycle tests and watch them pass.**
 
 ```sh
@@ -8246,7 +8301,11 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test --release gpu::producer::gpu
 
   `--test-threads=1` matters: these tests each start a GPU producer, and running four of them concurrently makes them contend for the same 8-core GPU and blows the 200 ms termination bound. Expect `test result: ok. 4 passed; 0 failed` and a printed `signal_stop -> finished in ...` well under 200 ms (typically 10–40 ms).
 
-- [ ] **Step 6: Mirror the surface in the stub backend.** In `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/stub.rs`, Task 3.3 Step 6 deliberately left NO `GpuEngine` in this file either, so there should be nothing to delete — if some region is there anyway, remove it. The free `fn probe()` stays; do not delete that. Append:
+- [ ] **Step 6: Mirror the surface in the stub backend.** In `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/stub.rs`, Task 3.3 Step 6 deliberately left NO `GpuEngine` in this file either, so there should be nothing to delete — if some region is there anyway, remove it. The free `fn probe()` stays; do not delete that.
+
+  **This deliberately supersedes the design spec.** `docs/superpowers/specs/2026-08-26-metal-gpu-pbkdf2-design.md` (~line 445) describes the stub `GpuEngine` as uninhabited — `GpuEngine { _never: Infallible }`, with a `start` that is `unreachable!()`. Milestone 1 Task 1.3 built exactly that placeholder; Task 3.3 Step 5 deleted it; and what goes in below is a **constructible** unit struct instead. Two reasons, both load-bearing: (1) it is the only form Task 8.4 Step 1's `stub_engine_lifecycle_is_a_terminating_no_op` can exercise — that test does `GpuEngine::start(tx, health)`, `signal_stop()`, `assert!(is_finished())`, `reap()`, none of which an uninhabited type can satisfy; (2) `health.raise(GpuDisableReason::NotSupported)` *degrades* to CPU-only, where `unreachable!()` would panic a Rayon worker with the terminal in raw mode and the alternate screen up — which the spec's own "never abort inside raw mode" rule forbids. This divergence is intentional: do not "restore" the spec's form, and do not edit the spec file from this task.
+
+  Append:
 
 ```rust
 /// No Metal on this target. The same public surface, all no-ops.
@@ -8493,7 +8552,7 @@ Two CLAUDE.md rules bound every edit here:
 - **The hot loop stays allocation-free.** Nothing in this milestone touches `matches_raw`. `drain_gpu_block` calls `C::matches_raw(matcher, &addr)` on a stack `[u8; 20]` and allocates only on the ~1-in-16^n path where a match is actually emitted.
 - **Monomorphization, not dyn dispatch.** `ChainKind::search` keeps its single `match self` — evaluated once per thread spawn — and picks either `search::<C>` or `search_hybrid::<C>`. There is no `Box<dyn Chain>`, no trait object, and no per-candidate indirection anywhere in the added code.
 
-The pinned test `search_counts_whole_batches_and_honours_stop` (`src/chains/mod.rs:130-146`) calls the free function `search::<Solana>`, whose signature is **unchanged**. Every task below ends with a check that its 17 source lines — the span `src/chains/mod.rs:130-146` inclusive — were not touched. That 17 is this one test's line span and nothing else; in particular it is unrelated to the number of lines Milestone 1 Task 1.8 Step 4's pinned-vector grep prints.
+The pinned test `search_counts_whole_batches_and_honours_stop` (`src/chains/mod.rs:130-146`) calls the free function `search::<Solana>`, whose signature is **unchanged**. Every task below ends with a check that this one test's body was not touched: extract it — from its `fn` line through the first line that is exactly four spaces and a closing brace — out of the milestone's base commit and out of the working tree, then `diff` the two. That is an exact byte comparison of this test and nothing else. Do **not** substitute a `git diff … | grep -c` for it: git diff's leading context drags in neighbouring lines, and this milestone's own new tests legitimately contain the string `n % LANES`, so such a count can never reach `0` and would be a false alarm with no correct action behind it.
 
 ---
 
@@ -8703,13 +8762,21 @@ The pinned test `search_counts_whole_batches_and_honours_stop` (`src/chains/mod.
   cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test 2>&1 | tail -3
   ```
 
-  Every test must pass. Then:
+  Every test must pass. Then compare the pinned test's own body, byte for byte, against the milestone base. This task has not committed yet — Step 9 does that — so the base is `HEAD`:
 
   ```sh
-  cd /Users/shawnhopkinson/Rust/Vanaddy && git diff src/chains/mod.rs | grep -c "search_counts_whole_batches\|n % LANES"
+  cd /Users/shawnhopkinson/Rust/Vanaddy
+  # The pinned test must be byte-identical to the milestone base.
+  git show HEAD:src/chains/mod.rs \
+    | sed -n '/fn search_counts_whole_batches_and_honours_stop/,/^    }$/p' > /tmp/pinned_before.txt
+  sed -n '/fn search_counts_whole_batches_and_honours_stop/,/^    }$/p' \
+    src/chains/mod.rs > /tmp/pinned_after.txt
+  diff /tmp/pinned_before.txt /tmp/pinned_after.txt && echo "PINNED TEST UNTOUCHED"
   ```
 
-  This must print `0` — the pinned test at `src/chains/mod.rs:130-146`, including its `assert_eq!(n % LANES as u64, 0, ...)` at line 145, must appear nowhere in the diff.
+  Expected: no `diff` output at all, followed by `PINNED TEST UNTOUCHED`. Each `sed` range captures exactly the 16 lines of the test, from `fn search_counts_whole_batches_and_honours_stop() {` through its closing `    }`.
+
+  Do **not** replace this with `git diff src/chains/mod.rs | grep -c "search_counts_whole_batches\|n % LANES"` expecting `0`. That count can never be `0` here: Step 2's new test legitimately contains `n % LANES` on two of its own added lines, and git diff's leading context pulls in the pinned test's neighbouring lines besides. A non-zero count there is a false alarm with no correct action behind it — the `diff` above is the gate.
 
 - [ ] **Step 8: Lint and format.**
 
@@ -8727,13 +8794,13 @@ The pinned test `search_counts_whole_batches_and_honours_stop` (`src/chains/mod.
   cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 src/gpu/mod.rs && rustfmt --edition 2021 --check src/gpu/mod.rs && echo "GPU-FMT-CLEAN"
   ```
 
-  Then prove the two files that already carry pre-existing drift gained none:
+  Then prove the two files that already carry pre-existing drift gained none. `rustfmt` **follows `mod` declarations**, so checking `src/chains/mod.rs` also formats `bitcoin.rs`, `evm.rs`, `monero.rs`, `solana.rs`, `ton.rs`, `ton_cell.rs` and `ton_mnemonic.rs` — 45 `Diff in` hunks on the clean tree, of which exactly 1 is in `mod.rs` itself. Filter to `mod.rs`'s own hunks so the number means what it says:
 
   ```sh
-  cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 --check src/chains/mod.rs | grep -c '^Diff in' ; rustfmt --edition 2021 --check src/app.rs | grep -c '^Diff in'
+  cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 --check src/chains/mod.rs 2>/dev/null | grep '^Diff in' | grep -c '/chains/mod.rs:' ; rustfmt --edition 2021 --check src/app.rs | grep -c '^Diff in'
   ```
 
-  Expected: `GPU-FMT-CLEAN`, then `1` and `11` — the pre-existing per-file drift counts, unchanged. A higher number means your insertion is not rustfmt-shaped; reshape it by hand rather than reaching for `cargo fmt`.
+  Expected: `GPU-FMT-CLEAN`, then `1` and `11` — the pre-existing per-file drift counts, unchanged. (`src/app.rs` declares no submodules, so its count needs no filter.) A higher *filtered* number means your insertion is not rustfmt-shaped; reshape it by hand rather than reaching for `cargo fmt`.
 
 - [ ] **Step 9: Commit.**
 
@@ -8767,8 +8834,8 @@ EOF
 - Test: `/Users/shawnhopkinson/Rust/Vanaddy/src/chains/mod.rs` (`mod tests`)
 
 **Interfaces:**
-- Consumes: `pub struct GpuCandidate { pub entropy: [u8; 16], pub seed: [u8; 64] }`; `impl SeedBlock { pub fn len(&self) -> usize; pub fn chunks(&self, n: usize) -> std::slice::Chunks<'_, GpuCandidate>; }`; `pub fn verify_gpu<C: Bip39GpuChain>(entropy: &[u8;16], gpu_addr: &C::AddressBytes) -> Option<(C::AddressBytes, C::SecretRaw, String, Verified)>`; `impl GpuHealth { pub fn raise(&self, r: GpuDisableReason); }`; `GpuDisableReason::VerifyMismatch { address: String }`; `Match { .., pub verified: crate::verify::Verified }`; `trait Bip39GpuChain: Chain { fn from_gpu_seed(seed: &[u8; 64]) -> (Self::AddressBytes, Self::SecretRaw); .. }`
-- Produces: `const GPU_CHUNK_BATCHES: usize = 16`; `fn drain_gpu_block<C: Bip39GpuChain>(block: &crate::gpu::SeedBlock, matcher: &Matcher, stop: &AtomicBool, counter: &AtomicU64, tx: &Sender<Match>, health: &crate::gpu::GpuHealth)`; `fn emit_gpu_match<C: Bip39GpuChain>(tx: &Sender<Match>, entropy: &[u8;16], gpu_addr: &C::AddressBytes, health: &crate::gpu::GpuHealth)`; `search_hybrid`'s `try_recv` body; `impl SeedBlock { pub(crate) fn with_capacity(n: usize) -> Self; pub(crate) fn push(&mut self, c: GpuCandidate); }`
+- Consumes: `pub struct GpuCandidate { pub entropy: [u8; 16], pub seed: [u8; 64] }`; `impl SeedBlock { pub fn len(&self) -> usize; pub fn chunks(&self, n: usize) -> std::slice::Chunks<'_, GpuCandidate>; }` (Task 1.4); `impl SeedBlock { pub(crate) fn with_capacity(n: usize) -> Self; pub(crate) fn push(&mut self, candidate: GpuCandidate); }` (Task 1.4 — consumed here, never re-declared; Step 2 adds it only if Milestone 1 was left incomplete); `pub fn verify_gpu<C: Bip39GpuChain>(entropy: &[u8;16], gpu_addr: &C::AddressBytes) -> Option<(C::AddressBytes, C::SecretRaw, String, Verified)>`; `impl GpuHealth { pub fn raise(&self, r: GpuDisableReason); }`; `GpuDisableReason::VerifyMismatch { address: String }`; `Match { .., pub verified: crate::verify::Verified }`; `trait Bip39GpuChain: Chain { fn from_gpu_seed(seed: &[u8; 64]) -> (Self::AddressBytes, Self::SecretRaw); .. }`; `const GPU_CHUNK_BATCHES: usize = 16` (Task 2.4); `fn drain_gpu_block<C: Bip39GpuChain>(block: &crate::gpu::SeedBlock, matcher: &Matcher, stop: &AtomicBool, counter: &AtomicU64, tx: &Sender<Match>, health: &crate::gpu::GpuHealth)` (Task 2.4); `fn emit_gpu_match<C: Bip39GpuChain>(tx: &Sender<Match>, entropy: &[u8;16], gpu_addr: &C::AddressBytes, health: &GpuHealth)` (Task 2.4); `pub fn search_hybrid<C: Bip39GpuChain>(matcher: &Matcher, stop: &AtomicBool, counter: &AtomicU64, tx: &Sender<Match>, gpu: Option<&crate::gpu::GpuRx>, health: &crate::gpu::GpuHealth)` (Task 2.4 — Task 5.1 Step 4 already routes `ChainKind::Evm` to it, so it is live code before this task starts)
+- Produces: no new production code. Task 2.4 is the authoritative producer of `GPU_CHUNK_BATCHES`, `drain_gpu_block`, `emit_gpu_match` and `search_hybrid`; Task 1.4 of `SeedBlock::with_capacity` and `SeedBlock::push`. This task's only unconditional output is the new test `gpu_drain_stop_granularity_is_one_chunk` in `src/chains/mod.rs`'s `mod tests`. Steps 2 and 5-7 add production code **only** where the Step 1 / Step 2 preflight greps show Milestone 1 or Milestone 2 was left incomplete.
 
 ---
 
@@ -8802,8 +8869,8 @@ EOF
           SeedBlock(Vec::with_capacity(n))
       }
 
-      pub(crate) fn push(&mut self, c: GpuCandidate) {
-          self.0.push(c);
+      pub(crate) fn push(&mut self, candidate: GpuCandidate) {
+          self.0.push(candidate);
       }
   }
   ```
@@ -8910,9 +8977,11 @@ EOF
 
   Do not proceed until you have seen one of those three failures.
 
-- [ ] **Step 5: Add `GPU_CHUNK_BATCHES` and `drain_gpu_block`.**
+- [ ] **Step 5: Add `GPU_CHUNK_BATCHES` and `drain_gpu_block` — ONLY if Step 1 found none.**
 
-  In `/Users/shawnhopkinson/Rust/Vanaddy/src/chains/mod.rs`, place this immediately after the `search_hybrid` function and before `#[cfg(test)] mod tests`. If a `drain_gpu_block` already exists anywhere in the file, delete it first — this text replaces it.
+  **If the Step 1 grep hit `fn drain_gpu_block`** — the expected outcome on a complete Milestone 2 — Task 2.4 already landed it. Read its body, confirm the **executable code** matches the block below statement for statement, and move on. Do **not** delete it, do **not** paste this text over it, and do **not** rewrite its comments to match: Task 2.4's copy carries a `// The GPU seed is UNTRUSTED and is used only to FILTER.` line that the text below omits, and Step 1 already told you that difference is expected, not drift.
+
+  **Only if the Step 1 grep found nothing** — Task 2.4 was left incomplete — add the text below to `/Users/shawnhopkinson/Rust/Vanaddy/src/chains/mod.rs`, immediately after the `search_hybrid` function and before `#[cfg(test)] mod tests`.
 
   **`const GPU_CHUNK_BATCHES` is the exception: do not move it and do not add a second one.** Milestone 2 Task 2.4 Step 8 inserts the const *before* `search_hybrid` (immediately after the closing `}` of `pub fn search`), whereas the block below prints it *after* — the two placements cannot coincide, and two `const GPU_CHUNK_BATCHES` items in one module is `error[E0428]: the name \`GPU_CHUNK_BATCHES\` is defined multiple times`. So: if the Step 1 grep found `GPU_CHUNK_BATCHES` already in the file, leave that declaration exactly where it sits and **omit the doc comment and `const` line from the block below**, pasting only `fn drain_gpu_block`. Add the const only if Step 1 found none.
 
@@ -8951,9 +9020,11 @@ EOF
 
   Note what is *not* here: no `to_lowercase`, no `format!`, no `Vec`, no `String` on the per-candidate path. `C::from_gpu_seed` returns a stack `([u8; 20], SecretKey)` and `C::matches_raw` compares bytes against the pre-computed `Matcher`. Allocation happens only inside `emit_gpu_match`, on the ~1-in-16^n branch.
 
-- [ ] **Step 6: Add `emit_gpu_match`.**
+- [ ] **Step 6: Add `emit_gpu_match` — ONLY if Step 1 found none.**
 
-  In `/Users/shawnhopkinson/Rust/Vanaddy/src/chains/mod.rs`, place this immediately after `drain_gpu_block`. If an `emit_gpu_match` already exists anywhere in the file, delete it first — this text replaces it.
+  **If the Step 1 grep hit `fn emit_gpu_match`** — the expected outcome on a complete Milestone 2 — Task 2.4 already landed it. Confirm the **executable code** matches the block below statement for statement, and move on. Do **not** delete it and do **not** paste this text over it: the `Some`-arm comment differs in wording and line count between Task 2.4's copy and the text below, and reconciling those comments is exactly the rewrite Step 1 forbids.
+
+  **Only if the Step 1 grep found nothing** — Task 2.4 was left incomplete — add the text below to `/Users/shawnhopkinson/Rust/Vanaddy/src/chains/mod.rs`, immediately after `drain_gpu_block`.
 
   ```rust
   fn emit_gpu_match<C: Bip39GpuChain>(
@@ -8989,9 +9060,11 @@ EOF
   }
   ```
 
-- [ ] **Step 7: Complete `search_hybrid`'s body.**
+- [ ] **Step 7: Complete `search_hybrid`'s body — ONLY if Step 1 found none.**
 
-  In `/Users/shawnhopkinson/Rust/Vanaddy/src/chains/mod.rs`, replace the whole of `search_hybrid` with this text. The `try_recv` is deliberately non-blocking: a worker that finds the queue empty falls straight through to a CPU batch, so the CPU/GPU split self-balances against whatever the GPU is actually delivering — which was measured collapsing 2-4× whenever the desktop compositor got busy.
+  **If the Step 1 grep hit `fn search_hybrid`** — the expected outcome on a complete Milestone 2 — Task 2.4 already landed it, and Task 5.1 Step 4 already routes `ChainKind::Evm` to it, so it is live code the suite is exercising. Confirm the **executable code** matches the block below statement for statement, and move on. Do **not** replace it and do **not** rewrite its comments.
+
+  **Only if the Step 1 grep found nothing** — Task 2.4 was left incomplete — add the text below to `/Users/shawnhopkinson/Rust/Vanaddy/src/chains/mod.rs`, after the closing `}` of `pub fn search` and before the `GPU_CHUNK_BATCHES` / `drain_gpu_block` block. The `try_recv` is deliberately non-blocking: a worker that finds the queue empty falls straight through to a CPU batch, so the CPU/GPU split self-balances against whatever the GPU is actually delivering — which was measured collapsing 2-4× whenever the desktop compositor got busy.
 
   ```rust
   /// The EVM search loop when a GPU producer may be feeding it. `try_recv` is
@@ -9060,11 +9133,13 @@ EOF
   cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 src/gpu/mod.rs && rustfmt --edition 2021 --check src/gpu/mod.rs && echo "GPU-FMT-CLEAN"
   ```
 
+  `rustfmt` **follows `mod` declarations**, so checking `src/chains/mod.rs` also formats `bitcoin.rs`, `evm.rs`, `monero.rs`, `solana.rs`, `ton.rs`, `ton_cell.rs` and `ton_mnemonic.rs` — 45 `Diff in` hunks on the clean tree, of which exactly 1 is in `mod.rs` itself. Filter to `mod.rs`'s own hunks:
+
   ```sh
-  cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 --check src/chains/mod.rs | grep -c '^Diff in' ; cargo test 2>&1 | tail -3
+  cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 --check src/chains/mod.rs 2>/dev/null | grep '^Diff in' | grep -c '/chains/mod.rs:' ; cargo test 2>&1 | tail -3
   ```
 
-  Expected: `GPU-FMT-CLEAN`, then `1` — the pre-existing `src/chains/mod.rs` drift count, unchanged — then a green suite. A higher drift count means your insertion is not rustfmt-shaped; reshape it by hand.
+  Expected: `GPU-FMT-CLEAN`, then `1` — the pre-existing `src/chains/mod.rs` drift count, unchanged — then a green suite. A higher *filtered* count means your insertion is not rustfmt-shaped; reshape it by hand.
 
 - [ ] **Step 11: Commit.**
 
@@ -9304,13 +9379,21 @@ This is the milestone's real verification: a 1-character-prefix EVM search fed b
   cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test 2>&1 | tail -3
   ```
 
-  All non-ignored tests pass and the ignored gate is reported as ignored. Then:
+  All non-ignored tests pass and the ignored gate is reported as ignored. Then compare the pinned test's own body, byte for byte, against the base this milestone started from. Task 5.1 Step 9 and Task 5.2 Step 11 are the only commits since, and this task has not committed yet, so that base is `HEAD~2`:
 
   ```sh
-  cd /Users/shawnhopkinson/Rust/Vanaddy && git diff HEAD~2 -- src/chains/mod.rs | grep -c "search_counts_whole_batches\|n % LANES as u64"
+  cd /Users/shawnhopkinson/Rust/Vanaddy
+  # The pinned test must be byte-identical to the milestone base.
+  git show HEAD~2:src/chains/mod.rs \
+    | sed -n '/fn search_counts_whole_batches_and_honours_stop/,/^    }$/p' > /tmp/pinned_before.txt
+  sed -n '/fn search_counts_whole_batches_and_honours_stop/,/^    }$/p' \
+    src/chains/mod.rs > /tmp/pinned_after.txt
+  diff /tmp/pinned_before.txt /tmp/pinned_after.txt && echo "PINNED TEST UNTOUCHED"
   ```
 
-  Must print `0` — across all of Milestone 5, `search_counts_whole_batches_and_honours_stop` and its `n % LANES == 0` assertion were never edited.
+  Expected: no `diff` output at all, followed by `PINNED TEST UNTOUCHED` — across all of Milestone 5, `search_counts_whole_batches_and_honours_stop` and its `n % LANES == 0` assertion were never edited. Each `sed` range captures exactly the 16 lines of the test.
+
+  Do **not** replace this with `git diff HEAD~2 -- src/chains/mod.rs | grep -c "search_counts_whole_batches\|n % LANES as u64"` expecting `0`. Task 5.1 Step 2 and Task 5.2 Step 3 both added tests that legitimately contain `n % LANES as u64`, so across this range that count is non-zero by design and tells you nothing about the pinned test. The `diff` above is the gate.
 
 - [ ] **Step 7: Lint and format.**
 
@@ -9362,7 +9445,7 @@ EOF
 - `cargo test` green, with `search_counts_whole_batches_and_honours_stop` passing and its source byte-identical to `src/chains/mod.rs:130-146` before this milestone.
 - `chain_kind_search_with_no_gpu_source_is_unchanged` and `gpu_drain_stop_granularity_is_one_chunk` green — *alongside*, not in place of, Milestone 2's `search_with_no_gpu_source_is_unchanged` and `gpu_drain_honours_stop_mid_block`, which must both still exist and still pass.
 - `cargo test --release -- --ignored --nocapture hybrid_evm_search_with_live_gpu_emits_only_rederivable_matches` green, with hand-checked counter arithmetic.
-- `cargo clippy --all-targets 2>&1 | grep -- '-->' | sort | uniq -c` still prints exactly the 12 pre-existing lines Milestone 1 Task 1.8 Step 5 recorded, with none pointing into `src/gpu/`, `src/verify.rs`, or `src/chains/mod.rs`. No bare `cargo fmt` was ever run: `rustfmt --edition 2021 --check src/gpu/mod.rs` is silent, and the `^Diff in` counts for `src/chains/mod.rs` (1) and `src/app.rs` (11) are unchanged.
+- `cargo clippy --all-targets 2>&1 | grep -- '-->' | sort | uniq -c` still prints exactly the 12 pre-existing lines Milestone 1 Task 1.8 Step 5 recorded, with none pointing into `src/gpu/`, `src/verify.rs`, or `src/chains/mod.rs`. No bare `cargo fmt` was ever run: `rustfmt --edition 2021 --check src/gpu/mod.rs` is silent, and the `^Diff in` counts are unchanged — `1` for `src/chains/mod.rs` when filtered to that file's own hunks (`… | grep '^Diff in' | grep -c '/chains/mod.rs:'`, because rustfmt follows `mod` declarations and reports 45 hunks across the whole `chains` tree), and `11` for `src/app.rs`, which declares no submodules and needs no filter.
 - `App` still spawns no GPU producer — `start_search` passes `None`. Milestone 6 supplies the live receiver.
 ## Milestone 6 — App lifecycle
 
@@ -9411,13 +9494,23 @@ Anything higher means your insertion is not rustfmt-shaped; fix it by hand.
 
 `src/main.rs` *is* rustfmt-clean, but plain `rustfmt src/main.rs` follows its `mod`
 declarations into the whole crate and would report all 84 tree-wide diffs. Always
-check it with `--skip-children`:
+check it with `skip_children`:
 
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 --check --skip-children src/main.rs | grep -c '^Diff in'
+cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 --check --config skip_children=true src/main.rs | grep -c '^Diff in'
 ```
 
 Expected: `0`.
+
+Use exactly that spelling. There is no `--skip-children` **flag**: this repo's
+`rustfmt 1.9.0-stable` answers it with `Unrecognized option: 'skip-children'` on
+*stderr*, exits 1, and writes nothing to stdout — so `| grep -c '^Diff in'`
+prints the expected `0` whether `src/main.rs` is clean or catastrophically
+malformed, and the gate passes *because* the command failed. `--config
+skip_children=true` is a real gate: it prints `0` for the clean `src/main.rs` and
+`11` for `src/app.rs`, which does have drift. Every `src/main.rs` gate in this
+milestone uses the `--config` form; if you ever find one written as
+`--skip-children`, it is checking nothing.
 
 Files this branch created have no drift to preserve — format them in place:
 
@@ -10032,11 +10125,11 @@ Expect `test result: ok. 2 passed`. (`--test-threads=1` keeps the global-hook wi
 
 ```sh
 cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test
-cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 --check --skip-children src/main.rs | grep -c '^Diff in'
+cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 --check --config skip_children=true src/main.rs | grep -c '^Diff in'
 cd /Users/shawnhopkinson/Rust/Vanaddy && cargo clippy --all-targets 2>&1 | grep -- '-->' | sort | uniq -c
 ```
 
-Expected: the suite passes, `0` (`src/main.rs` is rustfmt-clean; `--skip-children` keeps `rustfmt` from walking the whole crate), and exactly the 12 baseline
+Expected: the suite passes, `0` (`src/main.rs` is rustfmt-clean; `--config skip_children=true` keeps `rustfmt` from walking the whole crate — the `--skip-children` *flag* does not exist in `rustfmt 1.9.0-stable`, and using it makes this gate print `0` unconditionally), and exactly the 12 baseline
 clippy lines listed in the milestone preamble — no new line, and none pointing
 into `src/gpu/` or `src/verify.rs`. Never run bare `cargo fmt`.
 
@@ -10284,7 +10377,7 @@ Expect `test result: ok. 1 passed`.
 cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test
 cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 --check src/app.rs | grep -c '^Diff in'
 cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 --check src/ui.rs | grep -c '^Diff in'
-cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 --check --skip-children src/main.rs | grep -c '^Diff in'
+cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 --check --config skip_children=true src/main.rs | grep -c '^Diff in'
 cd /Users/shawnhopkinson/Rust/Vanaddy && cargo clippy --all-targets 2>&1 | grep -- '-->' | sort | uniq -c
 ```
 
@@ -10314,7 +10407,7 @@ EOF
 ### Task 6.5: Hold the CSV file open for the search
 
 **Files:**
-- Modify: `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs` (`struct App`; `App::with_gpu_status`; the CSV header block in `start_search` at lines 238-247; `drain_matches`; `append_match_row` — added in Milestone 2)
+- Modify: `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs` (`struct App`; `App::with_gpu_status`; the `// Ensure CSV has header` block in `start_search`, as Task 2.5 Step 6 left it — no line number, because Tasks 2.5, 5.1, 6.1 and 6.4 all insert above it; `drain_matches`; `append_match_row` — added in Milestone 2)
 - Test: `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs` (`mod tests`)
 
 **Interfaces:**
@@ -10454,12 +10547,16 @@ differently to anyone jumping between the tasks. `io` and `Path` are already in
 scope from the `use std::{..., io, path::Path, ...}` block Task 2.5 Step 4
 installs; add them only if that block is missing them.
 
-- [ ] **Step 6: Open the file once in `start_search`.** Replace the CSV header block (lines 238-247):
+- [ ] **Step 6: Open the file once in `start_search`.** Replace the CSV header
+block in `start_search` — search for the `// Ensure CSV has header` comment
+rather than a line number, because Tasks 2.5, 5.1, 6.1 and 6.4 all insert above
+it. It reads as Task 2.5 Step 6 left it, i.e. `open_csv_secure` already takes
+`Path::new(CSV_PATH)`:
 
 ```rust
         // Ensure CSV has header
         {
-            let file = open_csv_secure().expect("Failed to open vanity_wallets.csv");
+            let file = open_csv_secure(Path::new(CSV_PATH)).expect("Failed to open vanity_wallets.csv");
             let needs_header = file.metadata().map(|m| m.len() == 0).unwrap_or(true);
             if needs_header {
                 let mut wtr = WriterBuilder::new().has_headers(false).from_writer(file);
@@ -11123,7 +11220,7 @@ EOF
 - Test: `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs` (`mod tests`)
 
 **Interfaces:**
-- Consumes: `GpuEngine::{signal_stop, is_finished, reap}`; `GpuEngine`'s `Drop` must NOT join
+- Consumes: `GpuEngine::{signal_stop, is_finished, reap}`; `GpuEngine`'s `Drop` must NOT join; in the deadline test only, `GpuEngine::{start, probe}`, `GpuHealth::default()`, `crate::gpu::{SeedBlock, CHANNEL_CAPACITY}`
 - Produces: `pub fn App::shutdown_gpu(&mut self, deadline: Duration)`
 
 - [ ] **Step 1: Write the failing test.** Add these tests inside `mod tests` in `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs`:
@@ -11143,19 +11240,77 @@ EOF
         assert!(app.gpu_rx.is_none());
     }
 
+    /// The deadline path — the half the test above cannot reach. `App::new()`
+    /// leaves `gpu_engines` EMPTY, so `shutdown_gpu`'s
+    /// `while !self.gpu_engines.is_empty() && start.elapsed() < deadline` loop
+    /// never runs one iteration and the call returns in microseconds under ANY
+    /// implementation — an unbounded join included. So this test parks a REAL,
+    /// still-running engine: the deadline is then the thing actually under test.
+    ///
+    /// Sequencing: wait for the first block, which puts the ~60-95 ms shader
+    /// compile and the ~300 ms self-test behind us, then shut down with a 10 ms
+    /// deadline. In steady state the producer cannot react to the stop flag
+    /// faster than one command buffer draining through the in-flight ring
+    /// (8.8 ms x PIPELINE_DEPTH ~= 26 ms; ~135 ms worst case), so at 10 ms it is
+    /// guaranteed to still be running and the bound must be what ends the wait.
+    /// A join would take ~135 ms and blow the upper assertion; the lower
+    /// assertion pins that the deadline was genuinely reached, so the test can
+    /// never pass vacuously the way the empty-`gpu_engines` version did.
+    ///
+    /// The engine is abandoned mid-flight, exactly as `shutdown_gpu`'s doc
+    /// comment describes: its thread exits on the stop flag a few tens of ms
+    /// after this test returns.
     #[test]
-    fn shutdown_gpu_honours_its_deadline() {
-        // With no engines the loop never runs; with engines it must still return
-        // inside the deadline plus one poll interval. This pins the shape of the
-        // bound so a future edit cannot turn it into an unbounded join.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
+    fn shutdown_gpu_honours_its_deadline_with_a_live_engine() {
+        use crate::gpu::{SeedBlock, CHANNEL_CAPACITY};
+
+        // Same graceful-skip idiom as `gpu_for_test` in `src/gpu/metal.rs`:
+        // this test must pass on a machine with no Metal device.
+        if std::env::var_os("VANADDY_NO_GPU").is_some() {
+            eprintln!("SKIP: VANADDY_NO_GPU is set");
+            return;
+        }
+        if let GpuStatus::Unavailable(reason) = GpuEngine::probe() {
+            eprintln!("SKIP: no Metal device on this machine ({reason})");
+            return;
+        }
+
         let mut app = App::new();
-        let deadline = Duration::from_millis(100);
+        app.gpu_health = Arc::new(GpuHealth::default());
+        let (gpu_tx, rx) = crossbeam_channel::bounded::<Box<SeedBlock>>(CHANNEL_CAPACITY);
+        let engine = GpuEngine::start(gpu_tx, app.gpu_health.clone());
+        app.gpu_engines.push(engine);
+        // App's own clone, exactly as `start_search` holds it. The local `rx`
+        // stays alive for the whole test, so the producer can only ever see the
+        // stop flag — never a `Disconnected` shortcut that would let it finish
+        // early and hand this test a free pass.
+        app.gpu_rx = Some(rx.clone());
+
+        let first = rx
+            .recv_timeout(Duration::from_secs(180))
+            .expect("no block within 180 s of GpuEngine::start");
+        drop(first);
+
+        let deadline = Duration::from_millis(10);
         let before = Instant::now();
         app.shutdown_gpu(deadline);
+        let elapsed = before.elapsed();
+
         assert!(
-            before.elapsed() < deadline + Duration::from_millis(50),
-            "shutdown_gpu is a bounded wait, never a join"
+            elapsed < deadline + Duration::from_millis(50),
+            "shutdown_gpu is a bounded wait, never a join: {elapsed:?}"
         );
+        assert!(
+            elapsed >= deadline,
+            "the engine was still running, so the DEADLINE — not an early \
+             is_finished — must be what ended the wait: {elapsed:?}"
+        );
+        assert!(
+            app.gpu_engines.is_empty(),
+            "an engine still running past the deadline is abandoned, not left parked"
+        );
+        assert!(app.gpu_rx.is_none(), "shutdown_gpu drops App's channel clone");
     }
 ```
 
@@ -11242,10 +11397,21 @@ with:
 - [ ] **Step 6: Run the tests and watch them pass.**
 
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test shutdown_gpu
+cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test shutdown_gpu -- --nocapture
 ```
 
-Expect `test result: ok. 2 passed`.
+Expect `test result: ok. 2 passed`. On this machine
+`shutdown_gpu_honours_its_deadline_with_a_live_engine` takes ~1 s (shader
+compile + self-test + first wave) and prints nothing; on a machine with no Metal
+device it prints `SKIP: no Metal device on this machine (...)` and passes in
+microseconds; on the stub leg (`cargo test --no-default-features shutdown_gpu`)
+its `#[cfg]` excludes it entirely and the run reports `1 passed`.
+
+If the live test fails on `the engine was still running, so the DEADLINE ... must
+be what ended the wait`, the producer reacted to the stop flag inside 10 ms —
+which contradicts the 8.8 ms-per-command-buffer pipeline. Investigate the
+producer before relaxing the assertion; do not delete it, or the deadline goes
+back to being untested.
 
 - [ ] **Step 6b: Remove the Milestone 1 dead-code blanket.** This is the first
 point in the branch at which the whole `GpuEngine` surface is consumed — `probe`
@@ -11278,9 +11444,22 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && cargo clippy --all-targets --no-default
 
 Expected: no output from EITHER leg. Fix or justify every diagnostic they print —
 delete what is genuinely dead, and add a targeted `#[allow(dead_code)]` with a
-one-line reason ONLY where an item is reachable-but-unused (for example a constant
-consumed solely by an `#[ignore]`d measurement test, such as
-`crate::gpu::EVM_GPU_SEEDS_PER_SEC`). On the stub leg that targeted allow is
+one-line reason ONLY where an item is reachable-but-unused. The two worked
+examples in this tree are `crate::gpu::COMPRESSIONS_PER_SEED` (no production path
+reads it — its only consumers are the geometry assertion in `src/gpu/mod.rs`'s
+`mod tests` and Task 8.1's `#[cfg(test)]` soak-count helpers) and
+`SeedBlock::is_empty` (which exists only because clippy's `len_without_is_empty`
+demands it alongside `len`; nothing in the plan ever calls it). Do NOT reach for
+`crate::gpu::EVM_GPU_SEEDS_PER_SEC` as the example: Milestone 7 Task 7.7 reads it
+from `App::estimated_rate`, which makes it a live production consumer needing no
+allow at all.
+
+Write every reason here as a claim a later task can falsify — "no production
+consumer as of Milestone 6" — and delete the attribute in whichever later task
+makes the item live. An unnecessary `#[allow(dead_code)]` never warns, so nothing
+else will remind you.
+
+On the stub leg that targeted allow is
 precisely what each Metal-only item listed above needs — put it on the item, never
 a file-wide `#![allow(..)]`, which must not come back. With both legs silent, Task
 8.5 Step 4's `grep -c -- '--> src/gpu/\|--> src/verify.rs'` expectation of `0`
@@ -11291,7 +11470,7 @@ holds.
 ```sh
 cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test
 cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 --check src/app.rs | grep -c '^Diff in'
-cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 --check --skip-children src/main.rs | grep -c '^Diff in'
+cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 --check --config skip_children=true src/main.rs | grep -c '^Diff in'
 cd /Users/shawnhopkinson/Rust/Vanaddy && cargo clippy --all-targets 2>&1 | grep -- '-->' | sort | uniq -c
 ```
 
@@ -11510,7 +11689,7 @@ rm -rf /tmp/vanaddy-hammer
 cd /Users/shawnhopkinson/Rust/Vanaddy && cargo clippy --all-targets 2>&1 | grep -- '-->' | sort | uniq -c
 cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 --check src/app.rs | grep -c '^Diff in'
 cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 --check src/ui.rs | grep -c '^Diff in'
-cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 --check --skip-children src/main.rs | grep -c '^Diff in'
+cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 --check --config skip_children=true src/main.rs | grep -c '^Diff in'
 cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 --check src/gpu/*.rs src/verify.rs | grep -c '^Diff in'
 cd /Users/shawnhopkinson/Rust/Vanaddy && git status --short
 ```
@@ -11567,6 +11746,8 @@ Resulting layout (memorise this; every task below depends on it):
 | 4 | **GPU** | Case |
 | 5 | Threads | **GPU** |
 | 6 | — | Threads |
+
+Line numbers below refer to the repository as it stands today — the pre-branch tree at commit `beced09`. Milestones 2, 5 and 6 already edited `src/app.rs`, and the tasks *inside this milestone* edit `src/app.rs` and `src/ui.rs` again: Task 7.3 alone adds an import and roughly 70 lines of helpers to `src/ui.rs` before Tasks 7.5 and 7.6 run. So the numbers will have shifted by the time you reach a given step — every step gives the exact anchor text to search for, which has not. **Match on the quoted text, never on the line range.**
 
 Two ground rules for this milestone:
 
@@ -11728,7 +11909,7 @@ assertion `left == right` failed: StartsWith fields: chain, match, vanity, case,
 
 `tab_visits_every_field_and_wraps_including_the_new_gpu_field` fails with `left: [0, 1, 2, 3, 4, 0]  right: [0, 1, 2, 3, 4, 5]`; `threads_field_still_edits_at_its_new_index` fails with `left: ""  right: "4"`; `q_quits_and_h_opens_help_from_the_gpu_field` fails with `assertion failed: app.show_help`.
 
-- [ ] **Step 3: Widen `field_count()`.** In `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs`, replace lines 76-82 exactly:
+- [ ] **Step 3: Widen `field_count()`.** In `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs`, replace lines 76-82 exactly (line numbers are pre-branch; match on the quoted text):
 
 ```rust
     /// Chain, match position, vanity (+ suffix when StartsAndEndsWith), case,
@@ -11780,12 +11961,12 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs` — `handle_field_input`, inserting a new arm between the Case arm (ends line 517) and the Threads arm (starts line 519)
-- Modify: `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs` line 1-13 (imports, only if `GpuStatus` is not already in scope)
+- Read only (no edit expected): `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs` import block at lines 1-13. Task 6.1 already added `use crate::gpu::{GpuEngine, GpuHealth, GpuRx, GpuStatus};`, so this task adds no import; Step 3 below only verifies that, as a safety net for an out-of-order build.
 - Test: `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs` `#[cfg(test)] mod tests`
 
 **Interfaces:**
-- Consumes: `crate::gpu::GpuStatus::{Unavailable(String), Ready { device: String }, Initializing, Running { device: String }, Disabled(GpuDisableReason)}`; `App::gpu_status: GpuStatus`; `App::gpu_requested: bool`; `App::gpu_effective(&self) -> bool`; `ChainKind::label(self) -> &'static str` (`src/chains/mod.rs:57`); `ChainKind: PartialEq` (`src/chains/mod.rs:47`)
-- Produces: the `f if f == app.field_count() - 2` arm of `handle_field_input`
+- Consumes: `crate::gpu::GpuStatus::{Unavailable(String), Ready { device: String }, Initializing, Running { device: String }, Disabled(GpuDisableReason)}` — **already imported into `src/app.rs` by Task 6.1** as `use crate::gpu::{GpuEngine, GpuHealth, GpuRx, GpuStatus};`, so this task consumes that import rather than adding one; `App::gpu_status: GpuStatus`; `App::gpu_requested: bool`; `App::gpu_effective(&self) -> bool`; `ChainKind::label(self) -> &'static str` (`src/chains/mod.rs:57`); `ChainKind: PartialEq` (`src/chains/mod.rs:47`)
+- Produces: the `f if f == app.field_count() - 2` arm of `handle_field_input` — and nothing else. In particular it produces **no** new `use` line: a second import of `GpuStatus` on top of Task 6.1's is `error[E0252]` (the name is defined multiple times).
 
 - [ ] **Step 1: Add the input-arm tests.** Append inside `mod tests` in `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs`:
 
@@ -11903,7 +12084,7 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && grep -n "use crate::gpu" src/app.rs
 
 Milestone 6 added the `App` GPU fields, so a line importing `GpuStatus` is normally already there. If `GpuStatus` is **not** among the imported names, add it — either extend the existing `use crate::gpu::{...};` list with `GpuStatus`, or, if there is no `use crate::gpu` line at all, insert `use crate::gpu::GpuStatus;` immediately after line 2 (`use super::matcher::{Matcher, MatchPosition};`). Do not add a second `use` of a name that is already imported.
 
-- [ ] **Step 4: Add the input arm.** In `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs`, in `handle_field_input`, insert this between the Case arm (which ends with `},` at line 517) and the `// Thread count (always last field)` comment at line 519:
+- [ ] **Step 4: Add the input arm.** In `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs`, in `handle_field_input`, insert this between the Case arm (which ends with `},` at line 517) and the `// Thread count (always last field)` comment at line 519 (line numbers are pre-branch; match on the quoted text):
 
 ```rust
         // GPU offload (toggle with Left/Right or y/n) — always second-to-last,
@@ -12117,13 +12298,13 @@ error[E0425]: cannot find function `sanitize_status_text` in this scope
 error[E0425]: cannot find function `gpu_form_value` in this scope
 ```
 
-- [ ] **Step 3: Import the GPU types into `src/ui.rs`.** Insert after line 3 (`use super::matcher::MatchPosition;`):
+- [ ] **Step 3: Import the GPU types into `src/ui.rs`.** Insert after line 3 (`use super::matcher::MatchPosition;`) — line numbers are pre-branch; match on the quoted text:
 
 ```rust
 use crate::gpu::{GpuDisableReason, GpuStatus};
 ```
 
-- [ ] **Step 4: Add the four helpers.** Insert into `/Users/shawnhopkinson/Rust/Vanaddy/src/ui.rs` immediately after `render_config_form` ends (line 199, the `}` before the `/// Rows the stats block needs` doc comment):
+- [ ] **Step 4: Add the four helpers.** Insert into `/Users/shawnhopkinson/Rust/Vanaddy/src/ui.rs` immediately after `render_config_form` ends (pre-branch line 199, the `}` before the `/// Rows the stats block needs` doc comment) — line numbers are pre-branch; match on the quoted text:
 
 ```rust
 /// Flatten a status string for display in a ratatui Buffer.
@@ -12195,7 +12376,7 @@ fn gpu_form_line(app: &App, label_style: Style) -> Line<'static> {
 }
 ```
 
-- [ ] **Step 5: Insert the row into the `both` branch.** In `/Users/shawnhopkinson/Rust/Vanaddy/src/ui.rs`, replace lines 130-140 exactly (Threads moves from field 5 to field 6):
+- [ ] **Step 5: Insert the row into the `both` branch.** In `/Users/shawnhopkinson/Rust/Vanaddy/src/ui.rs`, replace the ` Case:     ` row push through the ` Threads:  ` row push in the `both` branch — pre-branch lines 130-140, already shifted by one by Step 3's import, so line numbers are pre-branch; match on the quoted text (Threads moves from field 5 to field 6):
 
 ```rust
         lines.push(Line::from(vec![
@@ -12212,7 +12393,7 @@ fn gpu_form_line(app: &App, label_style: Style) -> Line<'static> {
         ]));
 ```
 
-- [ ] **Step 6: Insert the row into the `else` branch.** Replace lines 158-168 exactly (Threads moves from field 4 to field 5):
+- [ ] **Step 6: Insert the row into the `else` branch.** Replace the ` Case:     ` row push through the ` Threads:  ` row push in the `else` branch — pre-branch lines 158-168, already shifted by one by Step 3's import, so line numbers are pre-branch; match on the quoted text (Threads moves from field 4 to field 5):
 
 ```rust
         lines.push(Line::from(vec![
@@ -12332,7 +12513,7 @@ Expect:
 error[E0599]: no method named `gpu_measured_rate` found for struct `App` in the current scope
 ```
 
-- [ ] **Step 3: Add the method.** Insert into `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs` immediately after `projected_seconds` (after the `}` on line 172, before `pub fn validate`):
+- [ ] **Step 3: Add the method.** Insert into `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs` immediately after `projected_seconds` (after its closing `}`, pre-branch line 172, before `pub fn validate`) — line numbers are pre-branch; match on the quoted text:
 
 ```rust
     /// Measured GPU throughput: `(seeds per second, percent of all candidates
@@ -12391,7 +12572,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ### Task 7.5: The Stats pane's GPU row and `stats_height`
 
 **Files:**
-- Modify: `/Users/shawnhopkinson/Rust/Vanaddy/src/ui.rs` lines 201-206 (`stats_height`), line 238 (end of the `lines` vec in `render_stats`)
+- Modify: `/Users/shawnhopkinson/Rust/Vanaddy/src/ui.rs` — `stats_height` (pre-branch lines 201-206) and the end of the `lines` vec in `render_stats` (pre-branch line 238). Task 7.3 has already grown this file; match on text, not on the ranges.
 - Modify: `/Users/shawnhopkinson/Rust/Vanaddy/src/ui.rs` — new `gpu_stats_line` helper before `stats_height`
 - Test: `/Users/shawnhopkinson/Rust/Vanaddy/src/ui.rs` `#[cfg(test)] mod tests`
 
@@ -12517,7 +12698,7 @@ Expect:
 error[E0425]: cannot find function `gpu_stats_line` in this scope
 ```
 
-- [ ] **Step 3: Add `gpu_stats_line`.** Insert into `/Users/shawnhopkinson/Rust/Vanaddy/src/ui.rs` immediately before the `/// Rows the stats block needs` doc comment at line 201:
+- [ ] **Step 3: Add `gpu_stats_line`.** Insert into `/Users/shawnhopkinson/Rust/Vanaddy/src/ui.rs` immediately before the `/// Rows the stats block needs` doc comment (pre-branch line 201) — line numbers are pre-branch; match on the quoted text:
 
 ```rust
 /// The single source of truth for the Stats pane's GPU row: `render_stats`
@@ -12561,7 +12742,24 @@ fn gpu_stats_line(app: &App) -> Option<(String, Color)> {
 }
 ```
 
-- [ ] **Step 4: Teach `stats_height` to count it.** Replace lines 201-206 of `/Users/shawnhopkinson/Rust/Vanaddy/src/ui.rs` exactly:
+- [ ] **Step 4: Teach `stats_height` to count it.** Task 7.3 added an import and roughly 70 lines of helpers to `/Users/shawnhopkinson/Rust/Vanaddy/src/ui.rs`, and Step 3 above inserted `gpu_stats_line` directly on top of `stats_height`, so this function is no longer at lines 201-206 — **match on the text, not on a line range.** The block to replace is the whole of `stats_height` together with its one-line doc comment, verbatim as it stands:
+
+```rust
+/// Rows the stats block needs: 4 fixed lines, the optional Expected/ETA lines, plus borders.
+fn stats_height(app: &App) -> u16 {
+    let optional =
+        u16::from(app.expected_attempts().is_some()) + u16::from(app.projected_seconds().is_some());
+    4 + optional + 2
+}
+```
+
+Confirm there is exactly one match before you touch anything:
+
+```sh
+cd /Users/shawnhopkinson/Rust/Vanaddy && grep -c '^fn stats_height(app: &App) -> u16 {$' src/ui.rs
+```
+
+Expect `1`. Replace those six lines — doc comment through closing brace, inclusive — with:
 
 ```rust
 /// Rows the stats block needs: 4 fixed lines, the optional GPU row, the
@@ -12576,7 +12774,7 @@ fn stats_height(app: &App) -> u16 {
 }
 ```
 
-- [ ] **Step 5: Draw it.** In `render_stats`, insert directly after the `let mut lines = vec![ ... ];` statement ends (the `];` on line 238) and before the `if let Some(attempts) = expected {` on line 240:
+- [ ] **Step 5: Draw it.** In `render_stats`, insert directly after the `let mut lines = vec![ ... ];` statement ends (its closing `];`, pre-branch line 238) and before the `if let Some(attempts) = expected {` (pre-branch line 240) — line numbers are pre-branch; match on the quoted text:
 
 ```rust
     // Directly under Rate: the GPU's contribution to the rate above it.
@@ -12617,7 +12815,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ### Task 7.6: Help popup entries
 
 **Files:**
-- Modify: `/Users/shawnhopkinson/Rust/Vanaddy/src/ui.rs` lines 273-321 (`render_help_popup`)
+- Modify: `/Users/shawnhopkinson/Rust/Vanaddy/src/ui.rs` — `render_help_popup` (pre-branch lines 273-321). Tasks 7.3 and 7.5 have already grown this file; match on text, not on the range.
 - Test: `/Users/shawnhopkinson/Rust/Vanaddy/src/ui.rs` `#[cfg(test)] mod tests`
 
 **Interfaces:**
@@ -12688,7 +12886,67 @@ error[E0425]: cannot find function `help_lines` in this scope
 error[E0425]: cannot find value `HELP_POPUP_HEIGHT` in this scope
 ```
 
-- [ ] **Step 3: Replace `render_help_popup` with the extracted version.** Replace lines 273-321 of `/Users/shawnhopkinson/Rust/Vanaddy/src/ui.rs` exactly:
+- [ ] **Step 3: Replace `render_help_popup` with the extracted version.** Tasks 7.3 and 7.5 have grown `/Users/shawnhopkinson/Rust/Vanaddy/src/ui.rs` by well over a hundred lines, so `render_help_popup` is no longer at lines 273-321 — **match on the text, not on a line range.** The block to replace is the whole function, verbatim as it stands:
+
+```rust
+fn render_help_popup(f: &mut Frame, area: Rect) {
+    // Center a popup ~60x18
+    let popup_width = 56.min(area.width.saturating_sub(4));
+    let popup_height = 26.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    // Clear background
+    let clear = Block::default().style(Style::default().bg(Color::Black));
+    f.render_widget(clear, popup_area);
+
+    let lines = vec![
+        Line::from(Span::styled(" Navigation", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from("  Up/Down      Move between fields"),
+        Line::from("  Tab          Next field"),
+        Line::from("  Shift-Tab    Previous field"),
+        Line::from(""),
+        Line::from(Span::styled(" Field Input", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from("  Left/Right   Toggle options (chain, match, case)"),
+        Line::from("  1/2/3        Select option directly"),
+        Line::from("  y/n          Case sensitivity"),
+        Line::from("  Type         Text input (prefix, suffix, threads)"),
+        Line::from("  Backspace    Delete character"),
+        Line::from(""),
+        Line::from(Span::styled(" Actions", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from("  Enter        Start search"),
+        Line::from("  Ctrl+C       Stop search"),
+        Line::from("  q            Quit (not in text fields)"),
+        Line::from("  h            Toggle this help"),
+        Line::from(""),
+        Line::from(Span::styled(" Supported Chains", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from("  1=Solana  2=EVM  3=Bitcoin"),
+        Line::from("  4=TON     5=Monero"),
+        Line::from("  Monero generation is slower (crypto intrinsic)"),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Help ")
+        .style(Style::default().bg(Color::Black));
+    let paragraph = Paragraph::new(lines).block(block);
+    f.render_widget(paragraph, popup_area);
+}
+```
+
+Confirm there is exactly one match before you touch anything:
+
+```sh
+cd /Users/shawnhopkinson/Rust/Vanaddy && grep -c '^fn render_help_popup(f: &mut Frame, area: Rect) {$' src/ui.rs
+```
+
+Expect `1`. The function runs from that signature down to the closing `}` immediately before `fn render_right_panel`. Replace it whole — signature through closing brace, inclusive — with:
 
 ```rust
 /// The popup is a fixed rectangle, so its content list has a hard budget:
@@ -12908,7 +13166,7 @@ Only that one error: `crate::gpu::EVM_GPU_SEEDS_PER_SEC` already exists (Task 4.
 const EVM_GPU_TAIL_SECS: f64 = 50.5e-6;
 ```
 
-- [ ] **Step 4: Add `estimated_rate` and route `projected_seconds` through it.** Replace lines 159-172 of `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs` (the whole of `projected_seconds`) with:
+- [ ] **Step 4: Add `estimated_rate` and route `projected_seconds` through it.** Replace the whole of `projected_seconds` in `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs` — pre-branch lines 159-172; line numbers are pre-branch, match on the quoted text — with:
 
 ```rust
     /// Pre-search throughput estimate, attempts/sec. `projected_seconds` uses
@@ -13094,13 +13352,23 @@ soaks the 1,000,000-candidate default instead of 10,000,000 — a 10× shortfall
 distinguishes from a real run. Fix the parser first, then run the soak.
 
 **Files:**
-- Modify: `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs` (append two `#[cfg(test)]` helpers and a `#[cfg(test)] mod soak_count_tests` block at end of file — `src/gpu/mod.rs` already has a `mod tests` from Task 1.3, so the new module must carry a different name)
-- Modify: `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/metal.rs` (Step 5 — the count line inside `fn gpu_soak_matches_ring`, **creating that test first if Milestone 3 did not**)
+- Modify: `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs` (append ONE `#[cfg(test)]` helper — `parse_soak_count` — and a `#[cfg(test)] mod soak_count_tests` block at end of file — `src/gpu/mod.rs` already has a `mod tests` from Task 1.3, so the new module must carry a different name)
+- Modify: `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/metal.rs` (Step 5 — the `soak_count` environment wrapper, added inside that file's `#[cfg(test)] mod tests` beside its only caller, plus the count line inside `fn gpu_soak_matches_ring`, **creating that test first if Milestone 3 did not**)
+
+`soak_count` belongs in `src/gpu/metal.rs`, **not** in `src/gpu/mod.rs`. `mod.rs` compiles on every
+target; `metal.rs` does not compile on the `--no-default-features` leg; and `soak_count`'s only call
+site is `fn gpu_soak_matches_ring` in `metal.rs`. Declared in `mod.rs`, it is a `#[cfg(test)]`
+function that nothing calls on the stub leg, so `cargo clippy --all-targets --no-default-features`
+emits ``warning: function `soak_count` is never used`` anchored at `--> src/gpu/mod.rs:NN`. Task 6.9
+Step 6b removed the crate-level `#![allow(dead_code)]`, and Task 8.5 Step 4 and Task 8.7 Step 4 both
+gate on `grep -c -- '--> src/gpu/\|--> src/verify.rs'` over that leg's clippy output printing `0` —
+Task 8.7 adds that anything else "stops the ship". `parse_soak_count` stays in `mod.rs`: its own
+`#[cfg(test)] mod soak_count_tests` is its call site and compiles on both legs, so it is never dead.
 - Test: `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs` (`mod soak_count_tests` — a second `mod tests` in one file is `error[E0428]`)
 
 **Interfaces:**
 - Consumes: `pub const COMPRESSIONS_PER_SEED: u32 = 4_098;`, `pub const WAVE: usize = 8_192;` (both from `src/gpu/mod.rs`, Milestone 1); the `#[ignore]`d test `gpu_no_rss_growth_over_100k_dispatches` in `src/gpu/metal.rs` (Milestone 3, Task 3.11); the test helper `gpu_for_test()` and the `use` items already in that file's `mod tests`
-- Produces: `#[cfg(test)] pub(crate) fn parse_soak_count(raw: Option<&str>, default: usize) -> usize`, `#[cfg(test)] pub(crate) fn soak_count(default: usize) -> usize` — both in `src/gpu/mod.rs`
+- Produces: `#[cfg(test)] pub(crate) fn parse_soak_count(raw: Option<&str>, default: usize) -> usize` in `src/gpu/mod.rs` (kept `pub(crate)` so `src/gpu/metal.rs` can reach it); `fn soak_count(default: usize) -> usize` inside the `#[cfg(test)] mod tests` of `src/gpu/metal.rs` (no `#[cfg(test)]` attribute of its own — the enclosing module already carries one)
 
 - [ ] **Step 1: Write the failing parser test.** Append this to the end of `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs`. Task 1.3 already put a `#[cfg(test)] mod tests` block in this file, which is exactly why the module below is named `soak_count_tests` — do **not** rename it to `tests`, and do not fold the four `#[test]` functions into the Task 1.3 block. Two modules of the same name in one file is `error[E0428]: the name `tests` is defined multiple times`.
 
@@ -13177,17 +13445,12 @@ pub(crate) fn parse_soak_count(raw: Option<&str>, default: usize) -> usize {
         },
     }
 }
-
-/// `parse_soak_count` against the live environment. Test-only: the production
-/// binary never reads this variable.
-#[cfg(test)]
-pub(crate) fn soak_count(default: usize) -> usize {
-    parse_soak_count(
-        std::env::var("VANADDY_GPU_SOAK_N").ok().as_deref(),
-        default,
-    )
-}
 ```
+
+Only `parse_soak_count` goes in `src/gpu/mod.rs`. The wrapper that reads the environment,
+`soak_count`, is added in Step 5 inside `src/gpu/metal.rs`'s `#[cfg(test)] mod tests`, beside its one
+caller — see the note under **Files** for why putting it here instead breaks the
+`--no-default-features` clippy gate.
 
 - [ ] **Step 4: Run it and see it pass.**
 
@@ -13281,18 +13544,80 @@ Expected: `test result: ok. 1 passed`.
 with:
 
 ```rust
-        let n = crate::gpu::soak_count(1_000_000);
+        let n = soak_count(1_000_000);
 ```
 
-If the existing text differs, replace whatever expression produces the candidate count `n` with exactly `crate::gpu::soak_count(1_000_000)` and delete the old `std::env::var("VANADDY_GPU_SOAK_N")` lookup so there is only one.
+If the existing text differs, replace whatever expression produces the candidate count `n` with exactly `soak_count(1_000_000)` and delete the old `std::env::var("VANADDY_GPU_SOAK_N")` lookup from `gpu_soak_matches_ring` so there is only one.
 
-- [ ] **Step 6: Prove the wiring with a short soak.** This runs the real GPU differential at 100,000 candidates (~30 s).
+Then add `soak_count` itself to the **same** `#[cfg(test)] mod tests` block in
+`/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/metal.rs`, immediately above `fn gpu_soak_matches_ring`:
+
+```rust
+    /// `crate::gpu::parse_soak_count` against the live environment. Test-only,
+    /// and deliberately here rather than in `src/gpu/mod.rs`: `mod.rs` compiles
+    /// on every target, `metal.rs` does not, and `gpu_soak_matches_ring` below
+    /// is the only call site. In `mod.rs` this would be dead code on the
+    /// `--no-default-features` leg, and Task 8.5 Step 4 / Task 8.7 Step 4 gate
+    /// on that leg emitting no new diagnostic at all.
+    fn soak_count(default: usize) -> usize {
+        crate::gpu::parse_soak_count(
+            std::env::var("VANADDY_GPU_SOAK_N").ok().as_deref(),
+            default,
+        )
+    }
+```
+
+No `#[cfg(test)]` attribute on it — the enclosing `mod tests` already carries one — and it is called
+from `gpu_soak_matches_ring` in that same module, so it is live on the only leg that compiles this
+file. Step 7 already stages both `src/gpu/mod.rs` and `src/gpu/metal.rs`, so no change there.
+
+- [ ] **Step 6: Prove the wiring by asserting the parsed value, then run a short soak.** Wall-clock
+proves nothing here, and reading it backwards is worse than not reading it. With the un-wired
+`.parse().ok().unwrap_or(1_000_000)` spelling, `"1e5"` is an `Err` and the run falls back to
+**1,000,000** — ten times *more* work than the 100,000 requested. An un-wired run is therefore
+slower, never "under two seconds", so a wall-clock check passes whichever way the count line is
+spelled. Assert the number instead.
+
+First add a fifth case to `mod soak_count_tests` in
+`/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs`, pinning exactly the value the short soak below
+asks for:
+
+```rust
+    #[test]
+    fn soak_count_parses_the_short_proof_count() {
+        // The Step 6 short-soak invocation is literally `VANADDY_GPU_SOAK_N=1e5`.
+        // An un-wired parser yields the 1,000,000 default here, not 100,000 — the
+        // shortfall this whole task exists to prevent, in the opposite direction.
+        assert_eq!(parse_soak_count(Some("1e5"), 1_000_000), 100_000);
+    }
+```
+
+```sh
+cargo test soak_count
+```
+
+Expected: `test result: ok. 5 passed; 0 failed`.
+
+Then confirm `gpu_soak_matches_ring` actually calls it and that the old lookup is gone from that
+test:
+
+```sh
+grep -n 'soak_count(1_000_000)' /Users/shawnhopkinson/Rust/Vanaddy/src/gpu/metal.rs
+grep -c 'std::env::var("VANADDY_GPU_SOAK_N")' /Users/shawnhopkinson/Rust/Vanaddy/src/gpu/metal.rs
+```
+
+Expected: the first prints exactly one line, inside `fn gpu_soak_matches_ring`; the second prints
+`1` — the single occurrence inside `fn soak_count`, with nothing left in `gpu_soak_matches_ring`.
+
+Finally run the real GPU differential at 100,000 candidates (~30 s):
 
 ```sh
 VANADDY_GPU_SOAK_N=1e5 cargo test --release gpu_soak_matches_ring -- --ignored --nocapture
 ```
 
-Expected: the test prints its progress and ends `test result: ok. 1 passed`. If it finishes in under two seconds, the parser is not wired — it ran a smaller count; go back to Step 5.
+Expected: the progress lines count up to `soak: 100000/100000`, and the run ends
+`test result: ok. 1 passed`. Any other total on that last progress line means the count line was not
+wired — go back to Step 5.
 
 - [ ] **Step 7: Commit the parser.**
 
@@ -13304,7 +13629,17 @@ git commit -m "test: parse VANADDY_GPU_SOAK_N as f64 so 1e7 means ten million
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
 
-- [ ] **Step 8: Run the full soak — the milestone's headline gate.** The command below is unscoped, so it runs all FOUR `#[ignore]`d tests this branch created: `gpu_soak_matches_ring` at ten million candidates and `gpu_no_rss_growth_over_100k_dispatches` (both in `src/gpu/metal.rs`, Tasks 8.1 and 3.11), `gpu_seed_rate_end_to_end` (`src/gpu/producer.rs`, Task 4.8) and `hybrid_evm_search_with_live_gpu_emits_only_rederivable_matches` (`src/app.rs`, Task 5.3). Budget 45–90 minutes; it is a debug build, so the host-side mnemonic generation and packing halves run several times slower than release.
+- [ ] **Step 8: Run the full soak — the milestone's headline gate.** The command below is unscoped, so it runs all FOUR `#[ignore]`d tests this branch created: `gpu_soak_matches_ring` at ten million candidates and `gpu_no_rss_growth_over_100k_dispatches` (both in `src/gpu/metal.rs`, Tasks 8.1 and 3.11), `gpu_seed_rate_end_to_end` (`src/gpu/producer.rs`, Task 4.8) and `hybrid_evm_search_with_live_gpu_emits_only_rederivable_matches` (`src/app.rs`, Task 5.3). **Budget ~150 minutes.** That follows from Step 5's own figure: 1,000,000 candidates is ~15 minutes in a debug build, and this runs ten million in the same debug build, so 10 × 15 ≈ 150. Do not hold to a 45–90 minute expectation and conclude a healthy soak has hung — 45–90 minutes is *release* scaling, not debug.
+
+If you would rather not sit for 150 minutes, `--release` is a supported alternative and lands the same gate in ~50 minutes:
+
+```sh
+mkdir -p /tmp/vanaddy-soak
+VANADDY_GPU_SOAK_N=1e7 cargo test --release -- --ignored --nocapture 2>&1 \
+  | tee /tmp/vanaddy-soak/soak-1e7.log
+```
+
+Either build satisfies the gate, because what this soak proves is a **differential** — GPU seed == `ring` seed over ten million real phrases — and that equality is build-independent. Release has the further advantage that `gpu_seed_rate_end_to_end` then runs under the conditions Task 4.8 documents, so the tolerated failure described below simply does not arise. Run the debug command in the fence further down, or this release one; do not run both.
 
 Two of the four are debug-hostile. `gpu_seed_rate_end_to_end` is the ~30 s rate measurement Task 4.8 documents as `--release`-only and it asserts a `rate > 3_000.0` seeds/s floor that a debug-built producer thread can miss; `hybrid_evm_search_with_live_gpu_emits_only_rederivable_matches` runs ~5 s of live search. If `gpu_seed_rate_end_to_end` is the **only** test that fails here, re-run it alone with Task 4.8's documented `cargo test --release gpu_seed_rate_end_to_end -- --ignored --nocapture` and treat the debug result as inconclusive; take `EVM_GPU_SEEDS_PER_SEC` from that release run, never from this log. Any other failure in this log is a hard stop.
 
@@ -13314,14 +13649,35 @@ VANADDY_GPU_SOAK_N=1e7 cargo test -- --ignored --nocapture 2>&1 \
   | tee /tmp/vanaddy-soak/soak-1e7.log
 ```
 
-- [ ] **Step 9: Read the gate.**
+- [ ] **Step 9: Read the gate.** The gate must tolerate exactly the one failure Step 8 anticipates —
+`gpu_seed_rate_end_to_end` missing its debug-build rate floor — and nothing else. Check the failing
+tests **by name**, not by counting them: a bare count of `0` is unsatisfiable in precisely the case
+Step 8 says to expect, and a bare count of `1` would wave through a `gpu_soak_matches_ring` mismatch.
 
 ```sh
 tail -5 /tmp/vanaddy-soak/soak-1e7.log
-grep -c 'FAILED\|panicked' /tmp/vanaddy-soak/soak-1e7.log
+
+# Every test that failed, by name (empty output = a clean run):
+grep -E '^test .* \.\.\. FAILED$' /tmp/vanaddy-soak/soak-1e7.log \
+  | sed -E 's/^test ([^ ]+) \.\.\. FAILED$/\1/'
+
+# The gate: failures OTHER than the tolerated debug-build rate floor.
+grep -E '^test .* \.\.\. FAILED$' /tmp/vanaddy-soak/soak-1e7.log \
+  | sed -E 's/^test ([^ ]+) \.\.\. FAILED$/\1/' \
+  | grep -vc 'gpu_seed_rate_end_to_end'
 ```
 
-Expected: the tail ends `test result: ok. 4 passed; 0 failed; 0 ignored`, and the `grep -c` prints `0`.
+Expected: the last command prints `0`. Two shapes satisfy that, and only two:
+
+- **Clean run.** The middle command prints nothing and the tail ends
+  `test result: ok. 4 passed; 0 failed; 0 ignored`. This is what a `--release` Step 8 should produce.
+- **Tolerated run.** The middle command prints exactly one name ending in `gpu_seed_rate_end_to_end`
+  and the tail ends `test result: FAILED. 3 passed; 1 failed; 0 ignored`. Follow Step 8: re-run that
+  test alone with `cargo test --release gpu_seed_rate_end_to_end -- --ignored --nocapture`, take
+  `EVM_GPU_SEEDS_PER_SEC` from the release run, and treat the debug result as inconclusive.
+
+Anything else — the last command printing `1` or more, or any name in the middle command's output
+that is not `gpu_seed_rate_end_to_end` — is a hard stop.
 
 A `RingMismatch { index, phrase, got, want }` failure here is a hard stop for the whole milestone: the kernel disagrees with `ring` on a real phrase. Replay that single case with the printed index before doing anything else — do not proceed to Task 8.2, and do not ship.
 
@@ -13812,12 +14168,20 @@ gate is missing somewhere and the "links no Metal" claim in `CLAUDE.md` would be
 compiles and does not silently swallow a real backend failure.
 
 ```sh
-VANADDY_NO_GPU=1 cargo test 2>&1 | grep -c '^SKIP: VANADDY_NO_GPU'
+VANADDY_NO_GPU=1 cargo test -- --nocapture 2>&1 | grep -c '^SKIP: VANADDY_NO_GPU'
 VANADDY_NO_GPU=1 cargo test 2>&1 | tail -5
 ```
 
 Expected: the first command prints a count greater than `0` (one line per GPU-required test), and
 the tail ends `test result: ok.` with zero failures.
+
+`--nocapture` is load-bearing on the first command, not decoration. libtest captures the stdout and
+stderr of every **passing** test and prints it nowhere; a `SKIP:` line from a test that then returns
+green never reaches the pipe, so without `--nocapture` the `grep -c` prints `0` no matter how many
+tests skipped and the gate can never pass. Every other soak command in this milestone already passes
+it — see Task 8.1 Step 8. The second command deliberately keeps the captured form: it only reads the
+`test result:` summary, which libtest prints either way, and captured output keeps that summary at
+the tail where `tail -5` can find it.
 
 - [ ] **Step 8: Restore the default-features release binary.** The `--no-default-features` build
 overwrote `target/release/vanaddy`; later tasks and any manual check need the real one back.
@@ -13969,7 +14333,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ### Task 8.6: Make `CLAUDE.md` true — pinned vectors, the measured GPU row, four hard rules
 
-`CLAUDE.md` is the file every future agent reads first. Six edits, applied top to bottom. Line
+`CLAUDE.md` is the file every future agent reads first. Seven edits, applied top to bottom. Line
 numbers below are the pre-edit numbers; apply the edits in order and each anchor is still findable
 by its text.
 
@@ -14048,10 +14412,41 @@ WITH:
 | `cargo test --no-default-features` | Run the suite with the Metal backend compiled out (`src/gpu/stub.rs`) |
 | `cargo build --release --no-default-features` | CPU-only binary; links no Metal (`otool -L` shows none) |
 | `VANADDY_NO_GPU=1 cargo test` | Skip the GPU-required tests deliberately; each prints `SKIP:` |
-| `VANADDY_GPU_SOAK_N=1e7 cargo test -- --ignored` | GPU soak: full `ring` differential + the RSS guard (45–90 min) |
+| `VANADDY_GPU_SOAK_N=1e7 cargo test -- --ignored` | GPU soak: full `ring` differential + the RSS guard (~150 min debug; ~50 min with `--release`) |
 
 There is no separate library target.
 ```
+
+- [ ] **Step 4b: EDIT 2b — the wrong SLIP-0010 test names (line 37).** `CLAUDE.md` names two
+pinned tests that do not exist. Verified in this tree: `CLAUDE.md:37` reads
+``- `slip10::slip10_ed25519_test_vector_{1,2}` (SLIP-0010 spec)`` while `src/slip10.rs:49` and
+`src/slip10.rs:59` define `slip10_ed25519_test_vector_1_m_0h` and
+`slip10_ed25519_test_vector_1_m_0h_1h`. Anyone running the pinned list by name — as this plan's own
+"Done when" checklist requires — gets "0 tests run" and no error. This edit is the only place in the
+plan that fixes it.
+
+REPLACE:
+
+```markdown
+  - `slip10::slip10_ed25519_test_vector_{1,2}` (SLIP-0010 spec)
+```
+
+WITH:
+
+```markdown
+  - `slip10::slip10_ed25519_test_vector_1_m_0h`, `slip10_ed25519_test_vector_1_m_0h_1h` (SLIP-0010 spec)
+```
+
+Verify the anchor is gone and the real names are present:
+
+```sh
+grep -c 'slip10_ed25519_test_vector_{1,2}' CLAUDE.md    # expect: 0
+grep -c 'slip10_ed25519_test_vector_1_m_0h' CLAUDE.md   # expect: 1
+cargo test slip10_ed25519_test_vector 2>&1 | grep -c '\.\.\. ok'   # expect: 2
+```
+
+The replacement is a `  - ` sub-bullet, so it does not change the `grep -c '^- \*\*' CLAUDE.md`
+count Step 9 pins at `13`.
 
 - [ ] **Step 5: EDIT 3 — pinned test vectors (after the `monero::keccak256_empty_vector` bullet, line 45).**
 
