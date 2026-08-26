@@ -1,6 +1,7 @@
 pub mod app;
 pub mod bip32;
 pub mod chains;
+pub mod gpu;
 pub mod matcher;
 pub mod pbkdf2_lanes;
 pub mod seed;
