@@ -246,15 +246,28 @@ mod tests {
         // the declaration — not just the one line immediately above it — so a
         // derive stacked under an unrelated attribute (e.g. `#[repr(...)]`)
         // can't hide from this check. `contains`, not `starts_with`, so
-        // `#[cfg_attr(test, derive(Clone))]` is caught too. The walk stops at
-        // the first line that isn't an attribute, so a doc-comment reflow
-        // still can't fail this test.
-        let forging_attr = src[..at]
-            .lines()
-            .rev()
-            .map(str::trim)
-            .take_while(|line| line.starts_with("#["))
-            .find(|line| line.contains("derive"));
+        // `#[cfg_attr(test, derive(Clone))]` is caught too. Blank lines and
+        // `//`/`///` comments are SKIPPED rather than stopping the walk (a
+        // blank line or a comment between the derive and the declaration must
+        // not hide it either) — but a comment's own text is never inspected
+        // for "derive", only lines starting with `#[` are, so a doc comment
+        // reflow (even one that happens to say "derive" in prose) still can't
+        // fail this test. The walk stops only at the first real code line.
+        let mut forging_attr = None;
+        for line in src[..at].lines().rev() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with("//") {
+                continue;
+            }
+            if line.starts_with("#[") {
+                if line.contains("derive") {
+                    forging_attr = Some(line);
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
         assert!(
             forging_attr.is_none(),
             "Verified must have no #[derive(...)] (directly or via cfg_attr) anywhere in the \
