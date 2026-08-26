@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+pub mod pack;
 pub mod selftest;
 
 pub use selftest::SelfTestError;
