@@ -24,7 +24,7 @@
 //! candidate's token across others.
 //!
 //! Whether `Verified` should drop `Copy`, or bind to a fingerprint of the data
-//! it attests to, is an open decision **deferred to Task 5.2** (where the GPU
+//! it attests to, is an open decision **deferred to Task 2.4** (where the GPU
 //! path's `emit_gpu_match` mint site lands) rather than decided speculatively
 //! here.
 
@@ -44,6 +44,14 @@ impl Verified {
     /// what it derived; there is nothing to cross-check it against that is more
     /// trusted than itself.
     pub(crate) fn cpu_reference() -> Self {
+        Verified(())
+    }
+
+    /// A GPU-sourced candidate that was re-derived by `verify_gpu` and agreed
+    /// with the CPU reference. Named symmetrically with `cpu_reference` so
+    /// every mint site is a distinct, greppable call: `grep -n
+    /// 'cpu_reference\|gpu_reverified'` finds all of them.
+    pub(crate) fn gpu_reverified() -> Self {
         Verified(())
     }
 }
@@ -72,7 +80,12 @@ pub fn verify_gpu<C: crate::chains::Bip39GpuChain>(
     }
     // The phrase handed back is rebuilt here by trusted CPU code, so the String
     // that ends up in the CSV is never one the GPU thread touched.
-    Some((addr, secret, m.phrase().to_string(), Verified(())))
+    Some((
+        addr,
+        secret,
+        m.phrase().to_string(),
+        Verified::gpu_reverified(),
+    ))
 }
 
 #[cfg(test)]
