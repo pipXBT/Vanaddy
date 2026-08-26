@@ -322,16 +322,31 @@ mod tests {
         // contain the needle contiguously — otherwise `find` would match this
         // call site instead of the real declaration.
         let decl = concat!("pub struct ", "Match {");
+        assert_eq!(
+            src.matches(decl).count(),
+            1,
+            "expected exactly one occurrence of Match's declaration; the source may have \
+             changed shape"
+        );
         let at = src.find(decl).expect("Match's declaration must exist");
-        // Whatever line sits directly above the declaration, asserted
-        // directly, rather than pinning the doc comment's current wording —
-        // a comment reflow must not be able to fail this test.
-        let line_above = src[..at].lines().next_back().unwrap_or("").trim_start();
+        // Walk upward over the WHOLE contiguous run of attribute lines above
+        // the declaration — not just the one line immediately above it — so a
+        // derive stacked under an unrelated attribute (e.g. `#[repr(...)]`)
+        // can't hide from this check. `contains`, not `starts_with`, so
+        // `#[cfg_attr(test, derive(Clone))]` is caught too. The walk stops at
+        // the first line that isn't an attribute, so a doc-comment reflow
+        // still can't fail this test.
+        let forging_attr = src[..at]
+            .lines()
+            .rev()
+            .map(str::trim)
+            .take_while(|line| line.starts_with("#["))
+            .find(|line| line.contains("derive"));
         assert!(
-            !line_above.starts_with("#[derive"),
-            "Match must have no #[derive(...)] directly above it (found: {line_above:?}). \
-             Clone would let a caller clone an existing Match, keeping its minted token while \
-             swapping in unrelated data."
+            forging_attr.is_none(),
+            "Match must have no #[derive(...)] (directly or via cfg_attr) anywhere in the \
+             attribute run above it (found: {forging_attr:?}). Clone would let a caller clone an \
+             existing Match, keeping its minted token while swapping in unrelated data."
         );
     }
 

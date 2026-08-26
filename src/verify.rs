@@ -235,15 +235,31 @@ mod tests {
         // separate string literals, so `find` cannot match this call site —
         // only the real declaration.
         let decl = concat!("pub struct ", "Verified(());");
+        assert_eq!(
+            src.matches(decl).count(),
+            1,
+            "expected exactly one occurrence of Verified's declaration; the source may have \
+             changed shape"
+        );
         let at = src.find(decl).expect("Verified's declaration must exist");
-        // Whatever line sits directly above the declaration, asserted
-        // directly, rather than pinning the doc comment's current wording —
-        // a comment reflow must not be able to fail this test.
-        let line_above = src[..at].lines().next_back().unwrap_or("").trim_start();
+        // Walk upward over the WHOLE contiguous run of attribute lines above
+        // the declaration — not just the one line immediately above it — so a
+        // derive stacked under an unrelated attribute (e.g. `#[repr(...)]`)
+        // can't hide from this check. `contains`, not `starts_with`, so
+        // `#[cfg_attr(test, derive(Clone))]` is caught too. The walk stops at
+        // the first line that isn't an attribute, so a doc-comment reflow
+        // still can't fail this test.
+        let forging_attr = src[..at]
+            .lines()
+            .rev()
+            .map(str::trim)
+            .take_while(|line| line.starts_with("#["))
+            .find(|line| line.contains("derive"));
         assert!(
-            !line_above.starts_with("#[derive"),
-            "Verified must have no #[derive(...)] directly above it (found: {line_above:?}). \
-             Clone or Copy would let a caller duplicate a minted token onto unrelated data."
+            forging_attr.is_none(),
+            "Verified must have no #[derive(...)] (directly or via cfg_attr) anywhere in the \
+             attribute run above it (found: {forging_attr:?}). Clone or Copy would let a caller \
+             duplicate a minted token onto unrelated data."
         );
     }
 }
