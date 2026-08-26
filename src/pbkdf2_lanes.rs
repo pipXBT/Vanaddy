@@ -34,8 +34,16 @@ pub fn pbkdf2_hmac_sha512<const L: usize>(
     fallback(&passwords, salt, iterations)
 }
 
-/// Longest salt for which `salt || INT(1) || padding` fits one 128-byte block.
-const MAX_SALT_LEN: usize = 107;
+/// SHA-512's HMAC block size. A key longer than this is SHA-512 pre-hashed
+/// before use (see `hw::pbkdf2_lanes`). `pub` because the GPU kernel has no
+/// pre-hash path: `gpu::pack::pack_key_block` hard-asserts against this exact
+/// bound rather than silently zero-padding an over-long key.
+pub const HMAC_BLOCK_LEN: usize = 128;
+
+/// Longest salt for which `salt || INT(1) || padding` fits one 128-byte block:
+/// `HMAC_BLOCK_LEN - 4 (INT(1)) - 1 (0x80) - 16 (128-bit length field)`.
+/// `pub` so `gpu::pack::pack_salt_block` rejects exactly what this path rejects.
+pub const MAX_SALT_LEN: usize = 107;
 
 /// Portable path: one `ring` derivation per lane.
 fn fallback<const L: usize>(passwords: &[&[u8]; L], salt: &[u8], iterations: u32) -> [[u8; 64]; L] {
@@ -233,7 +241,7 @@ mod hw {
         for l in 0..L {
             let password = passwords[l];
             let mut hashed = [0u8; 64];
-            let key: &[u8] = if password.len() > 128 {
+            let key: &[u8] = if password.len() > super::HMAC_BLOCK_LEN {
                 hashed.copy_from_slice(ring::digest::digest(&ring::digest::SHA512, password).as_ref());
                 &hashed
             } else {
@@ -373,6 +381,30 @@ mod tests {
         let pw = [0x61u8; 128];
         let out = pbkdf2_hmac_sha512::<1>([pw.as_slice()], b"mnemonic", 16);
         assert_eq!(out[0], ring_reference(&pw, b"mnemonic", 16));
+    }
+
+    /// The GPU kernel has no HMAC key pre-hash path, so `gpu::pack::pack_key_block`
+    /// hard-asserts `len <= HMAC_BLOCK_LEN`. Pin that this constant really is the
+    /// boundary the CPU reference switches behaviour at, in both directions, and
+    /// that `MAX_SALT_LEN` is the padding arithmetic it claims to be.
+    #[test]
+    fn hmac_block_len_is_the_prehash_boundary_and_max_salt_len_is_the_padding_budget() {
+        assert_eq!(HMAC_BLOCK_LEN, 128);
+        assert_eq!(MAX_SALT_LEN, HMAC_BLOCK_LEN - 4 - 1 - 16);
+
+        // Exactly HMAC_BLOCK_LEN: used verbatim. One more: SHA-512 pre-hashed.
+        // Both must still agree with `ring`, which does the same switch.
+        let at_boundary = vec![0x6bu8; HMAC_BLOCK_LEN];
+        let over_boundary = vec![0x6bu8; HMAC_BLOCK_LEN + 1];
+        for pw in [at_boundary.as_slice(), over_boundary.as_slice()] {
+            let out = pbkdf2_hmac_sha512::<1>([pw], b"mnemonic", 8);
+            assert_eq!(out[0], ring_reference(pw, b"mnemonic", 8));
+        }
+
+        // The longest salt that still fits one padded block is accepted.
+        let salt = vec![0x73u8; MAX_SALT_LEN];
+        let out = pbkdf2_hmac_sha512::<1>([b"password".as_slice()], &salt, 4);
+        assert_eq!(out[0], ring_reference(b"password", &salt, 4));
     }
 
     #[test]
