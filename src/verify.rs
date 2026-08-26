@@ -37,9 +37,9 @@
 /// reference (`ring`) path — either because the CPU path produced it directly
 /// (the CPU path IS the reference, per CLAUDE.md) or because a GPU-sourced
 /// candidate was re-derived and agreed. The private unit field means only this
-/// module can mint one, and a future CSV-writing call site that takes `&Match`
-/// will be unable to receive a row without one, once that gate lands (Task
-/// 2.5) — no such call site exists yet. See the module doc's Limitations
+/// module can mint one, and `app::append_match_row(path: &Path, m: &Match)` —
+/// the crate's single CSV-row writer — takes `&Match`, so it cannot receive a
+/// row without one. See the module doc's Limitations
 /// section above for what this token does and does not guarantee.
 pub struct Verified(());
 

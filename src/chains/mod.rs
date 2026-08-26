@@ -19,10 +19,10 @@ pub struct Match {
     pub secret_hex: String,
     pub mnemonic: String,
     /// Proof that this row re-derives via the reference (`ring`) path.
-    /// A future CSV-writing call site that takes `&Match` will be unable to
-    /// receive a row without one, once that gate lands (Task 2.5) — no such
-    /// call site exists yet; today's writer (`App::drain_matches`) takes
-    /// `Match` by value and does not read this field. See
+    /// `app::append_match_row(path: &Path, m: &Match)` is the crate's single
+    /// CSV-row writer, and takes `&Match` — so it cannot receive a row without
+    /// one, even though it never reads this field's value directly.
+    /// `App::drain_matches` routes every emitted match through it. See
     /// `verify::Verified`'s module doc for what this token does and does not
     /// guarantee.
     pub verified: crate::verify::Verified,
