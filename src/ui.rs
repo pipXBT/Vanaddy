@@ -15,7 +15,11 @@ pub fn ui(f: &mut Frame, app: &App) {
 
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
+        .constraints([
+            Constraint::Percentage(20),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
         .split(size);
 
     render_banner(f, main_chunks[0]);
@@ -27,6 +31,7 @@ pub fn ui(f: &mut Frame, app: &App) {
 
     render_left_panel(f, body_chunks[0], app);
     render_right_panel(f, body_chunks[1], app);
+    render_key_hints(f, main_chunks[2], app);
 
     if app.show_help {
         render_help_popup(f, size);
@@ -61,16 +66,11 @@ fn render_banner(f: &mut Frame, area: Rect) {
 fn render_left_panel(f: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(10),
-            Constraint::Length(9),
-            Constraint::Length(3),
-        ])
+        .constraints([Constraint::Min(10), Constraint::Length(stats_height(app))])
         .split(area);
 
     render_config_form(f, chunks[0], app);
     render_stats(f, chunks[1], app);
-    render_key_hints(f, chunks[2], app);
 }
 
 fn render_config_form(f: &mut Frame, area: Rect, app: &App) {
@@ -196,6 +196,13 @@ fn render_config_form(f: &mut Frame, area: Rect, app: &App) {
         .title(" Config ");
     let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, area);
+}
+
+/// Rows the stats block needs: 4 fixed lines, the optional Expected/ETA lines, plus borders.
+fn stats_height(app: &App) -> u16 {
+    let optional =
+        u16::from(app.expected_attempts().is_some()) + u16::from(app.projected_seconds().is_some());
+    4 + optional + 2
 }
 
 fn render_stats(f: &mut Frame, area: Rect, app: &App) {
