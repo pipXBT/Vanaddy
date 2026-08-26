@@ -227,6 +227,27 @@ mod tests {
     /// is binary-only (no `lib.rs`, see CLAUDE.md), and `cargo test` never runs
     /// doc tests for a bin target — the doctest would silently never execute.
     /// So the property is pinned at the source level, like the test above.
+    ///
+    /// What the walk below covers: a derive directly above the declaration; a
+    /// derive stacked under another attribute (e.g. `#[repr(...)]`); a derive
+    /// hidden inside `#[cfg_attr(test, derive(Clone))]`; a derive separated
+    /// from the declaration by a blank line, a `//`/`///` comment, or a
+    /// single-line or non-nested multi-line `/* ... */` block comment.
+    ///
+    /// What it does NOT cover: a NESTED multi-line block comment (Rust
+    /// permits nesting `/* ... /* ... */ ... */`; C does not). The walk
+    /// tracks "am I in a block comment" as a boolean, not a nesting depth, so
+    /// it clears on the first inner `*/` it meets and reads the outer
+    /// comment's remaining text as code, missing a derive above it. This is a
+    /// known, accepted gap — closing it needs a real nesting-depth counter,
+    /// not a boolean — and rustfmt does not restructure a nested block
+    /// comment away, so unlike the ordinary multi-line-attribute residual, no
+    /// other gate catches this one either. Nobody writes a nested multi-line
+    /// block comment between an attribute and its item by accident, and
+    /// against a deliberate actor this source-level guard was never
+    /// sufficient anyway — the properties that actually hold the invariant
+    /// are the compiler-enforced private field and the two audited
+    /// construction sites (`Verified::cpu_reference`/`Verified::gpu_reverified`).
     #[test]
     fn verified_source_pins_the_absence_of_a_forging_derive() {
         let src = include_str!("verify.rs");
