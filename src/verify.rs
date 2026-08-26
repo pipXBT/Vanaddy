@@ -230,18 +230,20 @@ mod tests {
     #[test]
     fn verified_source_pins_the_absence_of_a_forging_derive() {
         let src = include_str!("verify.rs");
-        // Assembled with concat! for the same anti-self-match reason as the
-        // test above: the needle contains a real newline once concat! resolves
-        // it, but this test's own source only ever spells that span across two
-        // separate string literals, so it cannot match itself.
-        let undecorated = concat!(
-            "/// section above for what this token does and does not guarantee.\n",
-            "pub struct Verified(());"
-        );
+        // concat! for the same anti-self-match reason as the test above: this
+        // test's own source only ever spells the declaration across two
+        // separate string literals, so `find` cannot match this call site —
+        // only the real declaration.
+        let decl = concat!("pub struct ", "Verified(());");
+        let at = src.find(decl).expect("Verified's declaration must exist");
+        // Whatever line sits directly above the declaration, asserted
+        // directly, rather than pinning the doc comment's current wording —
+        // a comment reflow must not be able to fail this test.
+        let line_above = src[..at].lines().next_back().unwrap_or("").trim_start();
         assert!(
-            src.contains(undecorated),
-            "Verified must declare with no #[derive(...)] directly above it — Clone or Copy \
-             would let a caller duplicate a minted token onto unrelated data"
+            !line_above.starts_with("#[derive"),
+            "Verified must have no #[derive(...)] directly above it (found: {line_above:?}). \
+             Clone or Copy would let a caller duplicate a minted token onto unrelated data."
         );
     }
 }

@@ -319,18 +319,19 @@ mod tests {
     fn match_source_pins_the_absence_of_a_forging_derive() {
         let src = include_str!("mod.rs");
         // Assembled with concat! so this test's OWN source text does not
-        // contain the needle (a real newline once concat! resolves it, never
-        // spelled contiguously in this file) — otherwise the assertion would
-        // match itself and prove nothing.
-        let undecorated = concat!(
-            "/// Channel payload emitted when a vanity address is found.\n",
-            "pub struct Match {"
-        );
+        // contain the needle contiguously — otherwise `find` would match this
+        // call site instead of the real declaration.
+        let decl = concat!("pub struct ", "Match {");
+        let at = src.find(decl).expect("Match's declaration must exist");
+        // Whatever line sits directly above the declaration, asserted
+        // directly, rather than pinning the doc comment's current wording —
+        // a comment reflow must not be able to fail this test.
+        let line_above = src[..at].lines().next_back().unwrap_or("").trim_start();
         assert!(
-            src.contains(undecorated),
-            "Match must declare with no #[derive(...)] directly above it — Clone would let a \
-             caller clone an existing Match, keeping its minted token while swapping in \
-             unrelated data"
+            !line_above.starts_with("#[derive"),
+            "Match must have no #[derive(...)] directly above it (found: {line_above:?}). \
+             Clone would let a caller clone an existing Match, keeping its minted token while \
+             swapping in unrelated data."
         );
     }
 
