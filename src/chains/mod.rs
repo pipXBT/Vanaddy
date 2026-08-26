@@ -42,6 +42,25 @@ pub trait Chain: Send + Sync + 'static {
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool;
 }
 
+/// A chain whose entire candidate is a pure function of a 64-byte BIP-39 seed.
+/// Implementing this — and nothing else — opts a chain into the GPU pipeline.
+/// Evm implements it. Solana and Bitcoin each already have a private `from_seed`
+/// of exactly this shape and are one line away; Ton (own mnemonic, 100k rounds,
+/// different salt) and Monero (no BIP-39) structurally cannot — that is the
+/// reuse seam.
+///
+/// A separate trait, rather than `const GPU_SEEDS: bool` plus a defaulted
+/// `from_gpu_seed` whose body is `unreachable!()`: with the const, a future
+/// maintainer can flip it true without implementing the tail, compile cleanly,
+/// and then panic inside a Rayon worker with the terminal in raw mode. Here that
+/// state is unrepresentable.
+pub trait Bip39GpuChain: Chain {
+    fn from_gpu_seed(seed: &[u8; 64]) -> (Self::AddressBytes, Self::SecretRaw);
+    /// Re-derive from the phrase alone with the reference (`ring`) path.
+    /// MUST NOT use the batched or GPU path. Returns `bool`, never `Option`.
+    fn verify(address: &str, secret_hex: &str, phrase: &str) -> bool;
+}
+
 /// Runtime chain selection. The `match` is evaluated once per thread spawn,
 /// outside the hot loop; `search::<C>` is monomorphized per chain.
 #[derive(Clone, Copy, PartialEq)]
