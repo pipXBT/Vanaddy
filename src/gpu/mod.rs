@@ -124,6 +124,12 @@ impl SeedBlock {
         SeedBlock(Vec::with_capacity(n))
     }
     pub(crate) fn push(&mut self, candidate: GpuCandidate) {
+        assert!(
+            self.0.len() < self.0.capacity(),
+            "SeedBlock::push would reallocate: the old buffer holds live seed material and \
+             is freed without zeroizing. Blocks are built with with_capacity(BLOCK) and must \
+             receive at most BLOCK candidates."
+        );
         self.0.push(candidate);
     }
     pub fn len(&self) -> usize {
@@ -190,6 +196,18 @@ mod tests {
     }
 
     #[test]
+    fn gpu_candidate_has_pinned_repr_c_layout() {
+        // Milestone 3's Metal kernel reads this struct by raw byte offset. A
+        // field reorder, width change, or a derive that isn't repr(C)-safe
+        // would compile and pass every other test here, then only surface as
+        // a plausible-but-wrong seed once the GPU path is wired up.
+        assert_eq!(core::mem::size_of::<GpuCandidate>(), 80);
+        assert_eq!(core::mem::align_of::<GpuCandidate>(), 1);
+        assert_eq!(core::mem::offset_of!(GpuCandidate, entropy), 0);
+        assert_eq!(core::mem::offset_of!(GpuCandidate, seed), 16);
+    }
+
+    #[test]
     fn seed_block_preserves_order_and_chunks_without_reordering() {
         let mut b = SeedBlock::with_capacity(BLOCK);
         assert!(b.is_empty());
@@ -221,9 +239,45 @@ mod tests {
             entropy: [0xEF; 16],
             seed: [0x12; 64],
         });
+        // Capture the backing buffer BEFORE zeroizing: `b` was built with
+        // `with_capacity(2)` and holds exactly 2 candidates, so len == capacity
+        // and every byte in this range is initialized, non-zero data.
+        let ptr = b.0.as_ptr() as *const u8;
+        let byte_len = b.0.capacity() * core::mem::size_of::<GpuCandidate>();
         b.zeroize();
         assert_eq!(b.len(), 0);
         assert!(b.is_empty());
+        // A bare `Vec::clear()` would make the two asserts above pass too, so
+        // they alone don't prove zeroization. Read the raw bytes back to prove
+        // the buffer itself was wiped, not just logically emptied.
+        //
+        // SAFETY: `b`'s allocation is still alive (dropping `b` happens after
+        // this statement) and unchanged - `Zeroize::zeroize` wipes and clears
+        // in place, it never reallocates or frees. `ptr`/`byte_len` were
+        // captured while the buffer held exactly `capacity()` initialized
+        // `GpuCandidate`s, so the whole range stays in-bounds and initialized
+        // for the entire read.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, byte_len) };
+        assert!(
+            bytes.iter().all(|&byte| byte == 0),
+            "zeroize left non-zero bytes in SeedBlock's backing buffer"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "would reallocate")]
+    fn seed_block_push_panics_before_reallocating() {
+        let mut b = SeedBlock::with_capacity(1);
+        b.push(GpuCandidate {
+            entropy: [0u8; 16],
+            seed: [0u8; 64],
+        });
+        // Second push exceeds the reserved capacity: without a guard this would
+        // reallocate and free the old (unzeroized) buffer.
+        b.push(GpuCandidate {
+            entropy: [1u8; 16],
+            seed: [1u8; 64],
+        });
     }
 
     #[test]
