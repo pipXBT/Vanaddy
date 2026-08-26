@@ -3502,8 +3502,13 @@ Expect the `echo` branch.
 
 - `src/gpu/mod.rs` — the constants from the contract, `GpuCandidate`,
   `SeedBlock`, `GpuError`, `GpuStatus`, `GpuDisableReason`, `GpuHealth`, a
-  placeholder `#[path = "stub.rs"] mod backend;` with `pub use backend::GpuEngine;`
-  and a module-level `pub fn probe() -> GpuStatus { GpuEngine::probe() }`, a
+  placeholder `#[path = "stub.rs"] mod backend;` with
+  `pub use backend::{probe, GpuEngine};` — the design spec's re-export form, written
+  that way from the start, so there is **no** module-level `probe` wrapper for this
+  milestone to delete (the brace order is rustfmt's; `src/gpu/mod.rs` is
+  rustfmt-clean and must stay so). `src/gpu/stub.rs` accordingly defines a **free**
+  `pub fn probe()` plus an `impl GpuEngine { pub fn probe() }` that delegates to it,
+  so the two spellings cannot diverge. There is a
   `const _: fn() = …` Send+Sync pin naming `GpuEngine`, `SeedBlock` and
   `GpuHealth`, the declarations `pub mod selftest;` and
   `pub use selftest::SelfTestError;`, and the test
