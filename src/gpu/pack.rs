@@ -67,6 +67,18 @@ mod tests {
     }
 
     #[test]
+    fn key_block_has_pinned_repr_c_layout() {
+        // Matches the precedent set by `gpu_candidate_has_pinned_repr_c_layout`
+        // (src/gpu/mod.rs): KeyBlock is uploaded to a GPU buffer and read by
+        // raw byte offset, so a field reorder, alignment change, or a derive
+        // that isn't repr(C)-safe would compile clean and pass every other
+        // test here, then only surface as a plausible-but-wrong seed once the
+        // Metal kernel reads it.
+        assert_eq!(core::mem::size_of::<KeyBlock>(), 128);
+        assert_eq!(core::mem::align_of::<KeyBlock>(), 16);
+    }
+
+    #[test]
     fn pack_key_block_is_big_endian_for_the_canonical_phrase() {
         assert_eq!(CANONICAL.len(), 93);
         let k = pack_key_block(CANONICAL.as_bytes());
