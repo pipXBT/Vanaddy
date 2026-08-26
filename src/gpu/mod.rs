@@ -7,6 +7,8 @@
 // milestone 6. Remove this attribute then.
 #![allow(dead_code)]
 
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
 pub mod selftest;
 
 pub use selftest::SelfTestError;
@@ -92,6 +94,60 @@ pub enum GpuDisableReason {
     Panicked,
 }
 
+/// One GPU-produced candidate. POD + Copy: no allocation on the hot path.
+/// `entropy`, not the phrase - the worker rebuilds the phrase itself with
+/// `Mnemonic::from_entropy`, so the String written to the CSV is always
+/// produced by trusted CPU code.
+#[derive(Clone, Copy, Zeroize)]
+#[repr(C)]
+pub struct GpuCandidate {
+    pub entropy: [u8; 16],
+    /// UNTRUSTED until re-derived. Used only to *filter*.
+    pub seed: [u8; 64],
+}
+
+/// A run of candidates handed to one Rayon worker. Deliberately NO mutating API
+/// beyond `push` during construction: phrase <-> seed pairing is established by
+/// exactly one zip in the producer and must never be re-ordered, filtered or
+/// sorted afterwards.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct SeedBlock(Vec<GpuCandidate>);
+
+impl SeedBlock {
+    /// Build-then-freeze: the ONLY way a block gains candidates. Producer and
+    /// tests only, hence `pub(crate)` - this is the visibility every downstream
+    /// milestone consumes, so it is fixed here and never re-declared. There is
+    /// deliberately no `remove`, `sort`, `retain` or `iter_mut`: the entropy
+    /// <-> seed pairing established by the single `zip` in the producer must
+    /// never be re-ordered afterwards.
+    pub(crate) fn with_capacity(n: usize) -> Self {
+        SeedBlock(Vec::with_capacity(n))
+    }
+    pub(crate) fn push(&mut self, candidate: GpuCandidate) {
+        self.0.push(candidate);
+    }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn chunks(&self, n: usize) -> std::slice::Chunks<'_, GpuCandidate> {
+        self.0.chunks(n)
+    }
+}
+
+pub type GpuRx = crossbeam_channel::Receiver<Box<SeedBlock>>;
+
+/// `App` owns a `GpuEngine` and hands `SeedBlock`s to Rayon workers, so a
+/// refactor that smuggled an Objective-C type into either must fail to compile
+/// here rather than at the point of use.
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<GpuEngine>();
+    assert_send_sync::<SeedBlock>();
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +187,62 @@ mod tests {
             other => panic!("stub backend must never report a usable GPU, got {other:?}"),
         }
         assert_eq!(probe(), GpuEngine::probe());
+    }
+
+    #[test]
+    fn seed_block_preserves_order_and_chunks_without_reordering() {
+        let mut b = SeedBlock::with_capacity(BLOCK);
+        assert!(b.is_empty());
+        for i in 0..BLOCK {
+            b.push(GpuCandidate {
+                entropy: [i as u8; 16],
+                seed: [(i / 2) as u8; 64],
+            });
+        }
+        assert_eq!(b.len(), BLOCK);
+        assert_eq!(b.chunks(64).count(), 8);
+        let flat: Vec<u8> = b
+            .chunks(64)
+            .flat_map(|c| c.iter().map(|x| x.entropy[0]))
+            .collect();
+        let want: Vec<u8> = (0..BLOCK).map(|i| i as u8).collect();
+        assert_eq!(flat, want);
+        assert_eq!(b.chunks(64).nth(1).unwrap()[0].seed, [32u8; 64]);
+    }
+
+    #[test]
+    fn seed_block_zeroizes_its_candidates() {
+        let mut b = SeedBlock::with_capacity(2);
+        b.push(GpuCandidate {
+            entropy: [0xAB; 16],
+            seed: [0xCD; 64],
+        });
+        b.push(GpuCandidate {
+            entropy: [0xEF; 16],
+            seed: [0x12; 64],
+        });
+        b.zeroize();
+        assert_eq!(b.len(), 0);
+        assert!(b.is_empty());
+    }
+
+    #[test]
+    fn a_seed_block_crosses_a_thread_boundary_through_the_channel() {
+        let (tx, rx) = crossbeam_channel::bounded::<Box<SeedBlock>>(CHANNEL_CAPACITY);
+        let rx: GpuRx = rx;
+        let producer = std::thread::spawn(move || {
+            let mut b = SeedBlock::with_capacity(BLOCK);
+            for i in 0..BLOCK {
+                b.push(GpuCandidate {
+                    entropy: [i as u8; 16],
+                    seed: [7u8; 64],
+                });
+            }
+            tx.send(Box::new(b)).expect("receiver is alive");
+        });
+        let got = rx.recv().expect("producer sent one block");
+        producer.join().expect("producer thread did not panic");
+        assert_eq!(got.len(), BLOCK);
+        assert_eq!(got.chunks(64).next().unwrap()[3].entropy, [3u8; 16]);
     }
 }

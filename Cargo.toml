@@ -25,3 +25,4 @@ tiny-keccak = { version = "2", features = ["keccak"] }
 rand = "0.8"
 crc32fast = "1.4"
 zeroize = { version = "1.8", features = ["derive"] }
+crossbeam-channel = "0.5"
