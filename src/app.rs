@@ -4,7 +4,9 @@ use crossterm::event::{self, KeyCode, KeyEventKind, KeyModifiers};
 use csv::WriterBuilder;
 use rayon::prelude::*;
 use std::{
-    fs::OpenOptions,
+    fs::{File, OpenOptions},
+    io,
+    path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc,
@@ -237,7 +239,8 @@ impl App {
 
         // Ensure CSV has header
         {
-            let file = open_csv_secure().expect("Failed to open vanity_wallets.csv");
+            let file =
+                open_csv_secure(Path::new(CSV_PATH)).expect("Failed to open vanity_wallets.csv");
             let needs_header = file.metadata().map(|m| m.len() == 0).unwrap_or(true);
             if needs_header {
                 let mut wtr = WriterBuilder::new().has_headers(false).from_writer(file);
@@ -272,17 +275,9 @@ impl App {
     pub fn drain_matches(&mut self) {
         if let Some(ref rx) = self.rx {
             while let Ok(payload) = rx.try_recv() {
-                if let Ok(file) = open_csv_secure() {
-                    let mut wtr = WriterBuilder::new().has_headers(false).from_writer(file);
-                    let _ = wtr.write_record([
-                        &payload.chain,
-                        &payload.address,
-                        &payload.secret_hex,
-                        &payload.mnemonic,
-                    ]);
-                    let _ = wtr.flush();
-                }
-
+                // append_match_row is the only writer; it re-asserts 0600 on
+                // every open and cannot be handed anything unverified.
+                let _ = append_match_row(Path::new(CSV_PATH), &payload);
                 self.matches.push(payload);
                 self.selected_match = self.matches.len().saturating_sub(1);
             }
@@ -290,12 +285,19 @@ impl App {
     }
 }
 
-/// Open `vanity_wallets.csv` for append, creating it with mode 0o600 on Unix
-/// and re-asserting 0o600 on every open in case a pre-existing file had looser
+/// The one CSV every production caller writes to.
+const CSV_PATH: &str = "vanity_wallets.csv";
+
+/// Open the CSV at `path` for append, creating it with mode 0o600 on Unix and
+/// re-asserting 0o600 on every open in case a pre-existing file had looser
 /// permissions. The file holds plaintext seed phrases, so this is the single
 /// chokepoint for that security guarantee — all writers MUST go through here.
-fn open_csv_secure() -> std::io::Result<std::fs::File> {
-    const PATH: &str = "vanity_wallets.csv";
+///
+/// `path` is a parameter rather than the `CSV_PATH` constant so the permission
+/// tests can use a temp dir: `cargo test` runs tests as threads in one process,
+/// so `set_current_dir` is racy, and `start_stop_restart_does_not_leak_threads`
+/// already writes the real CSV into the repo root.
+fn open_csv_secure(path: &Path) -> io::Result<File> {
     let mut opts = OpenOptions::new();
     opts.create(true).append(true);
     #[cfg(unix)]
@@ -303,17 +305,28 @@ fn open_csv_secure() -> std::io::Result<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let file = opts.open(PATH)?;
+    let file = opts.open(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         if let Ok(metadata) = file.metadata() {
             let mut perms = metadata.permissions();
             perms.set_mode(0o600);
-            let _ = std::fs::set_permissions(PATH, perms);
+            let _ = std::fs::set_permissions(path, perms);
         }
     }
     Ok(file)
+}
+
+/// The SINGLE writer of match rows. It takes a `&Match`, and a `Match` cannot be
+/// constructed without a `crate::verify::Verified` token, so an unverified
+/// candidate is unrepresentable here rather than merely filtered out.
+fn append_match_row(path: &Path, m: &Match) -> io::Result<()> {
+    let file = open_csv_secure(path)?;
+    let mut wtr = WriterBuilder::new().has_headers(false).from_writer(file);
+    wtr.write_record([&m.chain, &m.address, &m.secret_hex, &m.mnemonic])?;
+    wtr.flush()?;
+    Ok(())
 }
 
 pub fn detect_optimal_threads() -> usize {
@@ -581,5 +594,147 @@ mod tests {
 
         assert!(app.thread_pool.is_none());
         assert!(app.stop.load(Ordering::Relaxed));
+    }
+
+    /// The CSV holds plaintext seed phrases. Both halves of the 0600 guarantee
+    /// must survive: `.mode(0o600)` on create AND the post-open `set_permissions`
+    /// re-assert, which is the half that catches a pre-existing loose file.
+    #[test]
+    #[cfg(unix)]
+    fn open_csv_secure_reasserts_0600_on_preexisting_0644() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vanity_wallets.csv");
+        std::fs::write(&path, b"Chain,Address,Private Key (hex),Seed Phrase\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "precondition: the file starts world-readable"
+        );
+
+        let file = open_csv_secure(&path).expect("open must succeed");
+        drop(file);
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "a pre-existing loose-permission CSV must be tightened on every open"
+        );
+    }
+
+    /// A `Match` cannot exist without a `verify::Verified`, so `append_match_row`
+    /// is structurally unable to write an unverified row. Assert the consequence:
+    /// what lands on disk re-derives, and the file is 0600.
+    #[test]
+    #[cfg(unix)]
+    fn verified_match_is_written_and_file_is_0600() {
+        use crate::chains::evm::Evm;
+        use crate::chains::Bip39GpuChain;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vanity_wallets.csv");
+
+        let m = one_cpu_match();
+        append_match_row(&path, &m).expect("append must succeed");
+
+        let mut rdr = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .from_path(&path)
+            .unwrap();
+        let rows: Vec<csv::StringRecord> = rdr.records().map(|r| r.unwrap()).collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].len(), 4);
+        assert_eq!(&rows[0][0], "EVM");
+        assert_eq!(&rows[0][1], m.address.as_str());
+        assert!(
+            Evm::verify(&rows[0][1], &rows[0][2], &rows[0][3]),
+            "every CSV row must re-derive from its own phrase"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    /// The gate's end-to-end consequence: a GPU candidate whose seed carries one
+    /// flipped bit is rejected by `verify_gpu`, so no `Match` is ever minted for
+    /// it, so its address cannot appear in the file. Every row that IS there
+    /// re-derives.
+    #[test]
+    #[cfg(unix)]
+    fn unverified_match_is_never_written_to_csv() {
+        use crate::chains::evm::Evm;
+        use crate::chains::{Bip39GpuChain, Chain};
+        use bip39::{Language, Mnemonic};
+        use std::os::unix::fs::PermissionsExt;
+
+        // Deterministic entropy so a red build replays exactly.
+        let mut entropy = [0u8; 16];
+        entropy[15] = 77;
+        let mn = Mnemonic::from_entropy(&entropy, Language::English).unwrap();
+        let mut seed = crate::seed::derive_seed(&mn);
+        seed[0] ^= 0x01; // exactly what a faulty kernel would produce
+        let (bad_addr, _sk) = Evm::from_gpu_seed(&seed);
+        let bad_address = Evm::encode_address(&bad_addr);
+
+        assert!(
+            crate::verify::verify_gpu::<Evm>(&entropy, &bad_addr).is_none(),
+            "the gate must reject a corrupted GPU seed, so no Match can be minted"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vanity_wallets.csv");
+        // Write everything the gate DID accept.
+        let good = one_cpu_match();
+        append_match_row(&path, &good).expect("append must succeed");
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !body.contains(&bad_address),
+            "a rejected candidate must never reach the CSV"
+        );
+        let mut rdr = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .from_path(&path)
+            .unwrap();
+        for rec in rdr.records() {
+            let r = rec.unwrap();
+            assert!(
+                Evm::verify(&r[1], &r[2], &r[3]),
+                "every CSV row must re-derive: {}",
+                &r[1]
+            );
+        }
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    /// One genuine CPU-path match, produced by the real `search` loop so the
+    /// `Verified` token is minted at its real site rather than forged here
+    /// (which is impossible — the field is private to `crate::verify`).
+    #[cfg(unix)]
+    fn one_cpu_match() -> Match {
+        use crate::chains::evm::Evm;
+        use crate::chains::search;
+
+        // Empty prefix and suffix accept every address, so the very first batch
+        // emits.
+        let matcher = Matcher::new(String::new(), String::new(), false, ChainKind::Evm);
+        let stop = AtomicBool::new(false);
+        let counter = AtomicU64::new(0);
+        let (tx, rx) = mpsc::channel();
+        thread::scope(|s| {
+            s.spawn(|| search::<Evm>(&matcher, &stop, &counter, &tx));
+            let m = rx
+                .recv()
+                .expect("CPU search must emit for an empty pattern");
+            stop.store(true, Ordering::Relaxed);
+            m
+        })
     }
 }
