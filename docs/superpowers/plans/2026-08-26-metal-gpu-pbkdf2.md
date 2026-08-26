@@ -6760,7 +6760,11 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
   is left alone.
 - `src/gpu/pbkdf2_bip39.metal` hashes to
   `871ef1706bd5ba0a9ddb420872ea6a2db3556bf6951453942678d364b123f4b2`.
-- No file outside `Cargo.toml`, `Cargo.lock` and `src/gpu/` was modified.## Milestone 4 — The producer thread (still no TUI)
+- No file outside `Cargo.toml`, `Cargo.lock` and `src/gpu/` was modified.
+
+---
+
+## Milestone 4 — The producer thread (still no TUI)
 
 At the end of Milestone 3 the Metal backend can turn a slice of `KeyBlock`s into a slice of 64-byte seeds, once, when you call it from a test. Nothing calls it in production, nothing runs on its own thread, and nothing hands seeds to the search workers.
 
@@ -8476,7 +8480,11 @@ All four must hold before starting Milestone 5:
 3. `signal_stop_finishes_the_producer_within_200ms` and `dropping_the_receiver_exits_the_producer_cleanly` pass — both wake paths work independently, and neither blocks.
 4. `rustfmt --edition 2021 --check src/gpu/producer.rs src/gpu/metal.rs src/gpu/stub.rs src/gpu/mod.rs` prints nothing, and `cargo clippy --all-targets 2>&1 | grep -- '-->' | sort | uniq -c` still shows exactly the 12 pre-existing baseline lines from Milestone 1 Task 1.8 Step 5 with none of them in `src/gpu/`. The clean baseline is NOT warning-free and is NOT rustfmt-clean, so the gate is "no new warning, no new fmt drift", never "clean".
 
-Nothing in `src/app.rs`, `src/ui.rs`, `src/main.rs` or `src/chains/` was touched by this milestone. A user running the binary sees exactly the behaviour they saw after Milestone 3 — the producer exists but nothing starts it.## Milestone 5 — Worker integration
+Nothing in `src/app.rs`, `src/ui.rs`, `src/main.rs` or `src/chains/` was touched by this milestone. A user running the binary sees exactly the behaviour they saw after Milestone 3 — the producer exists but nothing starts it.
+
+---
+
+## Milestone 5 — Worker integration
 
 The GPU producer from Milestone 4 now has a consumer. This milestone routes `Option<&GpuRx>` and `&GpuHealth` from the search entry point down to the Rayon workers, implements the non-blocking `try_recv` drain, the chunked stop checks that keep Ctrl+C responsive inside a 512-candidate block, and the verify-gated emit path.
 
