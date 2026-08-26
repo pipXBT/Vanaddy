@@ -334,16 +334,38 @@ mod tests {
         // derive stacked under an unrelated attribute (e.g. `#[repr(...)]`)
         // can't hide from this check. `contains`, not `starts_with`, so
         // `#[cfg_attr(test, derive(Clone))]` is caught too. Blank lines and
-        // `//`/`///` comments are SKIPPED rather than stopping the walk (a
-        // blank line or a comment between the derive and the declaration must
-        // not hide it either) — but a comment's own text is never inspected
-        // for "derive", only lines starting with `#[` are, so a doc comment
-        // reflow (even one that happens to say "derive" in prose) still can't
-        // fail this test. The walk stops only at the first real code line.
+        // `//`/`///` line comments and `/* ... */` block comments (single- or
+        // multi-line) are SKIPPED rather than stopping the walk (any of these
+        // between the derive and the declaration must not hide it either) —
+        // but a comment's own text is never inspected for "derive", only
+        // lines starting with `#[` are, so a doc comment reflow (even one
+        // that happens to say "derive" in prose, or a `/* */` block that
+        // does) still can't fail this test. The walk stops only at the first
+        // real code line.
         let mut forging_attr = None;
+        let mut in_block_comment = false;
         for line in src[..at].lines().rev() {
             let line = line.trim();
+            if in_block_comment {
+                // Comment content is never inspected for "derive" — only the
+                // opening delimiter, which ends the skip, is looked for.
+                if line.contains("/*") {
+                    in_block_comment = false;
+                }
+                continue;
+            }
             if line.is_empty() || line.starts_with("//") {
+                continue;
+            }
+            if let (Some(open), Some(close)) = (line.find("/*"), line.rfind("*/")) {
+                if open < close {
+                    continue; // self-contained /* ... */ on one line
+                }
+            }
+            if line.ends_with("*/") {
+                // The closing delimiter of a block comment that opened on an
+                // earlier (higher, so later in this reverse walk) line.
+                in_block_comment = true;
                 continue;
             }
             if line.starts_with("#[") {
