@@ -18,6 +18,10 @@ pub struct Match {
     pub address: String,
     pub secret_hex: String,
     pub mnemonic: String,
+    /// Proof that this row re-derives via the reference (`ring`) path.
+    /// `app::append_match_row` takes a `&Match`, so an unverified row is
+    /// unrepresentable rather than merely unwritten.
+    pub verified: crate::verify::Verified,
 }
 
 pub trait Chain: Send + Sync + 'static {
@@ -117,6 +121,25 @@ impl ChainKind {
     }
 }
 
+/// The unchanged CPU batch, factored out so `search` and `search_hybrid` share
+/// ONE body and cannot drift. Byte-identical to today's loop interior.
+#[inline(always)]
+fn search_cpu_step<C: Chain>(matcher: &Matcher, counter: &AtomicU64, tx: &Sender<Match>) {
+    C::generate_batch(|addr_bytes, secret_raw, phrase| {
+        if C::matches_raw(matcher, &addr_bytes) {
+            let _ = tx.send(Match {
+                chain: C::LABEL.to_string(),
+                address: C::encode_address(&addr_bytes),
+                secret_hex: C::encode_secret(&secret_raw),
+                mnemonic: phrase,
+                verified: crate::verify::Verified::cpu_reference(),
+            });
+        }
+    });
+    counter.fetch_add(C::BATCH as u64, Ordering::Relaxed);
+}
+
+/// Unchanged signature. Solana/Bitcoin/Ton/Monero still call THIS.
 pub fn search<C: Chain>(
     matcher: &Matcher,
     stop: &AtomicBool,
@@ -124,17 +147,7 @@ pub fn search<C: Chain>(
     tx: &Sender<Match>,
 ) {
     while !stop.load(Ordering::Relaxed) {
-        C::generate_batch(|addr_bytes, secret_raw, phrase| {
-            if C::matches_raw(matcher, &addr_bytes) {
-                let _ = tx.send(Match {
-                    chain: C::LABEL.to_string(),
-                    address: C::encode_address(&addr_bytes),
-                    secret_hex: C::encode_secret(&secret_raw),
-                    mnemonic: phrase,
-                });
-            }
-        });
-        counter.fetch_add(C::BATCH as u64, Ordering::Relaxed);
+        search_cpu_step::<C>(matcher, counter, tx);
     }
 }
 
@@ -162,5 +175,39 @@ mod tests {
         assert!(n > 0, "search must make progress");
         assert_eq!(solana::Solana::BATCH, LANES);
         assert_eq!(n % LANES as u64, 0, "counter advances in whole batches, got {n}");
+    }
+
+    /// The CPU path is the reference, so its matches mint `Verified::cpu_reference()`
+    /// directly — but they must still actually re-derive. This is the property the
+    /// whole gate exists to preserve, asserted on the path that does not need a GPU.
+    #[test]
+    fn cpu_step_emits_matches_that_carry_a_token_and_re_derive() {
+        use crate::chains::evm::Evm;
+
+        // Empty prefix and empty suffix: Matcher::new leaves evm_prefix/evm_suffix
+        // as None, matches_evm_raw returns true unconditionally, so one batch of
+        // LANES candidates produces exactly LANES matches.
+        let matcher = Matcher::new(String::new(), String::new(), false, ChainKind::Evm);
+        let counter = AtomicU64::new(0);
+        let (tx, rx) = mpsc::channel();
+
+        search_cpu_step::<Evm>(&matcher, &counter, &tx);
+        drop(tx);
+
+        let got: Vec<Match> = rx.into_iter().collect();
+        assert_eq!(
+            got.len(),
+            LANES,
+            "an all-accepting matcher must emit every candidate"
+        );
+        assert_eq!(counter.load(Ordering::Relaxed), LANES as u64);
+        for m in &got {
+            assert_eq!(m.chain, "EVM");
+            assert!(
+                Evm::verify(&m.address, &m.secret_hex, &m.mnemonic),
+                "CPU-path match must re-derive via ring: {}",
+                m.address
+            );
+        }
     }
 }

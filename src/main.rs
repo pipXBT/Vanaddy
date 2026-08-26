@@ -7,6 +7,7 @@ pub mod pbkdf2_lanes;
 pub mod seed;
 pub mod slip10;
 pub mod ui;
+pub mod verify;
 
 use self::app::App;
 use crossterm::{
