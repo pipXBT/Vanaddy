@@ -3445,10 +3445,34 @@ legs must be identical.
 - [ ] **Step 3: Confirm the trust boundary is fully covered with no Metal in the tree.**
 
 ```sh
-cargo test -- verify_gpu_ gpu_block_is_consumed corrupted_gpu_seed gpu_drain_honours_stop search_with_no_gpu_source unverified_match_is_never_written open_csv_secure_reasserts verified_match_is_written verified_token_field_is_private cpu_step_emits_matches from_gpu_seed_and_verify
+cargo test -- verify_gpu_ gpu_block_is_consumed corrupted_gpu_seed gpu_drain_honours_stop search_with_no_gpu_source unverified_match_is_never_written open_csv_secure_reasserts verified_match_is_written verify_source_pins cpu_step_emits_matches from_gpu_seed_and_verify
 ```
 
 Expect every one of these to run and pass.
+
+**Also assert that no filter matched zero tests.** A libtest filter that matches nothing
+contributes zero tests and still reports `ok`, so a renamed test silently shrinks this
+gate instead of failing it. (Not hypothetical: `verified_token_field_is_private` was
+renamed to `verify_source_pins_the_private_field_declaration` during Task 2.2's fix round,
+and this gate ran 11 tests while naming 12 until it was corrected.) Rather than pinning a
+count that every later task invalidates, check each filter individually:
+
+```sh
+cd /Users/shawnhopkinson/Rust/Vanaddy
+for f in verify_gpu_ gpu_block_is_consumed corrupted_gpu_seed gpu_drain_honours_stop \
+         search_with_no_gpu_source unverified_match_is_never_written \
+         open_csv_secure_reasserts verified_match_is_written verify_source_pins \
+         cpu_step_emits_matches from_gpu_seed_and_verify; do
+  out=$(cargo test -- "$f" 2>&1)
+  n=$(printf '%s\n' "$out" | sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p')
+  if [ "${n:-0}" -gt 0 ]; then echo "OK   $f -> $n"; else echo "DEAD $f -> 0"; fi
+done
+```
+
+Expected: every line starts `OK`. Any `DEAD` line names a filter whose test was renamed
+or removed — fix the filter, never the expectation. (Capture `cargo`'s output into a
+variable first, as above; piping `cargo test` straight into `sed` inside the loop
+misreports every filter as DEAD.)
 
 - [ ] **Step 4: Confirm no Metal dependency was introduced.**
 
