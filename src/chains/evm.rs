@@ -203,7 +203,10 @@ mod tests {
         let seed = derive_seed(&m);
 
         let (addr, sk) = Evm::from_gpu_seed(&seed);
-        assert_eq!(hex::encode(addr), "9858effd232b4033e47d90003d41ec34ecaeda94");
+        assert_eq!(
+            hex::encode(addr),
+            "9858effd232b4033e47d90003d41ec34ecaeda94"
+        );
 
         let address = Evm::encode_address(&addr);
         let secret_hex = Evm::encode_secret(&sk);
@@ -216,7 +219,11 @@ mod tests {
 
         // One flipped nibble in the secret: reject.
         let mut bad_secret = secret_hex.clone();
-        let first = if bad_secret.starts_with('0') { "1" } else { "0" };
+        let first = if bad_secret.starts_with('0') {
+            "1"
+        } else {
+            "0"
+        };
         bad_secret.replace_range(0..1, first);
         assert!(!Evm::verify(&address, &bad_secret, PHRASE));
 
