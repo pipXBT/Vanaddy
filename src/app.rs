@@ -295,6 +295,14 @@ impl App {
         }
         self.validated_thread_count = count;
 
+        // ADVISORY. This line records the GPU decision; it CANNOT fail the
+        // validation. Every GPU state — no device, wrong chain, faulted this
+        // session, vetoed by VANADDY_GPU=0 — resolves to a CPU-only search that
+        // starts normally. Returning Err here would let a stale toggle or a
+        // mid-run fault trap the user in the config screen with no way to start,
+        // which is strictly worse than losing the acceleration.
+        self.validated_gpu = self.gpu_effective();
+
         Ok(())
     }
 
@@ -770,6 +778,66 @@ mod tests {
         assert!(!app.validated_gpu);
         assert!(app.gpu_rx.is_none());
         assert!(!app.gpu_effective());
+    }
+
+    #[test]
+    fn validate_never_returns_err_for_a_gpu_reason() {
+        use crate::gpu::{GpuDisableReason, GpuStatus};
+
+        let mut app = App::with_gpu_status(GpuStatus::Ready {
+            device: "Apple M1".to_string(),
+        });
+        // Pin the status: the constructor's env lever rewrites a `Ready` probe
+        // into `Disabled(UserOff)`, and this test must not depend on the
+        // developer's shell.
+        app.gpu_status = GpuStatus::Ready {
+            device: "Apple M1".to_string(),
+        };
+        app.chain = crate::chains::ChainKind::Evm;
+        app.vanity_prefix = "abcd".into();
+        app.thread_count = "2".into();
+
+        // GPU on and healthy: validated_gpu latches true.
+        app.gpu_requested = true;
+        assert!(app.validate().is_ok());
+        assert!(app.validated_gpu);
+
+        // GPU requested but the device faulted mid-session. This is the case a
+        // naive implementation turns into Err and locks the user out of the app.
+        app.gpu_status = GpuStatus::Disabled(GpuDisableReason::VerifyMismatch {
+            address: "0x0000000000000000000000000000000000000000".to_string(),
+        });
+        assert!(
+            app.validate().is_ok(),
+            "a faulted GPU must never block a CPU search"
+        );
+        assert!(!app.validated_gpu);
+
+        // GPU requested on a non-EVM chain: still fine, still CPU-only.
+        app.gpu_status = GpuStatus::Ready {
+            device: "Apple M1".to_string(),
+        };
+        app.chain = crate::chains::ChainKind::Solana;
+        app.vanity_prefix = "abcd".into();
+        assert!(
+            app.validate().is_ok(),
+            "EVM-only offload must never block another chain"
+        );
+        assert!(!app.validated_gpu);
+
+        // No device at all.
+        app.chain = crate::chains::ChainKind::Evm;
+        app.gpu_status = GpuStatus::Unavailable("no Metal device".to_string());
+        assert!(app.validate().is_ok());
+        assert!(!app.validated_gpu);
+
+        // A real, non-GPU error still errors. The advisory line must not have
+        // swallowed the thread-count validation.
+        app.thread_count = "0".into();
+        assert!(
+            app.validate().is_err(),
+            "thread-count validation is unaffected"
+        );
     }
 
     /// The CSV holds plaintext seed phrases. Both halves of the 0600 guarantee
