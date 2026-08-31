@@ -4455,11 +4455,22 @@ pub use backend::probe;
       `GpuHealth` lines of that block intact. Milestone 4 Task 4.7 defines
       `GpuEngine` in both backends and restores both the re-export and that line.
 
+- [ ] **Step 6a: Move the stray module declaration up with its siblings.** Task 3.1
+      appended `pub mod kernel_src;` as the **last line** of `src/gpu/mod.rs`, after the
+      `#[cfg(test)] mod tests` block, because its Step 2 said "append to the end"
+      literally. Rust does not care, but a `mod` declaration below the test module is
+      hard to find. You are already editing this file's module header, so move it up
+      next to `pub mod pack;` and `pub mod selftest;`. Task 3.1's review deferred exactly
+      this cleanup to whichever Milestone 3 task next touched the file.
+
 - [ ] **Step 6b: Fix the Milestone 1 test that named `GpuEngine`.** `src/gpu/mod.rs`
-      still contains Task 1.3's test `stub_backend_reports_unavailable`, whose body
-      is `assert_eq!(probe(), GpuEngine::probe());`. Neither `GpuEngine` nor the
-      wrapper it called still exists, and on the Metal leg the backend is no longer
-      a stub, so the name is wrong as well. Rename it and replace its body:
+      still contains Task 1.3's test `stub_backend_reports_unavailable`. **Replace the
+      whole function, not a line of it.** Its real body is a `match GpuEngine::probe()`
+      block followed by `assert_eq!(probe(), GpuEngine::probe());` — two separate
+      references to `GpuEngine`, which Step 6 has just removed. Replacing only the
+      `assert_eq!` line leaves the `match` behind and fails to compile. On the Metal leg
+      the backend is no longer a stub either, so the name is wrong as well. Rename it and
+      replace the entire function with:
 
 ```rust
     #[test]
@@ -4584,6 +4595,13 @@ fn objc2_surface_probe(
     let _: usize = pipe.threadExecutionWidth();
     let _: usize = pipe.maxTotalThreadsPerThreadgroup();
     let _: std::ptr::NonNull<std::ffi::c_void> = buf.contents();
+
+    // Pin `autoreleasepool`'s closure arity and the shape of the pool argument.
+    // Task 3.4 calls this three times and Task 3.3's own rationale names it as a
+    // reason for choosing objc2 over metal-rs, so it belongs in this probe: if the
+    // closure took no argument, or returned `()` only, 3.4 would not compile and the
+    // failure would surface 300 lines into a task this probe exists to de-risk.
+    let _: u32 = objc2::rc::autoreleasepool(|_pool| 0u32);
 
     let Some(cb) = q.commandBuffer() else { return };
     let _: i64 = cb.status().0 as i64;
