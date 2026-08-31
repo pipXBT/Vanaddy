@@ -22,8 +22,8 @@ use std::sync::Mutex;
 ///
 /// `SaltTooLong` has no `GpuDisableReason` twin because it is a programming
 /// error in the caller, not a property of the device: it can only fire if a
-/// future chain feeds a salt longer than `pbkdf2_lanes::MAX_SALT_LEN` (107, see
-/// `src/pbkdf2_lanes.rs:38`), so the `From` impl degrades it to `BadConfig`
+/// future chain feeds a salt longer than `pbkdf2_lanes::MAX_SALT_LEN` (107),
+/// so the `From` impl degrades it to `BadConfig`
 /// carrying both the offending length and the limit.
 pub(crate) fn reason_from(e: GpuError) -> GpuDisableReason {
     GpuDisableReason::from(e)
