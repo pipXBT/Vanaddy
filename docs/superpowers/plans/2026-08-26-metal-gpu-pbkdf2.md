@@ -14,6 +14,28 @@
 
 Every task's requirements implicitly include this section.
 
+**Committing, when this worktree may be shared with concurrent agents.** Every commit step
+below is written as `git add <paths> && git commit`. Do **not** run it that way. `git commit`
+commits the whole INDEX, not just the paths you added, so if a peer has staged its own work
+you will silently sweep that peer's changes into your commit under your message. This has
+already happened once on this branch: ~443 lines of another agent's in-progress plan edits
+landed inside a commit about an autoreleasepool comment, and had to be untangled with a reset
+and two re-commits. Instead:
+
+```sh
+git status --porcelain                 # look first; leave anything you do not own alone
+git add <only files this task CREATED> # --only rejects paths git does not yet track
+git commit --only <all this task's paths> -F - <<'MSG'
+...
+MSG
+```
+
+`--only` commits exactly the named paths and leaves a peer's staged work staged. Verified on
+this machine: with a peer's file staged, `git commit --only mine.txt` commits only `mine.txt`
+and the peer's file stays staged and uncommitted. Listing a tracked path that happens to have
+no changes is harmless; listing an untracked one is an error, which is why new files still
+need `git add` first.
+
 **Cryptographic correctness (from CLAUDE.md — these outrank every other goal):**
 - These **19** pinned test functions must keep passing, unmodified:
   `seed::derive_seed_matches_bip39_vector`, `seed::derive_seeds_matches_derive_seed_per_lane`,
