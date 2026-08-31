@@ -579,6 +579,15 @@ impl App {
         }
 
         // ---- 3. Unexpected exit: the engine finished but nothing was raised.
+        // NOTE the asymmetry with section 2, which reads `.last()` while this
+        // folds over ALL engines. The two agree only because
+        // `gpu_spawn_allowed` requires `engines_parked == 0`, so a live
+        // `gpu_rx` implies exactly one parked engine. That invariant lives two
+        // functions away and nothing here enforces it: if it is ever relaxed —
+        // say, to allow a spawn while an old engine winds down — section 2
+        // would report the newest engine while this fires on ANY engine
+        // finishing, and a healthy GPU would be declared dead. Relax that
+        // invariant and these two must be reconciled in the same change.
         let engine_finished = self.gpu_engines.iter().any(|e| e.is_finished());
         if is_unexpected_gpu_exit(GpuExitCheck {
             state: self.state,
