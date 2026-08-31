@@ -3,10 +3,6 @@
 //! The GPU is a *seed accelerator*: never a source of entropy, never a source of
 //! truth. Every GPU-sourced match is re-derived with `ring` before it can exist.
 
-// Nothing outside this module consumes it yet - `App` and `main()` wire it up in
-// milestone 6. Remove this attribute then.
-#![allow(dead_code)]
-
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -204,9 +200,16 @@ impl SeedBlock {
     /// deliberately no `remove`, `sort`, `retain` or `iter_mut`: the entropy
     /// <-> seed pairing established by the single `zip` in the producer must
     /// never be re-ordered afterwards.
+    // no production consumer on the stub leg as of Milestone 6: the only
+    // production caller is `producer::carve_and_send`, which is metal-only;
+    // `chains::mod`'s own `#[cfg(test)]` fixtures call this directly.
+    #[allow(dead_code)]
     pub(crate) fn with_capacity(n: usize) -> Self {
         SeedBlock(Vec::with_capacity(n))
     }
+    // no production consumer on the stub leg as of Milestone 6: same
+    // reasoning as `with_capacity` above.
+    #[allow(dead_code)]
     pub(crate) fn push(&mut self, candidate: GpuCandidate) {
         assert!(
             self.0.len() < self.0.capacity(),

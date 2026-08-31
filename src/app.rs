@@ -543,6 +543,42 @@ impl App {
         self.state = AppState::Configuring;
     }
 
+    /// Process-exit reaper. Signals every parked engine, then waits UP TO
+    /// `deadline` for them to finish, polling rather than joining.
+    ///
+    /// Any engine still running when the deadline expires is ABANDONED: its
+    /// thread is detached and its 3.5 MiB of Metal buffers go un-zeroized. That
+    /// is the accepted trade — a GPU wedged inside `waitUntilCompleted` would
+    /// otherwise hang the process forever with `kill -9` as the only exit, and
+    /// the CSV already writes the same secret material to disk in plaintext.
+    pub fn shutdown_gpu(&mut self, deadline: std::time::Duration) {
+        for engine in &self.gpu_engines {
+            engine.signal_stop();
+        }
+        // Also disconnect the channel, so a producer parked in send_timeout
+        // wakes on Disconnected instead of waiting out its 100 ms.
+        self.gpu_rx = None;
+
+        let start = Instant::now();
+        while !self.gpu_engines.is_empty() && start.elapsed() < deadline {
+            let mut still_running: Vec<GpuEngine> = Vec::with_capacity(self.gpu_engines.len());
+            for engine in std::mem::take(&mut self.gpu_engines) {
+                if engine.is_finished() {
+                    engine.reap();
+                } else {
+                    still_running.push(engine);
+                }
+            }
+            self.gpu_engines = still_running;
+            if self.gpu_engines.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // Abandon the rest. `GpuEngine::drop` must not join.
+        self.gpu_engines.clear();
+    }
+
     pub fn drain_matches(&mut self) {
         // ---- 1. Fault promotion. Runs first, on every 100 ms tick, so a fault
         // raised by a Rayon worker or the producer becomes visible within one
@@ -2081,5 +2117,177 @@ mod tests {
             "a faultless tick must not release the channel"
         );
         drop(keep_tx);
+    }
+
+    #[test]
+    fn shutdown_gpu_returns_immediately_when_nothing_is_parked() {
+        let mut app = App::new();
+        let before = Instant::now();
+        app.shutdown_gpu(Duration::from_millis(600));
+        let elapsed = before.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "must not sleep out the deadline when there is nothing to wait for: {elapsed:?}"
+        );
+        assert!(app.gpu_engines.is_empty());
+        assert!(app.gpu_rx.is_none());
+    }
+
+    /// The deadline path — the half the test above cannot reach. `App::new()`
+    /// leaves `gpu_engines` EMPTY, so `shutdown_gpu`'s
+    /// `while !self.gpu_engines.is_empty() && start.elapsed() < deadline` loop
+    /// never runs one iteration and the call returns in microseconds under ANY
+    /// implementation — an unbounded join included. So this test parks a REAL,
+    /// still-running engine: the deadline is then the thing actually under test.
+    ///
+    /// Sequencing: shut down DURING STARTUP, not in steady state. The producer
+    /// is then inside `MetalPbkdf2::new()` — device creation plus a cold shader
+    /// compile — which does not observe the stop flag at all. MEASURED reaction
+    /// time there: 55-83 ms debug, 46-63 ms release; a 4.6x margin over the
+    /// 10 ms deadline in BOTH profiles, so the bound is always what ends the
+    /// wait.
+    ///
+    /// Waiting for the first block instead (the earlier shape of this test) put
+    /// the producer in steady state, where it reacts far faster than the
+    /// "~135 ms" this comment used to claim: the tree's own
+    /// `signal_stop_finishes_the_producer_within_200ms` measures 20-27 ms debug
+    /// and 3-6 ms release. That is below the 10 ms deadline in release, so the
+    /// lower assertion failed 3/3 there — and only ~27 ms in debug, so a
+    /// deliberately-wrong `shutdown_gpu` that waits unboundedly and then reaps
+    /// (the realistic O14 violation) passed ALL FOUR assertions. Measured.
+    ///
+    /// The `Arc::strong_count` assertion below is the timing-immune half. The
+    /// producer thread holds its own `Arc<GpuHealth>` clone for its whole life
+    /// (`src/gpu/metal.rs:588`, captured by the spawned closure) and
+    /// `shutdown_gpu` drops only the engine's clone, so a count of 1 on return
+    /// means the thread was already gone — i.e. this was a join. Measured:
+    /// bounded 11.6-14.8 ms with count 2 in both profiles; unbounded wait +
+    /// reap 48-341 ms with count 1.
+    ///
+    /// The engine is abandoned mid-flight, exactly as `shutdown_gpu`'s doc
+    /// comment describes: its thread exits on the stop flag a few tens of ms
+    /// after this test returns.
+    #[test]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
+    fn shutdown_gpu_honours_its_deadline_with_a_live_engine() {
+        use crate::gpu::{SeedBlock, CHANNEL_CAPACITY};
+
+        // Same graceful-skip idiom as `gpu_for_test` in `src/gpu/metal.rs`:
+        // this test must pass on a machine with no Metal device.
+        if std::env::var_os("VANADDY_NO_GPU").is_some() {
+            eprintln!("SKIP: VANADDY_NO_GPU is set");
+            return;
+        }
+        if let GpuStatus::Unavailable(reason) = GpuEngine::probe() {
+            eprintln!("SKIP: no Metal device on this machine ({reason})");
+            return;
+        }
+
+        let mut app = App::new();
+        app.gpu_health = Arc::new(GpuHealth::default());
+        let (gpu_tx, rx) = crossbeam_channel::bounded::<Box<SeedBlock>>(CHANNEL_CAPACITY);
+        let engine = GpuEngine::start(gpu_tx, app.gpu_health.clone());
+        app.gpu_engines.push(engine);
+        // App's own clone, exactly as `start_search` holds it. The local `rx`
+        // stays alive for the whole test, so the producer can only ever see the
+        // stop flag — never a `Disconnected` shortcut that would let it finish
+        // early and hand this test a free pass.
+        app.gpu_rx = Some(rx.clone());
+
+        // No `recv` first: shut down while the producer is still starting up.
+        let deadline = Duration::from_millis(10);
+        let before = Instant::now();
+        app.shutdown_gpu(deadline);
+        let elapsed = before.elapsed();
+
+        assert!(
+            elapsed < deadline + Duration::from_millis(25),
+            "shutdown_gpu is a bounded wait, never a join: {elapsed:?}"
+        );
+        assert!(
+            app.gpu_engines.is_empty(),
+            "an engine still running past the deadline is abandoned, not left parked"
+        );
+        assert!(
+            app.gpu_rx.is_none(),
+            "shutdown_gpu drops App's channel clone"
+        );
+
+        // The producer must actually have been TOLD to stop. `rx` is still
+        // alive here, so there is no `Disconnected` shortcut: the thread can
+        // only exit via the stop flag. Delete the `signal_stop` loop from
+        // `shutdown_gpu` and this count never reaches 1.
+        //
+        // Deliberately NOT a wall-clock assertion. The version this replaces
+        // required `elapsed >= deadline`, which demanded the engine still be
+        // starting up at the 10 ms mark — true only with a COLD Metal shader
+        // cache. Warm, `MetalPbkdf2::new()` returns in ~5 ms, the engine
+        // finishes early, shutdown_gpu reaps it at ~7.7 ms, and the CORRECT
+        // implementation failed while a mutant with `signal_stop` deleted
+        // passed. Measured on this machine, 2026-08-31.
+        let give_up = Instant::now() + Duration::from_secs(2);
+        while Arc::strong_count(&app.gpu_health) > 1 && Instant::now() < give_up {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            Arc::strong_count(&app.gpu_health),
+            1,
+            "the producer still holds its Arc<GpuHealth> 2s after shutdown_gpu \
+             returned: it was never told to stop"
+        );
+        drop(rx);
+    }
+
+    /// The half the 10 ms test cannot pin down on a warm cache. With a ZERO
+    /// deadline the polling loop runs no iterations at all, so the engine is
+    /// abandoned while definitely still live. This is the path that keeps a
+    /// GPU wedged inside `waitUntilCompleted` from hanging process exit, and
+    /// unlike a timing assertion it is deterministic everywhere.
+    #[test]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
+    fn shutdown_gpu_abandons_a_live_engine_rather_than_waiting() {
+        use crate::gpu::{SeedBlock, CHANNEL_CAPACITY};
+
+        if std::env::var_os("VANADDY_NO_GPU").is_some() {
+            eprintln!("SKIP: VANADDY_NO_GPU is set");
+            return;
+        }
+        if let GpuStatus::Unavailable(reason) = GpuEngine::probe() {
+            eprintln!("SKIP: no Metal device on this machine ({reason})");
+            return;
+        }
+
+        let mut app = App::new();
+        app.gpu_health = Arc::new(GpuHealth::default());
+        let (gpu_tx, rx) = crossbeam_channel::bounded::<Box<SeedBlock>>(CHANNEL_CAPACITY);
+        app.gpu_engines
+            .push(GpuEngine::start(gpu_tx, app.gpu_health.clone()));
+        app.gpu_rx = Some(rx.clone());
+
+        let before = Instant::now();
+        app.shutdown_gpu(Duration::ZERO);
+        let elapsed = before.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(25),
+            "a zero deadline abandons immediately, it does not wait: {elapsed:?}"
+        );
+        assert!(
+            app.gpu_engines.is_empty(),
+            "the engine is abandoned, never left parked"
+        );
+        assert!(app.gpu_rx.is_none());
+
+        // Abandoned, but still signalled, so it winds down on its own.
+        let give_up = Instant::now() + Duration::from_secs(2);
+        while Arc::strong_count(&app.gpu_health) > 1 && Instant::now() < give_up {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            Arc::strong_count(&app.gpu_health),
+            1,
+            "an abandoned engine must still have been signalled to stop"
+        );
+        drop(rx);
     }
 }

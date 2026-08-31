@@ -31,6 +31,10 @@ use std::time::Duration;
 /// future chain feeds a salt longer than `pbkdf2_lanes::MAX_SALT_LEN` (107),
 /// so the `From` impl degrades it to `BadConfig`
 /// carrying both the offending length and the limit.
+// no production consumer on the stub leg as of Milestone 6: `producer()` is the
+// only production caller and it is metal-only; the portable `#[cfg(test)]`
+// block below exercises this directly instead.
+#[allow(dead_code)]
 pub(crate) fn reason_from(e: GpuError) -> GpuDisableReason {
     GpuDisableReason::from(e)
 }
@@ -38,6 +42,9 @@ pub(crate) fn reason_from(e: GpuError) -> GpuDisableReason {
 /// Poison-immune write. The UI thread reads this cell every 100 ms; a worker
 /// that panicked while holding the lock must not make the GPU status
 /// permanently unreadable, so a poisoned lock is recovered, never unwrapped.
+// no production consumer on the stub leg as of Milestone 6: same reasoning as
+// `reason_from` above.
+#[allow(dead_code)]
 pub(crate) fn set_status(cell: &Mutex<GpuStatus>, next: GpuStatus) {
     match cell.lock() {
         Ok(mut guard) => *guard = next,
@@ -46,6 +53,9 @@ pub(crate) fn set_status(cell: &Mutex<GpuStatus>, next: GpuStatus) {
 }
 
 /// Poison-immune read. Same reasoning as `set_status`.
+// no production consumer on the stub leg as of Milestone 6: same reasoning as
+// `reason_from` above.
+#[allow(dead_code)]
 pub(crate) fn read_status(cell: &Mutex<GpuStatus>) -> GpuStatus {
     match cell.lock() {
         Ok(guard) => guard.clone(),
@@ -69,6 +79,9 @@ pub(crate) fn read_status(cell: &Mutex<GpuStatus>) -> GpuStatus {
 /// `BadConfig`, never `AuditMismatch`, following the same principle
 /// `reason_from`'s doc comment states for `SaltTooLong` above: a programming
 /// error must not be reported as a hardware fault the user goes on to debug.
+// no production consumer on the stub leg as of Milestone 6: same reasoning as
+// `reason_from` above.
+#[allow(dead_code)]
 pub(crate) fn audit_wave(
     entropy: &[[u8; 16]],
     seeds: &[[u8; 64]],
@@ -100,6 +113,9 @@ pub(crate) fn audit_wave(
 /// same `tid` on every wave forever and is blind to every tid-dependent kernel
 /// bug — exactly the bug class the per-thread indexing (`states + tid`,
 /// `seeds + 64*tid`) can produce.
+// no production consumer on the stub leg as of Milestone 6: same reasoning as
+// `reason_from` above.
+#[allow(dead_code)]
 pub(crate) fn audit_indices<R: rand::Rng>(rng: &mut R, wave: usize) -> [usize; AUDITS_PER_WAVE] {
     assert!(wave > 0, "cannot audit an empty wave");
     std::array::from_fn(|_| rng.gen_range(0..wave))
@@ -118,6 +134,9 @@ pub(crate) fn audit_indices<R: rand::Rng>(rng: &mut R, wave: usize) -> [usize; A
 /// therefore stays 0 by construction. `send` is never called bare and never
 /// unwrapped: a `Disconnected` is a clean exit, not a panic on a background
 /// thread writing a backtrace across the Ratatui frame.
+// no production consumer on the stub leg as of Milestone 6: same reasoning as
+// `reason_from` above.
+#[allow(dead_code)]
 pub(crate) fn carve_and_send(
     tx: &Sender<Box<SeedBlock>>,
     entropy: &[[u8; 16]],
@@ -163,10 +182,16 @@ pub(crate) fn carve_and_send(
 /// `QOS_CLASS_USER_INITIATED = 0x19` and the signature
 /// `int pthread_set_qos_class_self_np(qos_class_t, int)` are from
 /// `<sys/qos.h>` and `<pthread/qos.h>`; `qos_class_t` is an `unsigned int` enum.
+// no production consumer on the stub leg as of Milestone 6: same reasoning as
+// `reason_from` above.
+#[allow(dead_code)]
 #[cfg(target_os = "macos")]
 pub(crate) fn set_thread_qos_user_initiated() -> i32 {
     const QOS_CLASS_USER_INITIATED: u32 = 0x19;
     extern "C" {
+        // no production consumer on the stub leg as of Milestone 6: dead
+        // alongside the function above that calls it.
+        #[allow(dead_code)]
         fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
     }
     // SAFETY: a libSystem call taking two scalars, valid on any thread, with no
@@ -186,6 +211,9 @@ pub(crate) fn set_thread_qos_user_initiated() -> i32 {
 /// would hang the UI thread forever with the terminal in raw mode), so the app
 /// reaps by polling `is_finished()`. A flag set only at the end of a function
 /// would strand a panicked engine as un-reapable forever.
+// no production consumer on the stub leg as of Milestone 6: constructed only
+// inside `run_guarded`, which is itself dead there for the same reason.
+#[allow(dead_code)]
 struct FinishGuard(Arc<AtomicBool>);
 
 impl Drop for FinishGuard {
@@ -210,6 +238,9 @@ impl Drop for FinishGuard {
 /// touches is read again after it unwinds. `health` is atomics plus a set-once
 /// `OnceLock`, the channel `Sender` is dropped with the body, and the Metal
 /// objects are created inside the body and die with it.
+// no production consumer on the stub leg as of Milestone 6: same reasoning as
+// `reason_from` above.
+#[allow(dead_code)]
 pub(crate) fn run_guarded<F>(health: &GpuHealth, finished: Arc<AtomicBool>, body: F)
 where
     F: FnOnce() -> Result<(), GpuDisableReason>,

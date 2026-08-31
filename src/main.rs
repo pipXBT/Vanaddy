@@ -90,6 +90,18 @@ fn main() -> io::Result<()> {
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
 
+    // A quit taken straight out of Searching leaves verified matches in the
+    // mpsc queue. This is the last chance to write them: `stop_search` was
+    // never called on this path, so without this drain they are found wallets
+    // destroyed at exit, and the summary below under-reports the run.
+    app.drain_matches();
+
+    // Restore the terminal FIRST, then wind the GPU down. Worst case in steady
+    // state is ~135 ms (one command buffer + the in-flight ring + one
+    // send_timeout); ~400 ms during startup. 600 ms covers both. Anything still
+    // running past that is abandoned rather than hanging the exit.
+    app.shutdown_gpu(Duration::from_millis(600));
+
     let total = app.counter.load(Ordering::Relaxed);
     let matches = app.total_matches;
     if total > 0 {
