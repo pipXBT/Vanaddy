@@ -469,10 +469,67 @@ impl App {
     }
 
     pub fn stop_search(&mut self) {
+        // FIRST, before anything is released. Everything still in the mpsc
+        // queue is a match a worker already found and verified; dropping the
+        // receiver below would discard it silently — never written to the CSV,
+        // never counted in total_matches. `drain_matches` is a `try_recv` loop,
+        // so it is bounded and non-blocking, and the CSV handle is still open
+        // at this point (it is closed at the bottom of this function).
+        self.drain_matches();
         self.stop.store(true, Ordering::Relaxed);
         self.rx = None;
+        // Dropping App's Receiver clone is producer wake-path #2: once App and
+        // every Rayon worker have dropped theirs, the channel disconnects and a
+        // producer that missed the stop flag still exits cleanly on
+        // SendTimeoutError::Disconnected instead of parking on send_timeout.
+        self.gpu_rx = None;
+        // NON-BLOCKING. signal_stop() is a flag store. The engines stay PARKED
+        // in gpu_engines and are reaped by the next start_search or by
+        // shutdown_gpu at process exit. Joining here would stall the 100 ms
+        // render tick for up to a whole wave (~135 ms in steady state, ~400 ms
+        // during startup) and forever if the GPU has wedged.
+        for engine in &self.gpu_engines {
+            engine.signal_stop();
+        }
         // Drops the pool handle; workers will exit on the next stop check.
         self.thread_pool = None;
+
+        // Task 6.7 addition: detect whether the file this handle points at is
+        // still the file at `csv_path`. Task 6.5 made start_search open the
+        // CSV once and hold the handle for the whole search — if the file is
+        // deleted or replaced mid-search, every write after that lands in the
+        // orphaned inode: invisible in the filesystem, freed only when this
+        // handle closes. Those writes still succeed, so csv_write_failures
+        // stays 0 and drain_matches keeps evicting matches from memory on the
+        // (now false) assumption that they are durably on disk. This is the
+        // only point where the handle is dropped, so it is the only point
+        // where this is detectable — one stat, not a re-open per row.
+        if let Some(ref file) = self.csv_file {
+            use std::os::unix::fs::MetadataExt;
+            if let Ok(held_meta) = file.metadata() {
+                match std::fs::metadata(&self.csv_path) {
+                    Ok(current_meta) => {
+                        if held_meta.dev() != current_meta.dev() || held_meta.ino() != current_meta.ino()
+                        {
+                            self.error_message = Some(format!(
+                                "The CSV file was replaced during the search; rows may have been \
+                                 written to a file no longer reachable at {}",
+                                self.csv_path.display()
+                            ));
+                        }
+                    }
+                    Err(_) => {
+                        self.error_message = Some(format!(
+                            "The CSV file was deleted during the search; rows may have been \
+                             written to a file no longer reachable at {}",
+                            self.csv_path.display()
+                        ));
+                    }
+                }
+            }
+        }
+        // Closes and flushes the CSV. start_search reopens it, re-asserting 0600.
+        self.csv_file = None;
         self.state = AppState::Configuring;
     }
 
@@ -878,6 +935,173 @@ mod tests {
 
         assert!(app.thread_pool.is_none());
         assert!(app.stop.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn stop_search_releases_everything_and_never_blocks_the_ui_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        // NOT `App::new()`. That is
+        // `with_gpu_status(GpuStatus::Unavailable("not probed"))`, so
+        // `gpu_requested` is false on EVERY target, no engine is ever spawned,
+        // and both the "never joins a GPU thread" timing assertion and the
+        // `gpu_rx` assertion below are vacuous everywhere — Task 6.1's own
+        // `app_new_never_requests_a_gpu_it_has_not_probed` asserts exactly that.
+        // Probe for real; the probe result decides whether it takes effect.
+        let mut app = App::with_gpu_status(crate::gpu::GpuEngine::probe());
+        app.gpu_requested = true;
+        app.csv_path = dir.path().join("vanity_wallets.csv");
+        app.chain = crate::chains::ChainKind::Evm;
+        app.vanity_prefix = "aaaaaaaa".into();
+        app.thread_count = "2".into();
+        app.validate().unwrap();
+        app.start_search();
+
+        // On a machine that really has a device, prove the precondition rather
+        // than assuming it: without a parked engine there is nothing a join
+        // could block on, and the timing assertion below means nothing.
+        #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
+        if app.validated_gpu {
+            assert!(
+                !app.gpu_engines.is_empty(),
+                "precondition: a real engine must be parked for the never-join assertion to mean anything"
+            );
+        }
+
+        assert!(app.csv_file.is_some(), "start_search holds the CSV open");
+
+        let before = Instant::now();
+        app.stop_search();
+        let elapsed = before.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "stop_search must never join a GPU thread: took {elapsed:?}"
+        );
+        assert!(app.stop.load(Ordering::Relaxed), "workers are told to exit");
+        assert!(app.rx.is_none(), "match channel released");
+        assert!(
+            app.gpu_rx.is_none(),
+            "GPU channel released — this is producer wake-path #2"
+        );
+        assert!(app.csv_file.is_none(), "CSV handle closed and flushed");
+        assert!(app.thread_pool.is_none());
+        assert!(app.state == AppState::Configuring);
+    }
+
+    #[test]
+    fn stop_search_drains_matches_still_queued_at_stop_time() {
+        // Every match sitting in the mpsc queue when the user presses Ctrl+C is
+        // a FOUND WALLET. Dropping the receiver without a final drain destroys
+        // it: never written to the CSV, never counted, unrecoverable. Step 3
+        // therefore drains FIRST, before `self.rx = None` and before the CSV
+        // handle is closed.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vanity_wallets.csv");
+        let mut app = App::new();
+        app.csv_path = path.clone();
+        app.csv_file = Some(open_csv_secure(&path).unwrap());
+        app.state = AppState::Searching;
+
+        let (tx, rx) = mpsc::channel();
+        app.rx = Some(rx);
+        for i in 0..5 {
+            tx.send(Match {
+                chain: "EVM".to_string(),
+                address: format!("0x{i:040x}"),
+                secret_hex: "44".repeat(32),
+                mnemonic: "abandon abandon abandon".to_string(),
+                verified: crate::verify::Verified::cpu_reference(),
+            })
+            .unwrap();
+        }
+        drop(tx);
+
+        app.stop_search();
+
+        assert_eq!(
+            app.total_matches, 5,
+            "a match queued at stop time is still a found wallet"
+        );
+        let csv = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            csv.lines().count(),
+            5,
+            "every queued match reached the CSV: {csv}"
+        );
+    }
+
+    #[test]
+    fn stop_search_flags_error_when_the_csv_file_is_replaced_mid_search() {
+        // Task 6.5 holds the CSV handle open for the whole search. If the file
+        // at csv_path is deleted and recreated while the handle is held, the
+        // held handle keeps writing into the orphaned inode -- invisible in
+        // the filesystem, freed only when the handle closes. Those writes
+        // still succeed, so csv_write_failures stays 0 and nothing else in
+        // this codebase would ever notice. stop_search is where the handle is
+        // dropped, so it is the only place this is detectable.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vanity_wallets.csv");
+        let mut app = App::new();
+        app.csv_path = path.clone();
+        app.csv_file = Some(open_csv_secure(&path).unwrap());
+        app.state = AppState::Searching;
+
+        // Replace the file at the same path: a new inode under the same name.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"").unwrap();
+
+        app.stop_search();
+
+        let msg = app
+            .error_message
+            .expect("replacing the file mid-search must be flagged");
+        assert!(
+            msg.contains("replaced"),
+            "error should explain the file was replaced: {msg}"
+        );
+    }
+
+    #[test]
+    fn stop_search_flags_error_when_the_csv_file_is_deleted_mid_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vanity_wallets.csv");
+        let mut app = App::new();
+        app.csv_path = path.clone();
+        app.csv_file = Some(open_csv_secure(&path).unwrap());
+        app.state = AppState::Searching;
+
+        std::fs::remove_file(&path).unwrap();
+
+        app.stop_search();
+
+        let msg = app
+            .error_message
+            .expect("deleting the file mid-search must be flagged");
+        assert!(
+            msg.contains("deleted"),
+            "error should explain the file was deleted: {msg}"
+        );
+    }
+
+    #[test]
+    fn stop_search_leaves_error_message_alone_when_the_csv_file_is_untouched() {
+        // Negative case: a normal stop, nothing replaced or deleted, must not
+        // set error_message. A test that only checks the positive case would
+        // pass on an implementation that always warns.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vanity_wallets.csv");
+        let mut app = App::new();
+        app.csv_path = path.clone();
+        app.csv_file = Some(open_csv_secure(&path).unwrap());
+        app.state = AppState::Searching;
+
+        app.stop_search();
+
+        assert!(
+            app.error_message.is_none(),
+            "an untouched CSV file must not be flagged: {:?}",
+            app.error_message
+        );
     }
 
     #[test]
