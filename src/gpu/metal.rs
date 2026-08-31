@@ -837,8 +837,16 @@ mod tests {
     }
 
     /// Counts chosen to straddle the threadgroup size (256), the SIMD width
-    /// (32), and the channel block size (512).
-    const RAGGED_COUNTS: [usize; 9] = [1, 2, 31, 33, 255, 257, 511, 512, 513];
+    /// (32), and the channel block size (512). The trailing `513, 2` is
+    /// deliberately appended out of order: it guarantees at least one wave
+    /// (513) is immediately followed by a SMALLER one (2), independent of
+    /// how the ascending run above it is edited. An ascending-only sequence
+    /// cannot exercise a shrinking-count transition at all, and that
+    /// transition is the only one `gpu_slots_beyond_count_keep_their_poison`
+    /// can use to catch a regression from "poison the whole buffer on every
+    /// wave" to "only ever grow the poisoned region as counts increase" —
+    /// see that test for why.
+    const RAGGED_COUNTS: [usize; 11] = [1, 2, 31, 33, 255, 257, 511, 512, 513, 513, 2];
 
     #[test]
     fn gpu_handles_ragged_counts() {
@@ -866,6 +874,19 @@ mod tests {
     /// A thread past the live count must not write. If it did, a later wave
     /// with a larger count would silently serve the previous wave's seed for
     /// those slots.
+    ///
+    /// The `n < prev_n` branch below is load-bearing, not defensive
+    /// decoration: every count in `RAGGED_COUNTS` up to that point is
+    /// ascending, so every slot the `[n, n+1, WAVE-1]` check above reads was
+    /// never written by any prior (necessarily smaller-or-equal) wave — it
+    /// would read `0xA5` whether `run_wave` re-poisons the WHOLE buffer on
+    /// every call (correct, what it does today) or only ever GROWS the
+    /// poisoned region as the largest-seen count increases (a regression).
+    /// Only a wave that is SMALLER than its predecessor can tell those two
+    /// apart: the gap `[n, prev_n)` held the predecessor's real, validly
+    /// computed seed bytes a moment ago, and only re-poisoning the whole
+    /// buffer overwrites them. `RAGGED_COUNTS`'s trailing `513, 2` exists
+    /// solely to trigger this branch once.
     #[test]
     fn gpu_slots_beyond_count_keep_their_poison() {
         let Some(mut gpu) = gpu_for_test() else {
@@ -873,6 +894,7 @@ mod tests {
         };
         let corpus = deterministic_corpus();
         let phrases: Vec<&str> = corpus.iter().map(|m| m.phrase()).collect();
+        let mut prev_n = 0usize;
         for n in RAGGED_COUNTS {
             let _ = gpu
                 .derive(&phrases[..n], crate::seed::PBKDF2_ROUNDS)
@@ -884,6 +906,18 @@ mod tests {
                     "slot {slot} was written by a wave of count {n}"
                 );
             }
+            if n < prev_n {
+                for slot in n..prev_n {
+                    assert_eq!(
+                        gpu.raw_seed_slot(slot),
+                        [0xA5u8; 64],
+                        "slot {slot} still held wave-of-{prev_n}'s seed after a \
+                         smaller wave of count {n} — the buffer was not fully \
+                         re-poisoned"
+                    );
+                }
+            }
+            prev_n = n;
         }
     }
 
