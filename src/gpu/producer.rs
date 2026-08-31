@@ -5,8 +5,14 @@
 //! panic guard are unit-tested on Linux and under `--no-default-features` too.
 //! Only `producer()` itself is `cfg`-gated.
 
-use super::{GpuDisableReason, GpuError, GpuStatus, AUDITS_PER_WAVE};
+use super::{
+    GpuCandidate, GpuDisableReason, GpuError, GpuHealth, GpuStatus, SeedBlock, AUDITS_PER_WAVE,
+    BLOCK,
+};
+use crossbeam_channel::{SendTimeoutError, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 
 /// Funnel every backend failure into the one sticky reason the UI reports.
 ///
@@ -97,6 +103,54 @@ pub(crate) fn audit_wave(
 pub(crate) fn audit_indices<R: rand::Rng>(rng: &mut R, wave: usize) -> [usize; AUDITS_PER_WAVE] {
     assert!(wave > 0, "cannot audit an empty wave");
     std::array::from_fn(|_| rng.gen_range(0..wave))
+}
+
+/// Carve a finished wave into `seeds.len() / BLOCK` blocks and hand them to the
+/// workers. Returns `false` when the wave loop must stop: the producer's stop
+/// flag, a self-disable, or the receiver side hanging up.
+///
+/// The `zip` below is the ONE place entropy and seeds meet. Nothing downstream
+/// may reorder, filter or sort — see `SeedBlock::with_capacity`.
+///
+/// Backpressure is a 100 ms `send_timeout` RETRY, never a drop. A full queue
+/// means the CPU workers are the binding constraint, and self-throttling to
+/// exactly the rate they can absorb is the correct response; `blocks_dropped`
+/// therefore stays 0 by construction. `send` is never called bare and never
+/// unwrapped: a `Disconnected` is a clean exit, not a panic on a background
+/// thread writing a backtrace across the Ratatui frame.
+pub(crate) fn carve_and_send(
+    tx: &Sender<Box<SeedBlock>>,
+    entropy: &[[u8; 16]],
+    seeds: &[[u8; 64]],
+    stop: &AtomicBool,
+    health: &GpuHealth,
+) -> bool {
+    debug_assert_eq!(entropy.len(), seeds.len());
+    for (e_chunk, s_chunk) in entropy.chunks_exact(BLOCK).zip(seeds.chunks_exact(BLOCK)) {
+        let mut block = Box::new(SeedBlock::with_capacity(BLOCK));
+        for (e, s) in e_chunk.iter().zip(s_chunk.iter()) {
+            block.push(GpuCandidate {
+                entropy: *e,
+                seed: *s,
+            });
+        }
+        let mut pending = Some(block);
+        while let Some(b) = pending.take() {
+            if stop.load(Ordering::Relaxed) || health.disable.load(Ordering::Relaxed) {
+                drop(b);
+                return false;
+            }
+            match tx.send_timeout(b, Duration::from_millis(100)) {
+                Ok(()) => {}
+                Err(SendTimeoutError::Timeout(b)) => pending = Some(b),
+                Err(SendTimeoutError::Disconnected(b)) => {
+                    drop(b);
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -264,5 +318,132 @@ mod tests {
             "indices must vary across waves, saw {}",
             seen.len()
         );
+    }
+
+    /// A fresh, clean health cell. `GpuHealth`'s `reason` field is private to
+    /// `crate::gpu`, and this module is a descendant of it, so the literal is
+    /// legal here and needs no constructor on the type itself.
+    fn fresh_health() -> GpuHealth {
+        GpuHealth {
+            disable: std::sync::atomic::AtomicBool::new(false),
+            reason: std::sync::OnceLock::new(),
+            seeds_delivered: std::sync::atomic::AtomicU64::new(0),
+            blocks_dropped: std::sync::atomic::AtomicU64::new(0),
+            verify_rejections: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// `n` candidates whose entropy and seed both encode their index, so a
+    /// re-ordering or a mis-pairing anywhere in the carve is detectable.
+    fn marked_wave(n: usize) -> (Vec<[u8; 16]>, Vec<[u8; 64]>) {
+        let mut entropy = vec![[0u8; 16]; n];
+        let mut seeds = vec![[0u8; 64]; n];
+        for i in 0..n {
+            entropy[i][..8].copy_from_slice(&(i as u64).to_be_bytes());
+            seeds[i][..8].copy_from_slice(&(i as u64).to_be_bytes());
+            seeds[i][56..].copy_from_slice(&(i as u64).to_be_bytes());
+        }
+        (entropy, seeds)
+    }
+
+    #[test]
+    fn carve_and_send_delivers_sixteen_blocks_of_512_in_pairing_order() {
+        let (tx, rx) = crossbeam_channel::bounded(super::super::CHANNEL_CAPACITY);
+        let stop = AtomicBool::new(false);
+        let health = fresh_health();
+        let (entropy, seeds) = marked_wave(8_192);
+
+        assert!(carve_and_send(&tx, &entropy, &seeds, &stop, &health));
+
+        for c in 0..16 {
+            let block = rx
+                .try_recv()
+                .unwrap_or_else(|e| panic!("block {c} missing: {e}"));
+            assert_eq!(block.len(), BLOCK, "block {c} is not {BLOCK} candidates");
+            let cands = block.chunks(BLOCK).next().expect("one full chunk");
+            for (j, cand) in cands.iter().enumerate() {
+                let want = (c * BLOCK + j) as u64;
+                assert_eq!(
+                    u64::from_be_bytes(cand.entropy[..8].try_into().unwrap()),
+                    want,
+                    "block {c} slot {j}: entropy out of order"
+                );
+                assert_eq!(
+                    u64::from_be_bytes(cand.seed[..8].try_into().unwrap()),
+                    want,
+                    "block {c} slot {j}: seed paired with the wrong entropy"
+                );
+            }
+        }
+        assert!(rx.try_recv().is_err(), "exactly 16 blocks, no more");
+    }
+
+    #[test]
+    fn carve_and_send_reports_false_when_the_receiver_hung_up() {
+        let (tx, rx) = crossbeam_channel::bounded::<Box<SeedBlock>>(super::super::CHANNEL_CAPACITY);
+        drop(rx);
+        let stop = AtomicBool::new(false);
+        let health = fresh_health();
+        let (entropy, seeds) = marked_wave(8_192);
+
+        let started = std::time::Instant::now();
+        assert!(!carve_and_send(&tx, &entropy, &seeds, &stop, &health));
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "Disconnected must be immediate, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn carve_and_send_retries_under_backpressure_and_exits_on_stop() {
+        // Capacity 2 and nobody draining: the third block hits the 100 ms
+        // timeout branch and must be RETRIED, never dropped.
+        let (tx, _rx) = crossbeam_channel::bounded(2);
+        let stop = AtomicBool::new(false);
+        let health = fresh_health();
+        let (entropy, seeds) = marked_wave(8_192);
+
+        let started = std::time::Instant::now();
+        let finished = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_millis(300));
+                stop.store(true, Ordering::Relaxed);
+            });
+            carve_and_send(&tx, &entropy, &seeds, &stop, &health)
+        });
+
+        assert!(!finished, "must report stop");
+        assert!(
+            started.elapsed() >= Duration::from_millis(300),
+            "must have blocked, not dropped"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "must notice stop within one timeout, took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            health.blocks_dropped.load(Ordering::Relaxed),
+            0,
+            "backpressure throttles, it never discards"
+        );
+    }
+
+    #[test]
+    fn carve_and_send_exits_immediately_when_health_is_already_disabled() {
+        let (tx, rx) = crossbeam_channel::bounded(super::super::CHANNEL_CAPACITY);
+        let stop = AtomicBool::new(false);
+        let health = fresh_health();
+        health.raise(GpuDisableReason::AuditMismatch { index: 5_183 });
+        let (entropy, seeds) = marked_wave(8_192);
+
+        let started = std::time::Instant::now();
+        assert!(!carve_and_send(&tx, &entropy, &seeds, &stop, &health));
+        assert!(
+            rx.try_recv().is_err(),
+            "a disabled GPU must deliver nothing"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
     }
 }
