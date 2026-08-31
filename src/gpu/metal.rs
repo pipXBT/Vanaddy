@@ -8,8 +8,8 @@
 use crate::gpu::kernel_src::KERNEL_SRC;
 use crate::gpu::pack::{pack_key_block, pack_salt_block, KeyBlock};
 use crate::gpu::{
-    classify_command_buffer_status, GpuError, GpuStatus, DISPATCHES_PER_COMMAND_BUFFER,
-    ITERS_PER_DISPATCH, MAX_THREADS_PER_THREADGROUP, PIPELINE_DEPTH, WAVE,
+    classify_command_buffer_status, GpuError, GpuStatus, Schedule, MAX_THREADS_PER_THREADGROUP,
+    PIPELINE_DEPTH, WAVE,
 };
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::ProtocolObject;
@@ -247,6 +247,7 @@ impl MetalPbkdf2 {
         keys: &[KeyBlock],
         salt_block: &[u64; 16],
         total_iters: u32,
+        schedule: Schedule,
         stop: &AtomicBool,
     ) -> Result<Option<&[[u8; 64]]>, GpuError> {
         assert!(total_iters >= 1, "iterations must be at least 1"); // mirrors src/pbkdf2_lanes.rs:26
@@ -330,6 +331,8 @@ impl MetalPbkdf2 {
         let mut remaining = total_iters - 1; // 2047 for BIP-39
         let mut ring: [Option<Cb>; PIPELINE_DEPTH] = Default::default();
         let mut slot_ix = 0usize;
+        let mut dispatch_ix = 0usize;
+        let per_cb = schedule.dispatches_per_command_buffer();
         loop {
             if stop.load(Ordering::Relaxed) {
                 // Drain-then-check the WHOLE ring, not just what happens to be
@@ -371,9 +374,10 @@ impl MetalPbkdf2 {
                     enc.setBuffer_offset_atIndex(Some(&self.bufs.states), 0, 0);
                     enc.setBuffer_offset_atIndex(Some(&self.bufs.seeds), 0, 1);
                 }
-                for _ in 0..DISPATCHES_PER_COMMAND_BUFFER {
-                    let iters = remaining.min(ITERS_PER_DISPATCH);
+                for _ in 0..per_cb {
+                    let iters = remaining.min(schedule.iters_for(dispatch_ix));
                     remaining -= iters;
+                    dispatch_ix += 1;
                     let p = Params {
                         count,
                         iters,
@@ -450,12 +454,23 @@ impl MetalPbkdf2 {
         Ok(Some(&all[..keys.len()]))
     }
 
-    /// Convenience wrapper: pack phrases, run one wave, copy the seeds out.
-    /// The `Vec<KeyBlock>` holds the plaintext phrases, so it is `Zeroizing`.
+    /// One wave under the measured production schedule. This is the entry point
+    /// the producer thread uses.
     pub fn derive(
         &mut self,
         phrases: &[&str],
         iters: u32,
+    ) -> Result<Vec<Zeroizing<[u8; 64]>>, GpuError> {
+        self.derive_with_schedule(phrases, iters, Schedule::Production)
+    }
+
+    /// One wave under an explicit dispatch schedule. The `Vec<KeyBlock>` holds
+    /// the plaintext phrases, so it is `Zeroizing`.
+    pub fn derive_with_schedule(
+        &mut self,
+        phrases: &[&str],
+        iters: u32,
+        schedule: Schedule,
     ) -> Result<Vec<Zeroizing<[u8; 64]>>, GpuError> {
         let salt = pack_salt_block(crate::seed::BIP39_SALT)?;
         let keys: Zeroizing<Vec<KeyBlock>> = Zeroizing::new(
@@ -464,7 +479,7 @@ impl MetalPbkdf2 {
                 .map(|p| pack_key_block(p.as_bytes()))
                 .collect(),
         );
-        match self.run_wave(&keys, &salt, iters, &AtomicBool::new(false))? {
+        match self.run_wave(&keys, &salt, iters, schedule, &AtomicBool::new(false))? {
             Some(seeds) => Ok(seeds.iter().map(|s| Zeroizing::new(*s)).collect()),
             None => Err(GpuError::BadConfig(
                 "wave abandoned without a stop request".to_string(),
@@ -667,6 +682,38 @@ mod tests {
                 "default threadgroup {tg} exceeds the measured M1 optimum clamp of \
                  {MAX_THREADS_PER_THREADGROUP} (384 measured 13% SLOWER here)"
             );
+        }
+    }
+
+    /// The kernel is resumable: all live state is in `states`, so a wave can be
+    /// split across arbitrarily many dispatches. If that were not exactly true,
+    /// depth-3 pipelining over one `states` buffer would be unsound. Three
+    /// schedules, one of them irregular, must be BIT-IDENTICAL.
+    #[test]
+    fn gpu_chunk_schedule_invariance() {
+        let Some(mut gpu) = gpu_for_test() else {
+            return;
+        };
+        let phrases = [CANONICAL_PHRASE, SHORTEST_PHRASE, LONGEST_PHRASE];
+        let schedules = [
+            ("one-shot", Schedule::Uniform(2047)),
+            ("production R=8", Schedule::Production),
+            ("irregular", Schedule::Irregular(&[1, 1000, 46, 1000])),
+            ("R=1", Schedule::Uniform(1)),
+        ];
+        for (label, schedule) in schedules {
+            let out = gpu
+                .derive_with_schedule(&phrases, crate::seed::PBKDF2_ROUNDS, schedule)
+                .expect("wave");
+            assert_eq!(out.len(), phrases.len());
+            assert_eq!(hex::encode(*out[0]), CANONICAL_SEED_HEX, "schedule {label}");
+            for (i, phrase) in phrases.iter().enumerate() {
+                assert_eq!(
+                    hex::encode(*out[i]),
+                    hex::encode(ring_reference(phrase, crate::seed::PBKDF2_ROUNDS)),
+                    "schedule {label} index {i}"
+                );
+            }
         }
     }
 

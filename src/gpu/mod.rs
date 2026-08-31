@@ -271,6 +271,58 @@ const _: fn() = || {
     assert_send_sync::<GpuHealth>();
 };
 
+/// How one wave's 2047 U-iterations are cut into dispatches.
+///
+/// `Production` is the measured schedule. The other two exist so the self-test
+/// and `gpu_chunk_schedule_invariance` can prove that the resumable kernel's
+/// output does not depend on where the wave is cut — the single property that
+/// makes `PIPELINE_DEPTH` command buffers in flight over one `states` buffer
+/// safe. Metal ordering guarantees are relied on here: command buffers on one
+/// queue execute in commit order, and dispatches inside one serial compute
+/// encoder are barriered. Both are documented and were verified empirically.
+/// Do NOT reach for `MTLFence` speculatively; add it only if this test fails.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Schedule {
+    /// `ITERS_PER_DISPATCH` per dispatch, `DISPATCHES_PER_COMMAND_BUFFER` per
+    /// command buffer: 2047 = 255*8 + 7 → 256 dispatches, 64 command buffers,
+    /// ~8.8 ms each.
+    Production,
+    /// A fixed number of iterations per dispatch, one dispatch per command
+    /// buffer. `Uniform(2047)` is the one-shot case.
+    Uniform(u32),
+    /// An explicit, deliberately irregular sequence; the last entry repeats if
+    /// more dispatches are needed. One dispatch per command buffer.
+    Irregular(&'static [u32]),
+}
+
+impl Schedule {
+    /// Iterations for the `n`-th iterate dispatch of a wave (0-based), before
+    /// clamping to what remains.
+    pub fn iters_for(&self, n: usize) -> u32 {
+        match self {
+            Schedule::Production => ITERS_PER_DISPATCH,
+            Schedule::Uniform(r) => (*r).max(1),
+            Schedule::Irregular(steps) => {
+                if steps.is_empty() {
+                    ITERS_PER_DISPATCH
+                } else {
+                    steps[n.min(steps.len() - 1)].max(1)
+                }
+            }
+        }
+    }
+
+    /// One dispatch per command buffer for the non-production schedules, so an
+    /// irregular cut also spreads across the depth-3 ring — which is where a
+    /// mis-ordered command buffer would show up.
+    pub fn dispatches_per_command_buffer(&self) -> usize {
+        match self {
+            Schedule::Production => DISPATCHES_PER_COMMAND_BUFFER,
+            _ => 1,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
