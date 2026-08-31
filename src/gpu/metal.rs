@@ -99,6 +99,15 @@ pub struct MetalPbkdf2 {
     tg: usize,
     tew: usize,
     maxt: usize,
+    /// Test-only fault injection. `Cell`, not `&mut self`, because
+    /// `check_status` runs inside the autorelease-pool closure, which already
+    /// holds shared borrows of the queue, the pipelines and the buffers.
+    /// `MetalPbkdf2` is thread-confined (it holds `!Send` Metal objects), so
+    /// `Cell` costs nothing.
+    #[cfg(test)]
+    fault_at_command_buffer: std::cell::Cell<Option<u32>>,
+    #[cfg(test)]
+    command_buffers_checked: std::cell::Cell<u32>,
 }
 
 impl MetalPbkdf2 {
@@ -185,6 +194,10 @@ impl MetalPbkdf2 {
             tg,
             tew,
             maxt,
+            #[cfg(test)]
+            fault_at_command_buffer: std::cell::Cell::new(None),
+            #[cfg(test)]
+            command_buffers_checked: std::cell::Cell::new(0),
         })
     }
 
@@ -204,7 +217,26 @@ impl MetalPbkdf2 {
         (self.tew, self.maxt)
     }
 
+    /// Make the `nth` command-buffer status check of the NEXT wave report a
+    /// synthetic `MTLCommandBufferStatusError` (5). The counter resets at the
+    /// start of every `run_wave`, so `nth` is always relative to one wave.
+    #[cfg(test)]
+    pub fn inject_command_buffer_fault(&self, nth: u32) {
+        self.fault_at_command_buffer.set(Some(nth));
+    }
+
     fn check_status(&self, cb: &ProtocolObject<dyn MTLCommandBuffer>) -> Result<(), GpuError> {
+        #[cfg(test)]
+        {
+            let n = self.command_buffers_checked.get() + 1;
+            self.command_buffers_checked.set(n);
+            if self.fault_at_command_buffer.get() == Some(n) {
+                return classify_command_buffer_status(
+                    5,
+                    Some("injected command-buffer fault".to_string()),
+                );
+            }
+        }
         let status = cb.status().0 as i64;
         let message = cb.error().map(|e| e.localizedDescription().to_string());
         classify_command_buffer_status(status, message)
@@ -258,6 +290,9 @@ impl MetalPbkdf2 {
             )));
         }
         let count = keys.len() as u32;
+
+        #[cfg(test)]
+        self.command_buffers_checked.set(0);
 
         // Poison the seeds region so a missing finalize yields obvious garbage
         // rather than the PREVIOUS wave's still-valid 64-byte seed.
@@ -945,6 +980,39 @@ mod tests {
                 .map(|s| hex::encode(**s))
                 .collect();
             assert_eq!(first, again, "wave {round} differed from the first");
+        }
+    }
+
+    /// The whole wave is discarded on ANY command-buffer failure — there is no
+    /// partial-success shape. Without this, a mid-wave GPU reset silently drops
+    /// 8 of 2048 U-iterations and finalize writes a T that is the XOR of only
+    /// 2,039 values.
+    #[test]
+    fn gpu_command_buffer_error_yields_err_not_partial_output() {
+        let Some(mut gpu) = gpu_for_test() else {
+            return;
+        };
+
+        // Baseline: the same wave succeeds with no fault injected.
+        let good = gpu
+            .derive(&[CANONICAL_PHRASE], crate::seed::PBKDF2_ROUNDS)
+            .expect("wave");
+        assert_eq!(hex::encode(*good[0]), CANONICAL_SEED_HEX);
+
+        // Fault the 3rd status check of the next wave: one prologue plus two
+        // iterate command buffers have already been accepted, so this is
+        // squarely mid-wave, not at a boundary.
+        gpu.inject_command_buffer_fault(3);
+        match gpu.derive(&[CANONICAL_PHRASE], crate::seed::PBKDF2_ROUNDS) {
+            Err(GpuError::CommandBuffer { status, message }) => {
+                assert_eq!(status, 5);
+                assert!(message.contains("injected"), "{message}");
+            }
+            Err(other) => panic!("wrong error: {other:?}"),
+            Ok(seeds) => panic!(
+                "a faulted wave produced {} seeds instead of an error",
+                seeds.len()
+            ),
         }
     }
 }
