@@ -14,6 +14,8 @@ use std::{
     time::Instant,
 };
 
+use crate::gpu::{GpuEngine, GpuHealth, GpuRx, GpuStatus};
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum AppState {
     Configuring,
@@ -47,12 +49,62 @@ pub struct App {
     pub stop: Arc<AtomicBool>,
     pub rx: Option<mpsc::Receiver<Match>>,
     pub thread_pool: Option<rayon::ThreadPool>,
+
+    // ---- GPU offload (EVM only). See docs/superpowers/specs/2026-08-26-metal-gpu-pbkdf2-design.md
+    /// From `GpuEngine::probe()` at startup; promoted to `Running`/`Disabled`
+    /// by `drain_matches`. This is the single source of truth the TUI renders.
+    pub gpu_status: GpuStatus,
+    /// The form toggle. Defaults to "on" iff the probe found a device and the
+    /// env lever did not veto it.
+    pub gpu_requested: bool,
+    /// `VANADDY_GPU=0` or `VANADDY_NO_GPU=1` was set. Env ALWAYS wins over the
+    /// form; kept as a field so the TUI can say *why* the toggle is stuck off.
+    pub gpu_env_off: bool,
+    /// Mirrors `validated_thread_count`: the decision `validate()` made, frozen
+    /// so `start_search` acts on what the user saw, not on a status that may
+    /// have changed since.
+    pub validated_gpu: bool,
+    /// Shared fault cell. Written by the producer thread and by Rayon workers,
+    /// read by `drain_matches` on the UI tick. Never a Mutex on this path.
+    pub gpu_health: Arc<GpuHealth>,
+    /// App's own clone of the seed channel. Dropping it is shutdown wake-path
+    /// #2: once App and every worker have dropped their clones, a producer that
+    /// missed the stop flag still exits on `Disconnected`.
+    pub gpu_rx: Option<GpuRx>,
+    /// Parked engines awaiting reap. NEVER joined on the UI thread — see
+    /// `stop_search` and `shutdown_gpu`.
+    ///
+    /// `pub` like every other `App` field, and not for style: the first READ is
+    /// Task 6.6 Step 4, so a private field here fires `warning: field
+    /// `gpu_engines` is never read` and pushes the clippy count from 12 to 13
+    /// through five consecutive gates (6.1, 6.2, 6.3, 6.4, 6.5). Measured.
+    pub gpu_engines: Vec<GpuEngine>,
 }
 
 impl App {
+    /// The no-probe constructor: used by tests and by any caller that has not
+    /// run `GpuEngine::probe()`. Deliberately yields a status that
+    /// `gpu_effective()` rejects, so nothing can spawn a GPU by accident.
     pub fn new() -> Self {
+        App::with_gpu_status(GpuStatus::Unavailable("not probed".to_string()))
+    }
+
+    /// The real constructor. `main()` probes for a Metal device BEFORE entering
+    /// raw mode and hands the result in here.
+    pub fn with_gpu_status(gpu_status: GpuStatus) -> Self {
         let recommended_threads = detect_optimal_threads();
-        App {
+        // The one env read in the binary. The local is deliberately NOT named
+        // `gpu_env_off`: that would shadow the function in the value namespace
+        // for the rest of this body.
+        let env_off = gpu_env_off(
+            std::env::var("VANADDY_GPU").ok().as_deref(),
+            std::env::var("VANADDY_NO_GPU").ok().as_deref(),
+        );
+        // Default the toggle on only when a device actually exists. `Ready` is
+        // the post-probe resting state; anything else means there is nothing to
+        // turn on.
+        let gpu_requested = !env_off && matches!(gpu_status, GpuStatus::Ready { .. });
+        let mut app = App {
             state: AppState::Configuring,
             should_quit: false,
             active_field: 0,
@@ -72,7 +124,24 @@ impl App {
             stop: Arc::new(AtomicBool::new(false)),
             rx: None,
             thread_pool: None,
+            gpu_status,
+            gpu_requested,
+            gpu_env_off: env_off,
+            validated_gpu: false,
+            gpu_health: Arc::new(GpuHealth::default()),
+            gpu_rx: None,
+            gpu_engines: Vec::new(),
+        };
+        // Make the veto visible. A `Ready` probe the environment vetoed becomes
+        // `Disabled(UserOff)`, so the config row can say *why* the toggle refuses
+        // to turn on — this is the ` GPU:      [disabled — UserOff]` row Task 8.3
+        // Step 9 checks for. ONLY `Ready` is rewritten: when there was no device
+        // to begin with, `Unavailable(..)` is the more informative status and
+        // must survive.
+        if env_off && matches!(app.gpu_status, GpuStatus::Ready { .. }) {
+            app.gpu_status = GpuStatus::Disabled(crate::gpu::GpuDisableReason::UserOff);
         }
+        app
     }
 
     pub fn field_count(&self) -> usize {
@@ -81,6 +150,22 @@ impl App {
         } else {
             5
         }
+    }
+
+    /// The GPU actually runs iff: the user wants it, a device exists and has not
+    /// faulted, and the chain is EVM.
+    ///
+    /// ADVISORY ONLY. `validate()` never returns `Err` because this is false —
+    /// the CPU path is complete on its own, and this value goes stale the moment
+    /// a fault is raised mid-run. Blocking a search on it would strand the user
+    /// in the config screen with a toggle they cannot satisfy.
+    pub fn gpu_effective(&self) -> bool {
+        self.gpu_requested
+            && matches!(
+                self.gpu_status,
+                GpuStatus::Ready { .. } | GpuStatus::Initializing | GpuStatus::Running { .. }
+            )
+            && self.chain == ChainKind::Evm
     }
 
     pub fn is_text_field(&self) -> bool {
@@ -331,6 +416,30 @@ fn append_match_row(path: &Path, m: &Match) -> io::Result<()> {
     wtr.write_record([&m.chain, &m.address, &m.secret_hex, &m.mnemonic])?;
     wtr.flush()?;
     Ok(())
+}
+
+/// Rollback lever #2: `VANADDY_GPU=0` (equivalently `VANADDY_NO_GPU=1`) turns the
+/// GPU off with no rebuild. Env always wins over the TUI toggle, so an operator
+/// can kill the feature on a machine without editing anything.
+///
+/// Pure over the two values rather than reading the environment itself: `cargo
+/// test` runs every test as a thread in ONE process, so a test that mutated the
+/// process environment would race every other test.
+///
+/// `VANADDY_GPU` is value-based because a user types `VANADDY_GPU=0`.
+/// `VANADDY_NO_GPU` is presence-based because `gpu_for_test` in
+/// `src/gpu/metal.rs` already gates on `var_os("VANADDY_NO_GPU").is_some()`.
+pub fn gpu_env_off(vanaddy_gpu: Option<&str>, vanaddy_no_gpu: Option<&str>) -> bool {
+    if vanaddy_no_gpu.is_some() {
+        return true;
+    }
+    match vanaddy_gpu {
+        Some(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "false" | "no"
+        ),
+        None => false,
+    }
 }
 
 pub fn detect_optimal_threads() -> usize {
@@ -598,6 +707,69 @@ mod tests {
 
         assert!(app.thread_pool.is_none());
         assert!(app.stop.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn gpu_effective_requires_user_device_and_evm() {
+        use crate::gpu::{GpuDisableReason, GpuStatus};
+
+        let ready = || GpuStatus::Ready {
+            device: "Apple M1".to_string(),
+        };
+
+        // The happy case: user wants it, a device exists, chain is EVM.
+        // Set the status explicitly instead of trusting the constructor: the env
+        // lever rewrites a `Ready` probe into `Disabled(UserOff)`, so a developer
+        // with VANADDY_NO_GPU=1 exported in their shell must still see this test
+        // exercise the happy path.
+        let mut app = App::with_gpu_status(ready());
+        app.gpu_status = ready();
+        app.chain = crate::chains::ChainKind::Evm;
+        app.gpu_requested = true;
+        assert!(app.gpu_effective());
+
+        // Initializing and Running are both "the GPU is live for this run".
+        app.gpu_status = GpuStatus::Initializing;
+        assert!(app.gpu_effective());
+        app.gpu_status = GpuStatus::Running {
+            device: "Apple M1".to_string(),
+        };
+        assert!(app.gpu_effective());
+
+        // User said no.
+        app.gpu_status = ready();
+        app.gpu_requested = false;
+        assert!(!app.gpu_effective());
+
+        // Wrong chain: the GPU pipeline is EVM-only.
+        app.gpu_requested = true;
+        app.chain = crate::chains::ChainKind::Solana;
+        assert!(!app.gpu_effective());
+
+        // No device.
+        app.chain = crate::chains::ChainKind::Evm;
+        app.gpu_status = GpuStatus::Unavailable("no Metal device".to_string());
+        assert!(!app.gpu_effective());
+
+        // Disabled is sticky: gpu_effective() must never resurrect a faulted GPU.
+        app.gpu_status = GpuStatus::Disabled(GpuDisableReason::AuditMismatch { index: 5183 });
+        assert!(!app.gpu_effective());
+    }
+
+    #[test]
+    fn app_new_never_requests_a_gpu_it_has_not_probed() {
+        // App::new() is the test/no-probe constructor. It must default to a
+        // status that gpu_effective() rejects, so a test that forgets to set up
+        // the GPU can never accidentally spawn a real one.
+        let app = App::new();
+        assert!(matches!(
+            app.gpu_status,
+            crate::gpu::GpuStatus::Unavailable(_)
+        ));
+        assert!(!app.gpu_requested);
+        assert!(!app.validated_gpu);
+        assert!(app.gpu_rx.is_none());
+        assert!(!app.gpu_effective());
     }
 
     /// The CSV holds plaintext seed phrases. Both halves of the 0600 guarantee
