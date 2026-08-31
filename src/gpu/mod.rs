@@ -29,6 +29,7 @@ pub use selftest::SelfTestError;
     path = "stub.rs"
 )]
 pub mod backend;
+pub(crate) mod producer;
 
 pub use backend::probe;
 
