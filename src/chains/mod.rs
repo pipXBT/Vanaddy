@@ -346,6 +346,82 @@ mod tests {
         );
     }
 
+    /// A 512-candidate GPU block is ~25.9 ms of work. Ctrl+C must not have to
+    /// wait for it, so `drain_gpu_block` re-reads `stop` at every
+    /// `C::BATCH * GPU_CHUNK_BATCHES` = 64-candidate boundary (~3.2 ms), and
+    /// counts only chunks it actually finished. Milestone 2's
+    /// `gpu_drain_honours_stop_mid_block` covers the already-stopped case;
+    /// this covers stopping part-way through a block.
+    #[test]
+    fn gpu_drain_stop_granularity_is_one_chunk() {
+        use crate::gpu::{GpuCandidate, GpuHealth, SeedBlock};
+
+        // 4096 candidates = 64 chunks. Far more than can be drained between
+        // the moment the first chunk lands and the moment the poll loop below
+        // notices it and sets stop.
+        const N: usize = 4096;
+        let mut block = SeedBlock::with_capacity(N);
+        for i in 0..N {
+            let mut seed = [0u8; 64];
+            for (j, b) in seed.iter_mut().enumerate() {
+                *b = (i as u32)
+                    .wrapping_mul(2_654_435_761)
+                    .wrapping_add(j as u32) as u8;
+            }
+            let mut entropy = [0u8; 16];
+            entropy[..4].copy_from_slice(&(i as u32).to_le_bytes());
+            block.push(GpuCandidate { entropy, seed });
+        }
+
+        // 8 hex chars is 1 in 2^32: nothing in this block can match, so the
+        // verify gate is never entered and no Match is ever emitted.
+        let matcher = Matcher::new("ffffffff".into(), String::new(), false, ChainKind::Evm);
+        let stop = AtomicBool::new(false);
+        let counter = AtomicU64::new(0);
+        let health = GpuHealth::default();
+        let (tx, rx) = mpsc::channel();
+        let chunk = (evm::Evm::BATCH * GPU_CHUNK_BATCHES) as u64;
+        assert_eq!(chunk, 64, "chunk is BATCH(4) * GPU_CHUNK_BATCHES(16)");
+
+        thread::scope(|s| {
+            s.spawn(|| {
+                drain_gpu_block::<evm::Evm>(&block, &matcher, &stop, &counter, &tx, &health)
+            });
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while counter.load(Ordering::Relaxed) < chunk && std::time::Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(1));
+            }
+            stop.store(true, Ordering::Relaxed);
+        });
+
+        let n = counter.load(Ordering::Relaxed);
+        assert!(
+            n >= chunk,
+            "drain must count at least one whole chunk, got {n}"
+        );
+        assert!(
+            n < N as u64,
+            "stop must abandon the rest of the block, got {n} of {N}"
+        );
+        assert_eq!(
+            n % chunk,
+            0,
+            "counter advances one whole chunk at a time, got {n}"
+        );
+        assert_eq!(
+            health.seeds_delivered.load(Ordering::Relaxed),
+            n,
+            "seeds_delivered must track the counter exactly"
+        );
+        assert!(
+            !health.disable.load(Ordering::Relaxed),
+            "a clean drain raises no fault"
+        );
+        assert_eq!(health.verify_rejections.load(Ordering::Relaxed), 0);
+        drop(tx);
+        assert!(rx.try_recv().is_err(), "an 8-hex-char prefix cannot match");
+    }
+
     /// The routing property `chain_kind_search_with_no_gpu_source_is_unchanged`
     /// cannot see: with `gpu: Some(rx)` actually holding a block, `ChainKind::Evm
     /// .search` must route through `search_hybrid` and drain it. If the `Evm` arm
