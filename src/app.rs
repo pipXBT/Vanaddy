@@ -544,6 +544,55 @@ impl App {
     }
 
     pub fn drain_matches(&mut self) {
+        // ---- 1. Fault promotion. Runs first, on every 100 ms tick, so a fault
+        // raised by a Rayon worker or the producer becomes visible within one
+        // frame. STICKY for the process: gpu_requested and validated_gpu go
+        // false, so gpu_effective() can never turn the GPU back on without a
+        // restart. A mis-derived seed is a correctness fault, not a transient.
+        let disabled_now = self.gpu_health.disable.load(Ordering::Relaxed);
+        if disabled_now && !matches!(self.gpu_status, GpuStatus::Disabled(_)) {
+            // `raise` sets the reason BEFORE the flag, so by the time the flag
+            // is observed the reason is there. Panicked is the defensive floor.
+            let reason = self
+                .gpu_health
+                .take_reason()
+                .unwrap_or(crate::gpu::GpuDisableReason::Panicked);
+            self.gpu_status = GpuStatus::Disabled(reason);
+            self.gpu_requested = false;
+            self.validated_gpu = false;
+            // Releasing the receiver stops the workers draining, wakes a
+            // producer that has not noticed, and keeps the stats pane from
+            // rendering a live GPU line AND a fault line in the same frame.
+            self.gpu_rx = None;
+        }
+
+        // ---- 2. Status refresh: Initializing -> Running once the shader has
+        // compiled and the self-test has passed. Only while this run owns a
+        // live channel, and never over a Disabled status.
+        if self.gpu_rx.is_some() && !matches!(self.gpu_status, GpuStatus::Disabled(_)) {
+            if let Some(engine) = self.gpu_engines.last() {
+                let s = engine.status();
+                if s != self.gpu_status {
+                    self.gpu_status = s;
+                }
+            }
+        }
+
+        // ---- 3. Unexpected exit: the engine finished but nothing was raised.
+        let engine_finished = self.gpu_engines.iter().any(|e| e.is_finished());
+        if is_unexpected_gpu_exit(GpuExitCheck {
+            state: self.state,
+            gpu_live: self.gpu_rx.is_some(),
+            disabled: self.gpu_health.disable.load(Ordering::Relaxed),
+            engine_finished,
+        }) {
+            self.gpu_status = GpuStatus::Disabled(crate::gpu::GpuDisableReason::Panicked);
+            self.gpu_requested = false;
+            self.validated_gpu = false;
+            self.gpu_rx = None;
+        }
+
+        // ---- 4. Matches. The CPU search is untouched by any of the above.
         if let Some(ref rx) = self.rx {
             while let Ok(payload) = rx.try_recv() {
                 let write_result = match self.csv_file.as_mut() {
@@ -654,6 +703,34 @@ fn append_match_row(path: &Path, m: &Match) -> io::Result<()> {
 /// on non-Apple-Silicon builds and a test cannot conjure a live one.
 fn gpu_spawn_allowed(validated_gpu: bool, engines_parked: usize) -> bool {
     validated_gpu && engines_parked == 0
+}
+
+/// The four facts the quiet-death check weighs.
+///
+/// NAMED FIELDS, not four positional `bool`s. At the call site in
+/// `drain_matches` three consecutive booleans are passed; transposing
+/// `gpu_live` with `disabled` there COMPILES, silently disables quiet-death
+/// detection for the life of the binary, and no test of the predicate itself
+/// can see it. With named fields the same mistake is a compile error.
+struct GpuExitCheck {
+    state: AppState,
+    gpu_live: bool,
+    disabled: bool,
+    engine_finished: bool,
+}
+
+/// Did a GPU engine die quietly?
+///
+/// A producer that returns without raising a reason — a panic that escaped the
+/// `catch_unwind` bookkeeping, or a `return` on a path that forgot to raise —
+/// would otherwise leave the TUI reporting `Running` at 0/s forever. Only
+/// meaningful while THIS run has a live GPU channel: when the GPU was skipped,
+/// a leftover engine finishing is the wind-down we asked for, not a fault.
+///
+/// Pure, so it is testable on targets where a live `GpuEngine` cannot be
+/// constructed in a test.
+fn is_unexpected_gpu_exit(c: GpuExitCheck) -> bool {
+    c.state == AppState::Searching && c.gpu_live && !c.disabled && c.engine_finished
 }
 
 /// Rollback lever #2: `VANADDY_GPU=0` (equivalently `VANADDY_NO_GPU=1`) turns the
@@ -1798,5 +1875,185 @@ mod tests {
             app.error_message.is_some(),
             "the user must be told the CSV is not being written"
         );
+    }
+
+    #[test]
+    fn mismatch_disables_gpu_and_leaves_app_running() {
+        use crate::gpu::{GpuDisableReason, GpuStatus};
+
+        let mut app = App::with_gpu_status(GpuStatus::Running {
+            device: "Apple M1".to_string(),
+        });
+        app.chain = crate::chains::ChainKind::Evm;
+        app.gpu_requested = true;
+        app.validated_gpu = true;
+        app.state = AppState::Searching;
+        app.start_time = Some(Instant::now());
+
+        // Bind a LIVE drain side. `with_gpu_status` initialises `gpu_rx: None`
+        // and nothing else in this milestone ever assigns it, so without this
+        // the `gpu_rx.is_none()` assertion below is vacuous: deleting
+        // `self.gpu_rx = None;` from Step 4's promotion block leaves the test
+        // green. `crossbeam-channel` is an unconditional dependency, so this is
+        // portable to every leg.
+        let (keep_tx, rx) = crossbeam_channel::bounded::<Box<crate::gpu::SeedBlock>>(1);
+        app.gpu_rx = Some(rx);
+        assert!(
+            app.gpu_rx.is_some(),
+            "precondition: a live drain side exists"
+        );
+
+        // A Rayon worker found a GPU candidate that MATCHED the pattern but did
+        // not re-derive on the CPU. That is a GPU fault, never a false positive.
+        app.gpu_health.raise(GpuDisableReason::VerifyMismatch {
+            address: "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
+        });
+
+        app.drain_matches();
+
+        assert!(
+            matches!(
+                app.gpu_status,
+                GpuStatus::Disabled(GpuDisableReason::VerifyMismatch { .. })
+            ),
+            "the fault must be promoted to a visible status on the next tick"
+        );
+        assert!(!app.gpu_requested, "sticky for the process");
+        assert!(!app.validated_gpu, "sticky for the process");
+        assert!(
+            !app.gpu_effective(),
+            "a faulted GPU can never turn itself back on"
+        );
+        assert!(
+            app.gpu_rx.is_none(),
+            "the drain side is released so workers stop draining"
+        );
+
+        // And the whole point: the app keeps searching on CPU.
+        assert!(!app.should_quit, "a GPU fault must never quit the app");
+        assert!(
+            app.state == AppState::Searching,
+            "the search continues on CPU"
+        );
+        assert!(
+            !app.stop.load(Ordering::Relaxed),
+            "the GPU has its OWN stop flag; App::stop must be untouched or every worker exits"
+        );
+        drop(keep_tx);
+    }
+
+    #[test]
+    fn fault_promotion_is_idempotent_and_never_overwrites_the_first_reason() {
+        use crate::gpu::{GpuDisableReason, GpuStatus};
+
+        let mut app = App::with_gpu_status(GpuStatus::Running {
+            device: "Apple M1".to_string(),
+        });
+        app.chain = crate::chains::ChainKind::Evm;
+        app.gpu_requested = true;
+        app.state = AppState::Searching;
+
+        app.gpu_health
+            .raise(GpuDisableReason::AuditMismatch { index: 5183 });
+        app.drain_matches();
+
+        // A DIFFERENT reason on a FRESH cell. Re-ticking the SAME cell proves
+        // nothing: `GpuHealth::reason` is a set-once `OnceLock` and
+        // `take_reason` clones without consuming, so ticks 2 and 3 re-derive
+        // the identical `AuditMismatch { index: 5183 }` and every field the
+        // promotion body writes is idempotent — removing the
+        // `!matches!(.., Disabled(_))` guard at Step 4, the guard this test
+        // exists to protect, leaves it green (and the set-once property itself
+        // is already covered by
+        // `gpu::tests::raise_records_the_first_reason_and_never_overwrites_it`).
+        // With a fresh cell carrying a different reason, an unguarded second
+        // promotion overwrites the first and this test fails.
+        app.gpu_health = Arc::new(crate::gpu::GpuHealth::default());
+        app.gpu_health.raise(GpuDisableReason::Panicked);
+        app.drain_matches();
+        app.drain_matches();
+
+        assert_eq!(
+            app.gpu_status,
+            GpuStatus::Disabled(GpuDisableReason::AuditMismatch { index: 5183 }),
+            "the first reason is the one that stands, and repeated ticks do not churn it"
+        );
+    }
+
+    #[test]
+    fn unexpected_gpu_exit_is_detected_only_on_a_live_faultless_run() {
+        // Searching, live channel, no fault raised, yet the engine finished:
+        // the producer died quietly and the TUI would report Running at 0/s.
+        assert!(is_unexpected_gpu_exit(GpuExitCheck {
+            state: AppState::Searching,
+            gpu_live: true,
+            disabled: false,
+            engine_finished: true,
+        }));
+        // A finished engine after a clean stop is expected, not a fault.
+        assert!(!is_unexpected_gpu_exit(GpuExitCheck {
+            state: AppState::Configuring,
+            gpu_live: true,
+            disabled: false,
+            engine_finished: true,
+        }));
+        // The GPU was skipped this run (no live channel): a leftover engine from
+        // the previous run finishing is exactly what we asked it to do.
+        assert!(!is_unexpected_gpu_exit(GpuExitCheck {
+            state: AppState::Searching,
+            gpu_live: false,
+            disabled: false,
+            engine_finished: true,
+        }));
+        // A fault was already raised: the promotion branch owns that case and
+        // has the real reason. Do not overwrite it with Panicked.
+        assert!(!is_unexpected_gpu_exit(GpuExitCheck {
+            state: AppState::Searching,
+            gpu_live: true,
+            disabled: true,
+            engine_finished: true,
+        }));
+        // Engine still running: nothing to report.
+        assert!(!is_unexpected_gpu_exit(GpuExitCheck {
+            state: AppState::Searching,
+            gpu_live: true,
+            disabled: false,
+            engine_finished: false,
+        }));
+    }
+
+    #[test]
+    fn status_refresh_leaves_the_status_alone_when_no_engine_is_parked() {
+        use crate::gpu::GpuStatus;
+
+        // Step 2's whole branch is guarded by `self.gpu_rx.is_some()`, which no
+        // other test in this milestone ever makes true — omit Step 2 entirely
+        // and all three tests above still pass. Bind a live receiver so the
+        // branch is actually entered, with nothing parked to read a status
+        // from: the status must survive untouched, the empty `gpu_engines` list
+        // must not panic, and a faultless tick must not release the channel.
+        let (keep_tx, rx) = crossbeam_channel::bounded::<Box<crate::gpu::SeedBlock>>(1);
+        let mut app = App::with_gpu_status(GpuStatus::Initializing);
+        app.chain = crate::chains::ChainKind::Evm;
+        app.gpu_requested = true;
+        app.state = AppState::Searching;
+        app.gpu_rx = Some(rx);
+        assert!(
+            app.gpu_engines.is_empty(),
+            "precondition: nothing is parked"
+        );
+
+        app.drain_matches();
+
+        assert_eq!(
+            app.gpu_status,
+            GpuStatus::Initializing,
+            "no engine, so no status to read"
+        );
+        assert!(
+            app.gpu_rx.is_some(),
+            "a faultless tick must not release the channel"
+        );
+        drop(keep_tx);
     }
 }
