@@ -349,6 +349,25 @@ impl App {
     pub fn start_search(&mut self) {
         let num_threads = self.validated_thread_count;
         self.error_message = None;
+
+        // Reap finished engines NON-BLOCKING. `is_finished()` is a plain atomic
+        // load and `reap()` joins a thread that has already returned, so neither
+        // can block. Anything still running is left parked for the next attempt
+        // or for `shutdown_gpu` at process exit.
+        let mut still_running: Vec<GpuEngine> = Vec::new();
+        for engine in std::mem::take(&mut self.gpu_engines) {
+            if engine.is_finished() {
+                engine.reap();
+            } else {
+                still_running.push(engine);
+            }
+        }
+        self.gpu_engines = still_running;
+        let spawn_gpu = gpu_spawn_allowed(self.validated_gpu, self.gpu_engines.len());
+        if self.validated_gpu && !spawn_gpu {
+            self.error_message =
+                Some("GPU: previous session winding down — this run is CPU only".to_string());
+        }
         self.matches.clear();
         self.total_matches = 0;
         self.csv_write_failures = 0;
@@ -368,10 +387,6 @@ impl App {
         let chain = self.chain;
         let stop = self.stop.clone();
         let counter = self.counter.clone();
-        // Milestone 6 replaces this with `self.gpu_health.clone()` once `App`
-        // owns the cell. Until then the workers still need a health cell to
-        // read, and `gpu: None` means nothing can ever write to it.
-        let health = Arc::new(crate::gpu::GpuHealth::default());
 
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
@@ -413,6 +428,31 @@ impl App {
             }
         }
 
+        // A FRESH health cell per run, UNCONDITIONALLY — outside the branch on
+        // purpose. `reason` is a set-once OnceLock and cannot be reset; a
+        // faulted run is made sticky by drain_matches clearing
+        // `gpu_requested`/`validated_gpu`, not by reusing the cell. Resetting
+        // it only when the GPU spawns would leave a CPU-only run holding the
+        // previous run's `seeds_delivered` while `counter` and `start_time`
+        // (reset above) start from zero — the Stats pane would then divide a
+        // stale numerator by a fresh denominator.
+        self.gpu_health = Arc::new(GpuHealth::default());
+
+        let gpu_rx = if spawn_gpu {
+            let (gpu_tx, rx) = crossbeam_channel::bounded(crate::gpu::CHANNEL_CAPACITY);
+            let engine = GpuEngine::start(gpu_tx, self.gpu_health.clone());
+            // Initializing: the device, the ~60-95 ms shader compile and the
+            // ~300 ms self-test all run on the spawned thread, not here.
+            self.gpu_status = engine.status();
+            self.gpu_engines.push(engine);
+            self.gpu_rx = Some(rx.clone());
+            Some(rx)
+        } else {
+            self.gpu_rx = None;
+            None
+        };
+        let health = self.gpu_health.clone();
+
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(num_threads)
             .build()
@@ -420,7 +460,7 @@ impl App {
 
         pool.spawn(move || {
             (0..num_threads).into_par_iter().for_each(|_| {
-                chain.search(&matcher, &stop, &counter, &tx, None, &health);
+                chain.search(&matcher, &stop, &counter, &tx, gpu_rx.as_ref(), &health);
             });
             drop(tx);
         });
@@ -531,6 +571,22 @@ fn write_match_row(file: &mut File, m: &Match) -> io::Result<()> {
 fn append_match_row(path: &Path, m: &Match) -> io::Result<()> {
     let mut file = open_csv_secure(path)?;
     write_match_row(&mut file, m)
+}
+
+/// May this run spawn a GPU producer?
+///
+/// Only if `validate()` said so AND no engine from a previous run is still
+/// winding down. When one is, we run CPU-only for this search rather than
+/// joining: a join on the UI thread blocks the 100 ms render tick for the rest
+/// of a ~250 ms cold shader compile on an Enter-Ctrl+C-Enter sequence, and
+/// blocks FOREVER if the GPU has wedged inside `waitUntilCompleted`, leaving
+/// the terminal in raw mode with the alternate screen up and `kill -9` as the
+/// only exit.
+///
+/// Pure, so the decision is testable on every target — `GpuEngine` is a no-op
+/// on non-Apple-Silicon builds and a test cannot conjure a live one.
+fn gpu_spawn_allowed(validated_gpu: bool, engines_parked: usize) -> bool {
+    validated_gpu && engines_parked == 0
 }
 
 /// Rollback lever #2: `VANADDY_GPU=0` (equivalently `VANADDY_NO_GPU=1`) turns the
@@ -822,6 +878,52 @@ mod tests {
 
         assert!(app.thread_pool.is_none());
         assert!(app.stop.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn gpu_spawn_is_skipped_while_a_previous_engine_is_still_winding_down() {
+        assert!(
+            gpu_spawn_allowed(true, 0),
+            "validated and nothing parked -> spawn"
+        );
+        assert!(
+            !gpu_spawn_allowed(true, 1),
+            "a previous engine has not finished -> skip the GPU this run, NEVER join"
+        );
+        assert!(!gpu_spawn_allowed(true, 3));
+        assert!(
+            !gpu_spawn_allowed(false, 0),
+            "user, chain or status said no"
+        );
+        assert!(!gpu_spawn_allowed(false, 2));
+    }
+
+    #[test]
+    fn start_search_without_gpu_leaves_no_channel_and_no_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new();
+        app.csv_path = dir.path().join("vanity_wallets.csv");
+        app.chain = crate::chains::ChainKind::Evm;
+        // Eight 'a's will not be found during this test.
+        app.vanity_prefix = "aaaaaaaa".into();
+        app.thread_count = "1".into();
+        app.gpu_requested = false;
+
+        app.validate().unwrap();
+        assert!(!app.validated_gpu);
+
+        app.start_search();
+        assert!(
+            app.gpu_rx.is_none(),
+            "no GPU channel when the GPU is not effective"
+        );
+        assert!(
+            app.gpu_engines.is_empty(),
+            "no engine spawned when the GPU is not effective"
+        );
+        assert!(app.state == AppState::Searching);
+
+        app.stop_search();
     }
 
     #[test]
