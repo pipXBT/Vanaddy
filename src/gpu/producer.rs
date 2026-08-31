@@ -223,8 +223,123 @@ where
     // `_guard` drops HERE, after `raise`. Do not reorder.
 }
 
+/// The wave loop. Runs on the `vanaddy-gpu` thread and owns every Metal object
+/// in the process — nothing Metal-shaped ever crosses a thread boundary, which
+/// `objc2`'s `Send`/`Sync` bounds enforce at compile time.
+///
+/// `tx` is taken BY VALUE: dropping it on return hangs up the channel, which is
+/// the second, independent wake path for the workers alongside the stop flag.
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
+pub(crate) fn producer(
+    tx: Sender<Box<SeedBlock>>,
+    stop: &AtomicBool,
+    health: &GpuHealth,
+    status: &Mutex<GpuStatus>,
+) -> Result<(), GpuDisableReason> {
+    use super::backend::MetalPbkdf2;
+    use super::pack::{pack_key_block, pack_salt_block, KeyBlock};
+    use super::{selftest, Schedule, WAVE};
+    use bip39::{Language, Mnemonic, MnemonicType};
+    use zeroize::Zeroizing;
+
+    // QoS so macOS does not demote this thread to an E-core, where the ~4.1 ms
+    // of per-wave phrase generation and packing stretches proportionally and
+    // the GPU starves waiting for keys. Slow, not wrong — so the result is
+    // deliberately ignored.
+    let _ = set_thread_qos_user_initiated();
+
+    // Device, library compile (~60-95 ms cold) and pipelines, all HERE, on this
+    // thread, never the UI thread.
+    let mut engine = MetalPbkdf2::new().map_err(reason_from)?;
+    if stop.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+
+    // ~300 ms: 154 ms of GPU plus 133 ms of `ring`. Nothing is published to the
+    // workers until it passes.
+    //
+    // `stop` is threaded IN, not just checked around the call: the spec's
+    // termination table requires the flag to be observed between the
+    // self-test's phases, and a `signal_stop()` during startup must not go
+    // unseen for the whole ~300 ms. The schedule is threaded THROUGH, not
+    // dropped: `self_test`'s chunk-schedule invariance check — the property the
+    // entire resumable-wave design rests on — passes vacuously if every call it
+    // makes runs the production schedule.
+    selftest::self_test(stop, |phrases, iters, schedule| {
+        engine.derive_with_schedule(phrases, iters, schedule)
+    })
+    .map_err(GpuDisableReason::SelfTest)?;
+    if stop.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    set_status(
+        status,
+        GpuStatus::Running {
+            device: engine.device_name(),
+        },
+    );
+
+    let salt = pack_salt_block(crate::seed::BIP39_SALT).map_err(reason_from)?;
+
+    // 8192 x 16 B of raw entropy - the most valuable object in the process.
+    // Zeroizing, and overwritten in place every wave, so the resident backlog
+    // is one wave (~600 ms) rather than the whole run.
+    let mut entropy: Zeroizing<Vec<[u8; 16]>> = Zeroizing::new(vec![[0u8; 16]; WAVE]);
+    let mut keys: Zeroizing<Vec<KeyBlock>> = Zeroizing::new(vec![KeyBlock([0u64; 16]); WAVE]);
+    let mut rng = rand::thread_rng();
+
+    while !stop.load(Ordering::Relaxed) && !health.disable.load(Ordering::Relaxed) {
+        // 1. Fill. Measured: Mnemonic::new 0.527 us + pack 0.495 us -> ~4.1 ms
+        //    per ~600 ms wave = 0.7% of one core. ONE thread is ample; NO Rayon
+        //    par_iter, which would put these allocations on the very threads
+        //    whose PBKDF2 is the CPU-side throughput.
+        //    `Mnemonic::new` is the SAME entropy source the CPU path uses at
+        //    src/chains/evm.rs:59 — thread-local, OS-seeded ChaCha12. Nothing
+        //    counter-derived may ever appear here.
+        for (i, (e, k)) in entropy.iter_mut().zip(keys.iter_mut()).enumerate() {
+            if i % 512 == 0 && stop.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            let m = Mnemonic::new(MnemonicType::Words12, Language::English);
+            e.copy_from_slice(m.entropy());
+            *k = pack_key_block(m.phrase().as_bytes());
+        }
+
+        // 2-3. Dispatch the wave. `Ok(None)` means the backend saw `stop` at a
+        //      command-buffer boundary and abandoned it; there is deliberately
+        //      no partial-success shape, because a partly-iterated wave yields
+        //      wrong-but-plausible seeds.
+        let seeds = match engine
+            .run_wave(
+                &keys,
+                &salt,
+                crate::seed::PBKDF2_ROUNDS,
+                Schedule::Production,
+                stop,
+            )
+            .map_err(reason_from)?
+        {
+            Some(seeds) => seeds,
+            None => return Ok(()),
+        };
+
+        // 4. Audit AUDITS_PER_WAVE RANDOM indices against `ring`.
+        audit_wave(&entropy, seeds, &audit_indices(&mut rng, WAVE))?;
+
+        // 5. Carve + send. `false` == stop, self-disable, or hang-up.
+        if !carve_and_send(&tx, &entropy, seeds, stop, health) {
+            return Ok(());
+        }
+
+        // 6. The backend wipes keys/states/seeds; `entropy` and `keys` are
+        //    overwritten by the next fill and zeroized on drop, so the last
+        //    wave's plaintext dies with this function.
+    }
+    Ok(())
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -393,7 +508,7 @@ mod tests {
     /// A fresh, clean health cell. `GpuHealth`'s `reason` field is private to
     /// `crate::gpu`, and this module is a descendant of it, so the literal is
     /// legal here and needs no constructor on the type itself.
-    fn fresh_health() -> GpuHealth {
+    pub(crate) fn fresh_health() -> GpuHealth {
         GpuHealth {
             disable: std::sync::atomic::AtomicBool::new(false),
             reason: std::sync::OnceLock::new(),
@@ -641,5 +756,112 @@ mod tests {
         handle
             .join()
             .expect("guarded thread must not propagate a panic");
+    }
+}
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64", feature = "metal"))]
+mod gpu_tests {
+    use super::tests::fresh_health;
+    use super::*;
+    use crate::gpu::{BLOCK, CHANNEL_CAPACITY, WAVE};
+    use rayon::prelude::*;
+    use std::time::{Duration, Instant};
+
+    /// Consume three full waves and re-derive EVERY seed with `ring`.
+    ///
+    /// 3 x 8192 = 24,576 candidates. Run with --release: in a debug build the
+    /// per-wave fill is slow enough to starve the GPU and the test drags.
+    #[test]
+    fn producer_delivers_three_waves_whose_every_seed_matches_ring() {
+        if std::env::var_os("VANADDY_NO_GPU").is_some() {
+            eprintln!("SKIP: VANADDY_NO_GPU is set");
+            return;
+        }
+        let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAPACITY);
+        let stop = AtomicBool::new(false);
+        let health = fresh_health();
+        let status = Mutex::new(GpuStatus::Initializing);
+
+        let want = 3 * (WAVE / BLOCK);
+        let mut blocks: Vec<Box<SeedBlock>> = Vec::with_capacity(want);
+
+        let no_device = std::thread::scope(|s| {
+            let worker = s.spawn(|| producer(tx, &stop, &health, &status));
+            let deadline = Instant::now() + Duration::from_secs(180);
+            while blocks.len() < want && !worker.is_finished() {
+                assert!(
+                    Instant::now() < deadline,
+                    "only {} of {want} blocks in 180 s (status {:?}, reason {:?})",
+                    blocks.len(),
+                    read_status(&status),
+                    health.take_reason()
+                );
+                if let Ok(b) = rx.recv_timeout(Duration::from_millis(250)) {
+                    blocks.push(b);
+                }
+            }
+            stop.store(true, Ordering::Relaxed);
+            let outcome = worker.join().expect("producer must not panic");
+            if outcome == Err(GpuDisableReason::NoDevice) {
+                return true;
+            }
+            assert_eq!(outcome, Ok(()), "producer returned a fault");
+            false
+        });
+        if no_device {
+            eprintln!("SKIP: no Metal device on this machine");
+            return;
+        }
+
+        assert!(
+            matches!(read_status(&status), GpuStatus::Running { .. }),
+            "the producer must publish Running once the self-test passes, saw {:?}",
+            read_status(&status)
+        );
+        assert_eq!(health.take_reason(), None, "no fault may have been raised");
+
+        let failures: Vec<String> = blocks
+            .par_iter()
+            .enumerate()
+            .flat_map(|(bi, b)| {
+                let cands = b.chunks(BLOCK).next().expect("one full chunk");
+                cands
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(ci, c)| {
+                        let m = match bip39::Mnemonic::from_entropy(
+                            &c.entropy,
+                            bip39::Language::English,
+                        ) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                return Some(format!("block {bi} cand {ci}: bad entropy: {e}"))
+                            }
+                        };
+                        let want = crate::seed::derive_seed(&m);
+                        if want != c.seed {
+                            return Some(format!(
+                                "block {bi} cand {ci}: phrase {:?}\n  gpu  {}\n  ring {}",
+                                m.phrase(),
+                                hex::encode(c.seed),
+                                hex::encode(want)
+                            ));
+                        }
+                        None
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        assert!(
+            failures.is_empty(),
+            "{} of {} GPU seeds disagree with ring:\n{}",
+            failures.len(),
+            3 * WAVE,
+            failures.join("\n")
+        );
+        for (bi, b) in blocks.iter().enumerate() {
+            assert_eq!(b.len(), BLOCK, "block {bi} is not {BLOCK} candidates");
+        }
     }
 }
