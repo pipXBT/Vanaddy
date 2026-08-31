@@ -11,26 +11,26 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+pub mod kernel_src;
 pub mod pack;
 pub mod selftest;
 
 pub use selftest::SelfTestError;
 
-// Milestone 3 replaces the line below with the spec's two `cfg_attr`s:
-//     #[cfg_attr(all(target_os="macos", target_arch="aarch64", feature="metal"), path = "metal.rs")]
-//     #[cfg_attr(not(all(target_os="macos", target_arch="aarch64", feature="metal")), path = "stub.rs")]
-// Until `metal.rs` exists there is nothing for a `metal` feature to select, so
-// declaring the feature now would only add an `unexpected_cfgs` warning.
-#[path = "stub.rs"]
-mod backend;
+// `pub mod`, not `mod`: `src/gpu/producer.rs` (Milestone 4) names
+// `backend::MetalPbkdf2` directly, and a private module would additionally make
+// every item inside it dead code until that milestone lands.
+#[cfg_attr(
+    all(target_os = "macos", target_arch = "aarch64", feature = "metal"),
+    path = "metal.rs"
+)]
+#[cfg_attr(
+    not(all(target_os = "macos", target_arch = "aarch64", feature = "metal")),
+    path = "stub.rs"
+)]
+pub mod backend;
 
-/// `main()` probes through the module, not the type, so milestone 6 does not
-/// have to know which backend it got. This is the design spec's `mod.rs` form
-/// (`pub use backend::{GpuEngine, probe};`) written from the start - rustfmt
-/// sorts the braces to `{probe, GpuEngine}` - so milestone 3 only has to widen
-/// `mod backend;` to `pub mod backend;` and swap the `#[path]` for the two
-/// `cfg_attr`s. It never has to delete a wrapper.
-pub use backend::{probe, GpuEngine};
+pub use backend::probe;
 
 pub const WAVE: usize = 8_192; // candidates per GPU wave
 pub const BLOCK: usize = 512; // candidates per channel message (16/wave)
@@ -267,7 +267,6 @@ impl Default for GpuHealth {
 /// here rather than at the point of use.
 const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<GpuEngine>();
     assert_send_sync::<SeedBlock>();
     assert_send_sync::<GpuHealth>();
 };
@@ -306,12 +305,12 @@ mod tests {
     }
 
     #[test]
-    fn stub_backend_reports_unavailable() {
-        match GpuEngine::probe() {
+    fn backend_probe_reports_ready_or_unavailable() {
+        match probe() {
             GpuStatus::Unavailable(reason) => assert!(!reason.is_empty()),
-            other => panic!("stub backend must never report a usable GPU, got {other:?}"),
+            GpuStatus::Ready { device } => assert!(!device.is_empty()),
+            other => panic!("probe() must be Ready or Unavailable, got {other:?}"),
         }
-        assert_eq!(probe(), GpuEngine::probe());
     }
 
     #[test]
@@ -501,5 +500,3 @@ mod command_buffer_status_tests {
         }
     }
 }
-
-pub mod kernel_src;

@@ -27,5 +27,19 @@ crc32fast = "1.4"
 zeroize = { version = "1.8", features = ["derive"] }
 crossbeam-channel = "0.5"
 
+[features]
+default = ["metal"]
+metal = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-metal"]
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = [
+  "std", "NSString", "NSError" ] }
+objc2-metal = { version = "0.3", optional = true, default-features = false, features = [
+  "std", "MTLDevice", "MTLCommandQueue", "MTLCommandBuffer", "MTLCommandEncoder",
+  "MTLComputeCommandEncoder", "MTLComputePipeline", "MTLLibrary", "MTLBuffer",
+  "MTLResource", "MTLAllocation", "MTLTypes", "objc2-core-foundation" ] }
+
 [dev-dependencies]
 tempfile = "3"
+rand_chacha = "0.3"

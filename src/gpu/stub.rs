@@ -1,46 +1,27 @@
-//! No-op GPU backend. Compiled on every target that is not Apple Silicon with
-//! the `metal` feature - and, until milestone 3 lands `metal.rs`, on every
-//! target full stop. Zero dependencies, no Objective-C, no threads.
+//! No-op GPU backend for every target that is not `aarch64-apple-darwin` with
+//! the `metal` feature. Zero dependencies, no Metal symbols, no GPU code in the
+//! binary at all — which doubles as the rollback lever
+//! `cargo build --release --no-default-features`.
 
-use super::GpuStatus;
-use std::convert::Infallible;
+use crate::gpu::GpuStatus;
 
-/// The backend's probe entry point, as a *free* function: `src/gpu/mod.rs`
-/// re-exports this one as `crate::gpu::probe`, which is the design spec's
-/// `mod.rs` form (`pub use backend::{GpuEngine, probe};`). Milestone 3 swaps
-/// this file for `metal.rs`, which defines the same free function, so the
-/// re-export never changes shape.
+/// Mirror of `metal::probe`. Always unavailable; the TUI renders the reason.
 pub fn probe() -> GpuStatus {
-    GpuStatus::Unavailable("no Metal backend in this build".to_string())
+    GpuStatus::Unavailable(
+        "Metal PBKDF2 offload requires Apple Silicon macOS and the `metal` feature".to_string(),
+    )
 }
 
-/// Uninhabited by construction: on a target with no backend, a live engine must
-/// be *impossible*, not merely unused. Every method below is therefore
-/// statically unreachable and needs no panic.
-pub struct GpuEngine {
-    _never: Infallible,
-}
+#[cfg(test)]
+mod tests {
+    use super::probe;
+    use crate::gpu::GpuStatus;
 
-impl GpuEngine {
-    /// Delegates to the free `probe()` above. `self::` is the module path, not
-    /// `Self::`, so this resolves to that function and is not recursion.
-    pub fn probe() -> GpuStatus {
-        self::probe()
-    }
-
-    pub fn status(&self) -> GpuStatus {
-        match self._never {}
-    }
-
-    pub fn signal_stop(&self) {
-        match self._never {}
-    }
-
-    pub fn is_finished(&self) -> bool {
-        match self._never {}
-    }
-
-    pub fn reap(self) {
-        match self._never {}
+    #[test]
+    fn probe_is_unavailable_without_the_metal_backend() {
+        match probe() {
+            GpuStatus::Unavailable(r) => assert!(r.contains("Apple Silicon")),
+            other => panic!("the stub backend must be Unavailable, got {other:?}"),
+        }
     }
 }
