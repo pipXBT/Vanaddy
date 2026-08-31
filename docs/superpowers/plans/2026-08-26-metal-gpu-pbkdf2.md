@@ -6796,25 +6796,34 @@ into the closure so its release happens inside the pool too.
 
 ```rust
             let prev = ring[slot_ix].take();
-            let cb = autoreleasepool(|_| -> Result<Cb, GpuError> {
+            let built = autoreleasepool(|_| -> Result<Cb, GpuError> {
                 if let Some(prev) = prev {
                     prev.waitUntilCompleted();
                     self.check_status(&prev)?;
                 }
 ```
+
+
+> **Two anchors here drifted when Task 3.9 landed, so match on the exact text below, not on
+> a remembered shape.** (a) The binding is `let built =`, not `let cb =` — and there is a
+> DECOY `let cb = self.queue.commandBuffer()...` about five lines further in, inside the very
+> block you are editing. Mutating that one silently measures nothing. (b) The block closes
+> with `});`, **not** `})?;`: Task 3.9 replaced the `?` with `let cb = match built { Ok(cb) =>
+> cb, Err(e) => { ... drain_ring ... } }`, so there is no `?` left at that site to remove.
+> Confirm with `grep -n "let built = autoreleasepool" src/gpu/metal.rs` before you touch it.
 
 with:
 
 ```rust
             let prev = ring[slot_ix].take();
-            let cb = (|| -> Result<Cb, GpuError> {
+            let built = (|| -> Result<Cb, GpuError> {
                 if let Some(prev) = prev {
                     prev.waitUntilCompleted();
                     self.check_status(&prev)?;
                 }
 ```
 
-and the closing `})?;` of that block with `})()?;`, then run:
+and the closing `});` of that block — the line that closes the `autoreleasepool` call itself, NOT the inner `enc`/`cb` braces — with `})();`, then run:
 
 ```sh
 cargo test --release -- --ignored --nocapture gpu_no_rss_growth
@@ -6826,7 +6835,7 @@ Expected: a delta of roughly `+40,000` KiB and
 RSS grew 4XXXX KiB over 100,230 dispatches — the per-command-buffer autorelease pool in run_wave is missing or was moved outside the loop
 ```
 
-- [ ] **Step 4: Revert the mutation** back to `autoreleasepool(|_| … })?;` and
+- [ ] **Step 4: Revert the mutation** back to `let built = autoreleasepool(|_| … });` and
       re-run to confirm the delta is back under 8 MiB.
 
 ```sh
