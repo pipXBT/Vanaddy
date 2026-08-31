@@ -927,6 +927,37 @@ mod tests {
     }
 
     #[test]
+    fn gpu_health_resets_even_when_no_gpu_spawns() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new();
+        app.csv_path = dir.path().join("vanity_wallets.csv");
+        app.chain = crate::chains::ChainKind::Evm;
+        app.vanity_prefix = "aaaaaaaa".into();
+        app.thread_count = "1".into();
+        app.gpu_requested = false;
+
+        app.validate().unwrap();
+        assert!(!app.validated_gpu);
+
+        // Poison the health cell as if a previous GPU run had delivered seeds.
+        app.gpu_health
+            .seeds_delivered
+            .store(5_000_000, Ordering::Relaxed);
+
+        app.start_search();
+
+        assert_eq!(
+            app.gpu_health.seeds_delivered.load(Ordering::Relaxed),
+            0,
+            "a fresh GpuHealth must replace the stale one on every start_search, \
+             even when this run spawns no GPU -- otherwise the stats pane divides \
+             a stale numerator by a fresh denominator and shows a fabricated rate"
+        );
+
+        app.stop_search();
+    }
+
+    #[test]
     fn gpu_effective_requires_user_device_and_evm() {
         use crate::gpu::{GpuDisableReason, GpuStatus};
 
