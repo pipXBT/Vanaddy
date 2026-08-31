@@ -233,6 +233,10 @@ impl App {
         let chain = self.chain;
         let stop = self.stop.clone();
         let counter = self.counter.clone();
+        // Milestone 6 replaces this with `self.gpu_health.clone()` once `App`
+        // owns the cell. Until then the workers still need a health cell to
+        // read, and `gpu: None` means nothing can ever write to it.
+        let health = Arc::new(crate::gpu::GpuHealth::default());
 
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
@@ -256,7 +260,7 @@ impl App {
 
         pool.spawn(move || {
             (0..num_threads).into_par_iter().for_each(|_| {
-                chain.search(&matcher, &stop, &counter, &tx);
+                chain.search(&matcher, &stop, &counter, &tx, None, &health);
             });
             drop(tx);
         });

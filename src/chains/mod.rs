@@ -108,16 +108,22 @@ impl ChainKind {
             Self::Monero => monero::Monero::MAX_VANITY,
         }
     }
+    /// Only the `Evm` arm routes to `search_hybrid`; the other four call the
+    /// unchanged `search::<C>` and ignore both GPU parameters. The `match` is
+    /// still evaluated once per thread spawn and each arm is monomorphized
+    /// separately — no `dyn`, no v-table, nothing per-candidate.
     pub fn search(
         self,
         matcher: &Matcher,
         stop: &AtomicBool,
         counter: &AtomicU64,
         tx: &Sender<Match>,
+        gpu: Option<&crate::gpu::GpuRx>,
+        health: &crate::gpu::GpuHealth,
     ) {
         match self {
             Self::Solana => search::<solana::Solana>(matcher, stop, counter, tx),
-            Self::Evm => search::<evm::Evm>(matcher, stop, counter, tx),
+            Self::Evm => search_hybrid::<evm::Evm>(matcher, stop, counter, tx, gpu, health),
             Self::Bitcoin => search::<bitcoin::Bitcoin>(matcher, stop, counter, tx),
             Self::Ton => search::<ton::Ton>(matcher, stop, counter, tx),
             Self::Monero => search::<monero::Monero>(matcher, stop, counter, tx),
@@ -267,6 +273,77 @@ mod tests {
         assert!(n > 0, "search must make progress");
         assert_eq!(solana::Solana::BATCH, LANES);
         assert_eq!(n % LANES as u64, 0, "counter advances in whole batches, got {n}");
+    }
+
+    /// `ChainKind::search` gained two GPU parameters. Milestone 2 already pinned
+    /// the free function `search_hybrid` with `gpu: None`; this pins the
+    /// `ChainKind` arm. With `gpu: None` — the state every non-EVM chain is
+    /// permanently in, and the state EVM is in until Milestone 6 spawns a
+    /// producer — behaviour must be exactly what it was: whole `C::BATCH`
+    /// increments, prompt stop, and no GPU bookkeeping.
+    #[test]
+    fn chain_kind_search_with_no_gpu_source_is_unchanged() {
+        let health = crate::gpu::GpuHealth::default();
+
+        // EVM routes through search_hybrid; 8 hex chars is 1 in 2^32, so no
+        // candidate can match and no Match is ever emitted.
+        let matcher = Matcher::new("ffffffff".into(), String::new(), false, ChainKind::Evm);
+        let stop = AtomicBool::new(false);
+        let counter = AtomicU64::new(0);
+        let (tx, rx) = mpsc::channel();
+        thread::scope(|s| {
+            s.spawn(|| ChainKind::Evm.search(&matcher, &stop, &counter, &tx, None, &health));
+            thread::sleep(Duration::from_millis(50));
+            stop.store(true, Ordering::Relaxed);
+        });
+        let n = counter.load(Ordering::Relaxed);
+        assert!(
+            n > 0,
+            "hybrid search with no GPU source must still make CPU progress"
+        );
+        assert_eq!(evm::Evm::BATCH, LANES);
+        assert_eq!(
+            n % LANES as u64,
+            0,
+            "counter advances in whole CPU batches, got {n}"
+        );
+        assert_eq!(
+            health.seeds_delivered.load(Ordering::Relaxed),
+            0,
+            "no GPU source means no GPU seeds may be counted"
+        );
+        assert!(
+            !health.disable.load(Ordering::Relaxed),
+            "a clean CPU run raises no fault"
+        );
+        drop(tx);
+        assert!(
+            rx.try_recv().is_err(),
+            "an 8-hex-char prefix cannot be hit in 50 ms"
+        );
+
+        // A non-EVM arm must ignore both new parameters entirely.
+        let matcher = Matcher::new("zzzzzzzzz".into(), String::new(), true, ChainKind::Solana);
+        let stop = AtomicBool::new(false);
+        let counter = AtomicU64::new(0);
+        let (tx, _rx) = mpsc::channel();
+        thread::scope(|s| {
+            s.spawn(|| ChainKind::Solana.search(&matcher, &stop, &counter, &tx, None, &health));
+            thread::sleep(Duration::from_millis(50));
+            stop.store(true, Ordering::Relaxed);
+        });
+        let n = counter.load(Ordering::Relaxed);
+        assert!(n > 0, "Solana must still search");
+        assert_eq!(
+            n % LANES as u64,
+            0,
+            "Solana counter advances in whole batches, got {n}"
+        );
+        assert_eq!(
+            health.seeds_delivered.load(Ordering::Relaxed),
+            0,
+            "non-EVM chains must never touch GPU health"
+        );
     }
 
     /// The CPU path is the reference, so its matches mint `Verified::cpu_reference()`
