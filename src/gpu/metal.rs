@@ -573,6 +573,9 @@ fn objc2_surface_probe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bip39::{Language, Mnemonic};
+    use rand::{RngCore, SeedableRng};
+    use rand_chacha::ChaCha20Rng;
 
     const CANONICAL_PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     const CANONICAL_SEED_HEX: &str = "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4";
@@ -734,6 +737,88 @@ mod tests {
             GpuStatus::Ready { device } => assert!(!device.is_empty()),
             GpuStatus::Unavailable(r) => eprintln!("SKIP: no Metal device ({r})"),
             other => panic!("probe() must return Ready or Unavailable, got {other:?}"),
+        }
+    }
+
+    /// 520 entries so the ragged-count test in Task 3.8 can ask for 513.
+    const CORPUS_LEN: usize = 520;
+
+    /// Deterministic differential corpus. ChaCha20, fixed seed: reproducible
+    /// across machines and across `rand` minor releases.
+    fn deterministic_corpus() -> Vec<Mnemonic> {
+        let mut rng = ChaCha20Rng::seed_from_u64(0x5EED_1234);
+        let mut out = Vec::with_capacity(CORPUS_LEN);
+        out.push(Mnemonic::from_phrase(CANONICAL_PHRASE, Language::English).expect("canonical"));
+        out.push(Mnemonic::from_phrase(SHORTEST_PHRASE, Language::English).expect("47-byte"));
+        out.push(Mnemonic::from_phrase(LONGEST_PHRASE, Language::English).expect("107-byte"));
+        while out.len() < CORPUS_LEN {
+            // The canonical vector again at the LAST index of the 512-wave, so
+            // a kernel that only ever writes tid 0 correctly cannot pass.
+            if out.len() == 511 {
+                out.push(
+                    Mnemonic::from_phrase(CANONICAL_PHRASE, Language::English).expect("canonical"),
+                );
+                continue;
+            }
+            let mut e = [0u8; 16];
+            rng.fill_bytes(&mut e);
+            out.push(Mnemonic::from_entropy(&e, Language::English).expect("16 bytes is valid"));
+        }
+        out
+    }
+
+    #[test]
+    fn deterministic_corpus_has_the_pinned_shape() {
+        let c = deterministic_corpus();
+        assert_eq!(c.len(), CORPUS_LEN);
+        assert_eq!(c[0].phrase(), CANONICAL_PHRASE);
+        assert_eq!(c[1].phrase().len(), 47);
+        assert_eq!(c[2].phrase().len(), 107);
+        assert_eq!(c[511].phrase(), CANONICAL_PHRASE);
+        let lens: Vec<usize> = c.iter().map(|m| m.phrase().len()).collect();
+        assert_eq!(*lens.iter().min().expect("non-empty"), 47);
+        assert_eq!(*lens.iter().max().expect("non-empty"), 107);
+    }
+
+    /// P1, the seed-agreement property, over 512 phrases at once:
+    ///   gpu.derive(p)[i] == derive_seed(p)          (ring, src/seed.rs:8)
+    ///                    == derive_seeds::<4>(..)[k] (4-lane, src/seed.rs:23)
+    #[test]
+    fn gpu_ring_and_4lane_agree_over_512_deterministic_phrases() {
+        let Some(mut gpu) = gpu_for_test() else {
+            return;
+        };
+        let corpus = deterministic_corpus();
+        let phrases: Vec<&str> = corpus[..512].iter().map(|m| m.phrase()).collect();
+        let gpu_seeds = gpu
+            .derive(&phrases, crate::seed::PBKDF2_ROUNDS)
+            .expect("wave");
+        assert_eq!(gpu_seeds.len(), 512);
+
+        for (i, m) in corpus[..512].iter().enumerate() {
+            let want = crate::seed::derive_seed(m);
+            assert_eq!(
+                hex::encode(*gpu_seeds[i]),
+                hex::encode(want),
+                "GPU vs ring at index {i}, phrase `{}`",
+                m.phrase()
+            );
+        }
+
+        for (chunk_ix, chunk) in corpus[..512].chunks(crate::pbkdf2_lanes::LANES).enumerate() {
+            let lane_input: [Mnemonic; crate::pbkdf2_lanes::LANES] = std::array::from_fn(|k| {
+                Mnemonic::from_phrase(chunk[k].phrase(), Language::English).expect("valid phrase")
+            });
+            let lanes = crate::seed::derive_seeds(&lane_input);
+            for k in 0..crate::pbkdf2_lanes::LANES {
+                let i = chunk_ix * crate::pbkdf2_lanes::LANES + k;
+                assert_eq!(
+                    hex::encode(*gpu_seeds[i]),
+                    hex::encode(lanes[k]),
+                    "GPU vs 4-lane at index {i}, phrase `{}`",
+                    chunk[k].phrase()
+                );
+            }
         }
     }
 }
