@@ -14,10 +14,13 @@
 
 Every task's requirements implicitly include this section.
 
-**Committing, when this worktree may be shared with concurrent agents.** Every commit step
-below is written as `git add <paths> && git commit`. Do **not** run it that way. `git commit`
-commits the whole INDEX, not just the paths you added, so if a peer has staged its own work
-you will silently sweep that peer's changes into your commit under your message. This has
+**Committing, when this worktree may be shared with concurrent agents.** The commit steps
+below are written either as `git add -A && git commit` or as `git add <paths> && git commit`.
+Do **not** run either form. `git add -A` stages EVERYTHING in the worktree — every file a peer
+agent has in progress — and is **never** acceptable in this plan, in any task, for any reason.
+`git add <paths>` is not enough on its own either: `git commit` commits the whole INDEX, not
+just the paths you added, so if a peer has staged its own work you will silently sweep that
+peer's changes into your commit under your message. This has
 already happened once on this branch: ~443 lines of another agent's in-progress plan edits
 landed inside a commit about an autoreleasepool comment, and had to be untangled with a reset
 and two re-commits. Instead:
@@ -9853,7 +9856,7 @@ gives the exact anchor text to search for, which has not.
 
 ### Formatting and lint policy — read this before the first step
 
-**Never run bare `cargo fmt`.** The tree is not rustfmt-clean at the branch point:
+**Never run bare `cargo fmt`, and never run `rustfmt` on `src/app.rs` without `--check`.** The tree is not rustfmt-clean at the branch point:
 `cargo fmt --check` reports 84 diffs across 14 files, so `cargo fmt` would bury
 Milestone 6 under an unrelated whole-tree reformat and permanently falsify
 Milestone 1 Task 1.8's whole-diff gate. Format by path instead.
@@ -9873,6 +9876,16 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 --check src/ui.r
 
 Expected: `11` for `src/app.rs` and `18` for `src/ui.rs` — the pre-existing counts.
 Anything higher means your insertion is not rustfmt-shaped; fix it by hand.
+
+These two numbers hold **after every task in this milestone**, because every Rust
+snippet below has been run through `rustfmt --edition 2021` and pasted back in its
+formatted shape. That is deliberate: pasted-in code that is not rustfmt-shaped
+drives the `src/app.rs` count from 11 to 36 across the ten tasks (measured
+per-task: 14, 19, 19, 20, 24, 27, 28, 34, 35, 36), and the obvious recovery —
+`rustfmt --edition 2021 src/app.rs` — reformats the 11 pre-existing hunks too and
+destroys the baseline. So: **never run `rustfmt` on `src/app.rs` without
+`--check`.** If you must reshape a snippet, do it in a scratch file under `/tmp`.
+`src/ui.rs` stays at 18 and `src/main.rs` at 0 after every Milestone 6 edit.
 
 `src/main.rs` *is* rustfmt-clean, but plain `rustfmt src/main.rs` follows its `mod`
 declarations into the whole crate and would report all 84 tree-wide diffs. Always
@@ -9938,7 +9951,7 @@ frozen files for no functional reason and belongs in a separate change.
 
 **Interfaces:**
 - Consumes: `crate::gpu::{GpuStatus, GpuDisableReason, GpuHealth, GpuEngine, GpuRx}`; `impl Default for GpuHealth`; `crate::chains::ChainKind` (`PartialEq`, `src/chains/mod.rs:47`)
-- Produces: `App::with_gpu_status(gpu_status: GpuStatus) -> App`; `App::gpu_effective(&self) -> bool`; `App` fields `pub gpu_status: GpuStatus`, `pub gpu_requested: bool`, `pub gpu_env_off: bool`, `pub validated_gpu: bool`, `pub gpu_health: Arc<GpuHealth>`, `pub gpu_rx: Option<GpuRx>`, `gpu_engines: Vec<GpuEngine>`; `pub fn gpu_env_off(vanaddy_gpu: Option<&str>, vanaddy_no_gpu: Option<&str>) -> bool` (the ONE env reader in the binary — Task 8.3 tests this function and adds none of its own)
+- Produces: `App::with_gpu_status(gpu_status: GpuStatus) -> App`; `App::gpu_effective(&self) -> bool`; `App` fields `pub gpu_status: GpuStatus`, `pub gpu_requested: bool`, `pub gpu_env_off: bool`, `pub validated_gpu: bool`, `pub gpu_health: Arc<GpuHealth>`, `pub gpu_rx: Option<GpuRx>`, `pub gpu_engines: Vec<GpuEngine>`; `pub fn gpu_env_off(vanaddy_gpu: Option<&str>, vanaddy_no_gpu: Option<&str>) -> bool` (the ONE env reader in the binary — Task 8.3 tests this function and adds none of its own)
 
 - [ ] **Step 1: Write the failing test for `gpu_effective()`.** Open `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs` and add these two tests inside `mod tests` (after the existing `start_stop_restart_does_not_leak_threads`, before the closing `}` at line 585):
 
@@ -9947,7 +9960,9 @@ frozen files for no functional reason and belongs in a separate change.
     fn gpu_effective_requires_user_device_and_evm() {
         use crate::gpu::{GpuDisableReason, GpuStatus};
 
-        let ready = || GpuStatus::Ready { device: "Apple M1".to_string() };
+        let ready = || GpuStatus::Ready {
+            device: "Apple M1".to_string(),
+        };
 
         // The happy case: user wants it, a device exists, chain is EVM.
         // Set the status explicitly instead of trusting the constructor: the env
@@ -9963,7 +9978,9 @@ frozen files for no functional reason and belongs in a separate change.
         // Initializing and Running are both "the GPU is live for this run".
         app.gpu_status = GpuStatus::Initializing;
         assert!(app.gpu_effective());
-        app.gpu_status = GpuStatus::Running { device: "Apple M1".to_string() };
+        app.gpu_status = GpuStatus::Running {
+            device: "Apple M1".to_string(),
+        };
         assert!(app.gpu_effective());
 
         // User said no.
@@ -9992,7 +10009,10 @@ frozen files for no functional reason and belongs in a separate change.
         // status that gpu_effective() rejects, so a test that forgets to set up
         // the GPU can never accidentally spawn a real one.
         let app = App::new();
-        assert!(matches!(app.gpu_status, crate::gpu::GpuStatus::Unavailable(_)));
+        assert!(matches!(
+            app.gpu_status,
+            crate::gpu::GpuStatus::Unavailable(_)
+        ));
         assert!(!app.gpu_requested);
         assert!(!app.validated_gpu);
         assert!(app.gpu_rx.is_none());
@@ -10058,7 +10078,12 @@ use crate::gpu::{GpuEngine, GpuHealth, GpuRx, GpuStatus};
     pub gpu_rx: Option<GpuRx>,
     /// Parked engines awaiting reap. NEVER joined on the UI thread — see
     /// `stop_search` and `shutdown_gpu`.
-    gpu_engines: Vec<GpuEngine>,
+    ///
+    /// `pub` like every other `App` field, and not for style: the first READ is
+    /// Task 6.6 Step 4, so a private field here fires `warning: field
+    /// `gpu_engines` is never read` and pushes the clippy count from 12 to 13
+    /// through five consecutive gates (6.1, 6.2, 6.3, 6.4, 6.5). Measured.
+    pub gpu_engines: Vec<GpuEngine>,
 ```
 
 - [ ] **Step 5: Add the env lever helper — the ONLY one in the binary.** In the same file, insert this free function immediately before `pub fn detect_optimal_threads()` (line 319):
@@ -10205,12 +10230,13 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && cargo clippy --all-targets 2>&1 | grep 
 
 Expected: the suite passes, `11` (the pre-existing `src/app.rs` drift count), and exactly the 12 baseline
 clippy lines listed in the milestone preamble — no new line, and none pointing
-into `src/gpu/` or `src/verify.rs`. Never run bare `cargo fmt`.
+into `src/gpu/` or `src/verify.rs`. Never run bare `cargo fmt`, and **never run `rustfmt` on `src/app.rs` without `--check`** — that would reformat the 11 pre-existing drift hunks as well and permanently destroy the `11` baseline this gate, the milestone preamble and Milestone 7's preamble (plan:12205) all pin. Every snippet in this milestone has been pre-formatted with `rustfmt --edition 2021`, so a count above `11` means YOUR insertion is not rustfmt-shaped: fix it by hand, or paste it into a scratch file under `/tmp` and run `rustfmt --edition 2021` on that.
 
 - [ ] **Step 10: Commit.**
 
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && git add -A && git commit -F- <<'EOF'
+cd /Users/shawnhopkinson/Rust/Vanaddy && git status --porcelain   # look first; leave anything you do not own alone
+cd /Users/shawnhopkinson/Rust/Vanaddy && git commit --only src/app.rs -F- <<'EOF'
 feat(gpu): App GPU fields, with_gpu_status, and gpu_effective()
 
 App carries the probe result, the form toggle, the env lever, the shared
@@ -10241,11 +10267,15 @@ EOF
     fn validate_never_returns_err_for_a_gpu_reason() {
         use crate::gpu::{GpuDisableReason, GpuStatus};
 
-        let mut app = App::with_gpu_status(GpuStatus::Ready { device: "Apple M1".to_string() });
+        let mut app = App::with_gpu_status(GpuStatus::Ready {
+            device: "Apple M1".to_string(),
+        });
         // Pin the status: the constructor's env lever rewrites a `Ready` probe
         // into `Disabled(UserOff)`, and this test must not depend on the
         // developer's shell.
-        app.gpu_status = GpuStatus::Ready { device: "Apple M1".to_string() };
+        app.gpu_status = GpuStatus::Ready {
+            device: "Apple M1".to_string(),
+        };
         app.chain = crate::chains::ChainKind::Evm;
         app.vanity_prefix = "abcd".into();
         app.thread_count = "2".into();
@@ -10260,14 +10290,22 @@ EOF
         app.gpu_status = GpuStatus::Disabled(GpuDisableReason::VerifyMismatch {
             address: "0x0000000000000000000000000000000000000000".to_string(),
         });
-        assert!(app.validate().is_ok(), "a faulted GPU must never block a CPU search");
+        assert!(
+            app.validate().is_ok(),
+            "a faulted GPU must never block a CPU search"
+        );
         assert!(!app.validated_gpu);
 
         // GPU requested on a non-EVM chain: still fine, still CPU-only.
-        app.gpu_status = GpuStatus::Ready { device: "Apple M1".to_string() };
+        app.gpu_status = GpuStatus::Ready {
+            device: "Apple M1".to_string(),
+        };
         app.chain = crate::chains::ChainKind::Solana;
         app.vanity_prefix = "abcd".into();
-        assert!(app.validate().is_ok(), "EVM-only offload must never block another chain");
+        assert!(
+            app.validate().is_ok(),
+            "EVM-only offload must never block another chain"
+        );
         assert!(!app.validated_gpu);
 
         // No device at all.
@@ -10279,7 +10317,10 @@ EOF
         // A real, non-GPU error still errors. The advisory line must not have
         // swallowed the thread-count validation.
         app.thread_count = "0".into();
-        assert!(app.validate().is_err(), "thread-count validation is unaffected");
+        assert!(
+            app.validate().is_err(),
+            "thread-count validation is unaffected"
+        );
     }
 ```
 
@@ -10348,10 +10389,11 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && cargo clippy --all-targets 2>&1 | grep 
 
 Expected: the suite passes, `11` (the pre-existing `src/app.rs` drift count), and exactly the 12 baseline
 clippy lines listed in the milestone preamble — no new line, and none pointing
-into `src/gpu/` or `src/verify.rs`. Never run bare `cargo fmt`.
+into `src/gpu/` or `src/verify.rs`. Never run bare `cargo fmt`, and **never run `rustfmt` on `src/app.rs` without `--check`** — that would reformat the 11 pre-existing drift hunks as well and permanently destroy the `11` baseline this gate, the milestone preamble and Milestone 7's preamble (plan:12205) all pin. Every snippet in this milestone has been pre-formatted with `rustfmt --edition 2021`, so a count above `11` means YOUR insertion is not rustfmt-shaped: fix it by hand, or paste it into a scratch file under `/tmp` and run `rustfmt --edition 2021` on that.
 
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && git add -A && git commit -F- <<'EOF'
+cd /Users/shawnhopkinson/Rust/Vanaddy && git status --porcelain   # look first; leave anything you do not own alone
+cd /Users/shawnhopkinson/Rust/Vanaddy && git commit --only src/app.rs -F- <<'EOF'
 feat(gpu): validate() records the GPU decision, never refuses on it
 
 validated_gpu mirrors validated_thread_count: start_search acts on what
@@ -10380,30 +10422,52 @@ EOF
 ```rust
 #[cfg(test)]
 mod tests {
-    use super::install_terminal_restoring_panic_hook;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use super::install_panic_hook_with;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// NOTE: this test manipulates the PROCESS-WIDE panic hook, and `cargo test`
     /// runs tests as threads in one process. It installs, exercises, and then
     /// restores the default hook. Keep it short.
+    ///
+    /// It records an ORDER, not merely "the previous hook ran". Measured: with
+    /// an EMPTY `fn install_terminal_restoring_panic_hook() {}` body this test's
+    /// earlier form still printed `test result: ok. 1 passed`, because the
+    /// stand-in hook below is then the installed one and latches anyway. So the
+    /// restore action is injected here and its ORDER asserted: it must run
+    /// BEFORE the previous hook, which prints the message and backtrace that are
+    /// unreadable in raw mode on the alternate screen.
     #[test]
     fn panic_hook_restores_terminal_and_still_calls_the_previous_hook() {
-        static PREV_RAN: AtomicBool = AtomicBool::new(false);
+        static SEQ: AtomicUsize = AtomicUsize::new(1);
+        static RESTORE_AT: AtomicUsize = AtomicUsize::new(0);
+        static PREV_AT: AtomicUsize = AtomicUsize::new(0);
 
         // Stand in a hook of our own so we can prove the chain is intact. The
         // classic bug is forgetting `prev(info)`, which silently deletes every
         // panic message and backtrace in the binary.
         std::panic::set_hook(Box::new(|_| {
-            PREV_RAN.store(true, Ordering::SeqCst);
+            PREV_AT.store(SEQ.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
         }));
 
-        install_terminal_restoring_panic_hook();
+        // The SAME wiring main() installs, with a restore action this test can
+        // observe.
+        install_panic_hook_with(|| {
+            RESTORE_AT.store(SEQ.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
+        });
 
         let result = std::panic::catch_unwind(|| panic!("deliberate test panic"));
         assert!(result.is_err(), "the panic must still unwind");
-        assert!(
-            PREV_RAN.load(Ordering::SeqCst),
+
+        let restore_at = RESTORE_AT.load(Ordering::SeqCst);
+        let prev_at = PREV_AT.load(Ordering::SeqCst);
+        assert_ne!(restore_at, 0, "the terminal restore never ran");
+        assert_ne!(
+            prev_at, 0,
             "the installed hook must call the previous hook, or all panic output is lost"
+        );
+        assert!(
+            restore_at < prev_at,
+            "the terminal must be restored BEFORE the previous hook prints: {restore_at} vs {prev_at}"
         );
 
         // Restore the default hook so unrelated tests print normally.
@@ -10444,8 +10508,8 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test panic_hook_restores_terminal
 Expected failure:
 
 ```
-error[E0432]: unresolved import `super::install_terminal_restoring_panic_hook`
-  no `install_terminal_restoring_panic_hook` in the root
+error[E0432]: unresolved import `super::install_panic_hook_with`
+  no `install_panic_hook_with` in the root
 ```
 
 - [ ] **Step 3: Add the panic-hook installer.** In `/Users/shawnhopkinson/Rust/Vanaddy/src/main.rs`, insert this function immediately before `fn main() -> io::Result<()> {` (line 23):
@@ -10459,10 +10523,19 @@ error[E0432]: unresolved import `super::install_terminal_restoring_panic_hook`
 /// screen. Without this, a panic leaves the user in raw mode on the alternate
 /// screen with a shell that echoes nothing.
 fn install_terminal_restoring_panic_hook() {
-    let prev = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
+    install_panic_hook_with(|| {
         let _ = disable_raw_mode();
         let _ = stdout().execute(LeaveAlternateScreen);
+    });
+}
+
+/// Split out so the test can observe that the restore ran, and that it ran
+/// BEFORE the previous hook. Asserting only "the previous hook ran" passes for
+/// an empty installer — measured; see the Step 1 test's doc comment.
+fn install_panic_hook_with(restore: impl Fn() + Send + Sync + 'static) {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore();
         prev(info);
     }));
 }
@@ -10506,10 +10579,14 @@ fn main() -> io::Result<()> {
 - [ ] **Step 5: Run both tests and watch them pass.**
 
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test panic_hook_restores_terminal probe_result_reaches_the_app -- --test-threads=1
+cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test panic_hook_restores_terminal -- --test-threads=1
 ```
 
-Expect `test result: ok. 2 passed`. (`--test-threads=1` keeps the global-hook window from overlapping another test's panic.)
+```sh
+cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test probe_result_reaches_the_app -- --test-threads=1
+```
+
+Expect `test result: ok. 1 passed` from EACH. Two invocations, not one: `cargo test` takes a single positional filter and rejects a second with `error: unexpected argument '...' found` **before** anything is compiled — verified on this machine — so a single combined invocation compiles nothing, runs nothing, and can never print `2 passed`. (`--test-threads=1` keeps the global-hook window from overlapping another test's panic.)
 
 - [ ] **Step 6: Run the whole suite and the milestone gate, then commit.**
 
@@ -10521,10 +10598,41 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && cargo clippy --all-targets 2>&1 | grep 
 
 Expected: the suite passes, `0` (`src/main.rs` is rustfmt-clean; `--config skip_children=true` keeps `rustfmt` from walking the whole crate — the `--skip-children` *flag* does not exist in `rustfmt 1.9.0-stable`, and using it makes this gate print `0` unconditionally), and exactly the 12 baseline
 clippy lines listed in the milestone preamble — no new line, and none pointing
-into `src/gpu/` or `src/verify.rs`. Never run bare `cargo fmt`.
+into `src/gpu/` or `src/verify.rs`. Never run bare `cargo fmt`, and **never run `rustfmt` on `src/app.rs` without `--check`** — that would reformat the 11 pre-existing drift hunks as well and permanently destroy the `11` baseline this gate, the milestone preamble and Milestone 7's preamble (plan:12205) all pin. Every snippet in this milestone has been pre-formatted with `rustfmt --edition 2021`, so a count above `11` means YOUR insertion is not rustfmt-shaped: fix it by hand, or paste it into a scratch file under `/tmp` and run `rustfmt --edition 2021` on that.
+
+Then the two STATIC gates, for the parts no unit test in this task can reach.
+`panic_hook_restores_terminal_and_still_calls_the_previous_hook` never invokes
+`main`, and neither does `probe_result_reaches_the_app` — it calls
+`GpuEngine::probe()` and `App::with_gpu_status(..)` directly, and passes
+unchanged with `main()` left as `let mut app = App::new();` (measured). So the
+ordering inside `main` is asserted by reading the file:
 
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && git add -A && git commit -F- <<'EOF'
+cd /Users/shawnhopkinson/Rust/Vanaddy && awk '/install_terminal_restoring_panic_hook\(\);/{h=NR} /enable_raw_mode\(\)\?;/{if(!r)r=NR} END{if(h&&r&&h<r){print "OK: hook installed before raw mode"}else{print "FAIL h="h" r="r; exit 1}}' src/main.rs
+```
+
+```sh
+cd /Users/shawnhopkinson/Rust/Vanaddy && awk '
+  /catch_unwind\(gpu::GpuEngine::probe\)/{p=NR}
+  /install_terminal_restoring_panic_hook\(\);/{h=NR}
+  /enable_raw_mode\(\)\?;/{if(!r)r=NR}
+  /App::with_gpu_status\(gpu_status\)/{a=NR}
+  END{ if(p&&h&&r&&a&&p<h&&h<r&&r<a) print "OK: probe -> hook -> raw mode -> with_gpu_status";
+       else {print "FAIL p="p" h="h" r="r" a="a; exit 1} }' src/main.rs
+```
+
+Expected: `OK: hook installed before raw mode`, then
+`OK: probe -> hook -> raw mode -> with_gpu_status`, each exiting 0. The second
+subsumes the first's ordering check and adds the two wiring facts nothing else
+gates — that the probe happens before the hook, and that its result actually
+reaches `App`. Both are kept: the first is the one that fails legibly if Step 4
+was applied but Step 3 was not. Verified on this machine that moving
+`install_terminal_restoring_panic_hook();` below `enable_raw_mode()?;` makes the
+first print `FAIL h=10 r=8` and exit 1.
+
+```sh
+cd /Users/shawnhopkinson/Rust/Vanaddy && git status --porcelain   # look first; leave anything you do not own alone
+cd /Users/shawnhopkinson/Rust/Vanaddy && git commit --only src/main.rs -F- <<'EOF'
 feat(gpu): probe before raw mode, restore the terminal on any panic
 
 GpuEngine::probe() runs before enable_raw_mode() so Metal stderr noise or
@@ -10549,7 +10657,7 @@ EOF
 
 **Interfaces:**
 - Consumes: `crate::chains::Match` with `pub verified: crate::verify::Verified`; `crate::verify::Verified::cpu_reference()`; `crate::app::append_match_row(path: &Path, m: &Match) -> io::Result<()>`; `CSV_PATH: &str`; dev-dependency `tempfile = "3"`
-- Produces: `pub const MATCH_CAP: usize = 500`; `App` fields `pub matches: VecDeque<Match>`, `pub total_matches: u64`, `pub csv_path: PathBuf`
+- Produces: `pub const MATCH_CAP: usize = 500`; `App` fields `pub matches: VecDeque<Match>`, `pub total_matches: u64`, `pub csv_path: PathBuf`, `pub csv_write_failures: u64`
 
 - [ ] **Step 1: Write the failing test.** Add this test inside `mod tests` in `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs`:
 
@@ -10592,7 +10700,11 @@ EOF
             format!("0x{:040x}", MATCH_CAP + 6),
             "the newest match is retained"
         );
-        assert_eq!(app.selected_match, MATCH_CAP - 1, "selection tracks the newest row");
+        assert_eq!(
+            app.selected_match,
+            MATCH_CAP - 1,
+            "selection tracks the newest row"
+        );
 
         // Eviction is a RENDER budget, not data loss: every match is on disk.
         let csv = std::fs::read_to_string(&app.csv_path).unwrap();
@@ -10646,13 +10758,23 @@ pub const MATCH_CAP: usize = 500;
 
 ```rust
     pub matches: VecDeque<Match>,
-    /// Every match ever found this run, including those evicted by MATCH_CAP.
-    /// This is the number the stats pane and the exit summary must show.
+    /// Every match this run that reached `drain_matches`, including those
+    /// evicted by MATCH_CAP. Matches still queued when the user stops are
+    /// drained by `stop_search` before the receiver is dropped (Task 6.7
+    /// Step 3), so this is the honest run total. It is the number the stats
+    /// pane and the exit summary must show.
     pub total_matches: u64,
     /// Where the CSV lives. Production is `CSV_PATH`; tests point it at a temp
     /// dir, because `cargo test` runs tests as threads in one process and
     /// `set_current_dir` is therefore racy.
     pub csv_path: PathBuf,
+    /// How many rows failed to reach the CSV this run. Nothing in this codebase
+    /// checks that a row was actually written, so eviction cannot claim "it is
+    /// already durably in the CSV" without this counter: while it is non-zero
+    /// the in-memory list is the ONLY copy of those seed phrases, so eviction
+    /// stops (Step 7) and the exit summary must not claim they were saved
+    /// (Step 9).
+    pub csv_write_failures: u64,
 ```
 
 - [ ] **Step 5: Initialise the new fields.** In `App::with_gpu_status`, replace `matches: Vec::new(),` with:
@@ -10661,9 +10783,10 @@ pub const MATCH_CAP: usize = 500;
             matches: VecDeque::new(),
             total_matches: 0,
             csv_path: PathBuf::from(CSV_PATH),
+            csv_write_failures: 0,
 ```
 
-- [ ] **Step 6: Reset the total in `start_search`.** In `start_search`, replace lines 217-218:
+- [ ] **Step 6: Reset the counters in `start_search`.** In `start_search`, replace lines 217-218:
 
 ```rust
         self.matches.clear();
@@ -10675,6 +10798,7 @@ with:
 ```rust
         self.matches.clear();
         self.total_matches = 0;
+        self.csv_write_failures = 0;
         self.selected_match = 0;
 ```
 
@@ -10689,9 +10813,15 @@ with:
                 self.total_matches += 1;
                 self.matches.push_back(payload);
                 // Evict from the FRONT: the newest matches are the ones on
-                // screen, and the evicted ones are already durably in the CSV.
-                while self.matches.len() > MATCH_CAP {
-                    self.matches.pop_front();
+                // screen. Eviction is only a RENDER budget while every row is
+                // durably on disk — and nothing above proves that until Task
+                // 6.5 Step 7 checks the write result. Once a write has failed,
+                // the in-memory list is the ONLY copy of those seed phrases, so
+                // stop evicting rather than destroying a found wallet.
+                if self.csv_write_failures == 0 {
+                    while self.matches.len() > MATCH_CAP {
+                        self.matches.pop_front();
+                    }
                 }
                 self.selected_match = self.matches.len().saturating_sub(1);
             }
@@ -10741,16 +10871,35 @@ with:
     let matches = app.total_matches;
 ```
 
-and replace line 62:
+and replace the whole `if matches > 0 { ... }` block (lines 61-66). `Saved to` and
+the security warning are CLAIMS about what is on disk, and Task 6.5 Step 7 makes a
+failed write silent; printing them unconditionally tells the user their wallets were
+saved when they were not:
 
 ```rust
+        if matches > 0 {
             println!("  Saved to        : vanity_wallets.csv");
+            println!("  SECURITY WARNING: CSV contains plaintext seed phrases.");
+            println!("                    File is chmod 0600 (owner-only). Move to");
+            println!("                    an encrypted location and delete the original.");
+        }
 ```
 
 with:
 
 ```rust
+        if matches > 0 && app.csv_write_failures == 0 {
             println!("  Saved to        : {}", app.csv_path.display());
+            println!("  SECURITY WARNING: CSV contains plaintext seed phrases.");
+            println!("                    File is chmod 0600 (owner-only). Move to");
+            println!("                    an encrypted location and delete the original.");
+        } else if app.csv_write_failures > 0 {
+            println!(
+                "  NOT SAVED       : {} matches could not be written to {}",
+                app.csv_write_failures,
+                app.csv_path.display()
+            );
+        }
 ```
 
 - [ ] **Step 10: Run the test and watch it pass.**
@@ -10773,10 +10922,11 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && cargo clippy --all-targets 2>&1 | grep 
 
 Expected: the suite passes, `11` for `src/app.rs`, `18` for `src/ui.rs` and `0` for `src/main.rs` (the pre-existing drift counts), and exactly the 12 baseline
 clippy lines listed in the milestone preamble — no new line, and none pointing
-into `src/gpu/` or `src/verify.rs`. Never run bare `cargo fmt`.
+into `src/gpu/` or `src/verify.rs`. Never run bare `cargo fmt`, and **never run `rustfmt` on `src/app.rs` without `--check`** — that would reformat the 11 pre-existing drift hunks as well and permanently destroy the `11` baseline this gate, the milestone preamble and Milestone 7's preamble (plan:12205) all pin. Every snippet in this milestone has been pre-formatted with `rustfmt --edition 2021`, so a count above `11` means YOUR insertion is not rustfmt-shaped: fix it by hand, or paste it into a scratch file under `/tmp` and run `rustfmt --edition 2021` on that.
 
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && git add -A && git commit -F- <<'EOF'
+cd /Users/shawnhopkinson/Rust/Vanaddy && git status --porcelain   # look first; leave anything you do not own alone
+cd /Users/shawnhopkinson/Rust/Vanaddy && git commit --only src/app.rs src/ui.rs src/main.rs -F- <<'EOF'
 feat(ui): cap the in-memory match list at 500, count the rest
 
 render_match_table rebuilds every row (3 String allocations each) ten
@@ -10797,6 +10947,7 @@ EOF
 ### Task 6.5: Hold the CSV file open for the search
 
 **Files:**
+- Modify: `/Users/shawnhopkinson/Rust/Vanaddy/CLAUDE.md` (line 50 — the `chmod 0600` convention, whose wording this task makes false; see Step 8a)
 - Modify: `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs` (`struct App`; `App::with_gpu_status`; the `// Ensure CSV has header` block in `start_search`, as Task 2.5 Step 6 left it — no line number, because Tasks 2.5, 5.1, 6.1 and 6.4 all insert above it; `drain_matches`; `append_match_row` — added in Milestone 2)
 - Test: `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs` (`mod tests`)
 
@@ -10814,6 +10965,22 @@ EOF
 
         let mut app = App::new();
         app.csv_path = path.clone();
+        // Pre-create the file LOOSE, so the post-open `set_permissions` inside
+        // `open_csv_secure` is what makes the mode assertion below pass — not
+        // `.mode(0o600)` at create, which passes even with the re-assert
+        // deleted. (Measured: deleting the re-assert leaves this test green and
+        // correctly fails `open_csv_secure_reasserts_0600_on_preexisting_0644`.)
+        //
+        // Note what this task CHANGES: the mode is now re-asserted per OPEN,
+        // i.e. once per search, not once per row. A chmod applied by another
+        // process mid-search is no longer corrected until the next
+        // `start_search`. That is the contract this test pins.
+        std::fs::write(&path, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
         app.csv_file = Some(open_csv_secure(&path).unwrap());
 
         let (tx, rx) = mpsc::channel();
@@ -10834,15 +11001,24 @@ EOF
 
         let csv = std::fs::read_to_string(&path).unwrap();
         assert!(csv.contains("0xaaaa"), "first row landed: {csv}");
-        assert!(csv.contains("0xbbbb"), "second row landed through the SAME handle: {csv}");
-        assert!(csv.contains("0xcccc"), "third row landed through the SAME handle: {csv}");
+        assert!(
+            csv.contains("0xbbbb"),
+            "second row landed through the SAME handle: {csv}"
+        );
+        assert!(
+            csv.contains("0xcccc"),
+            "third row landed through the SAME handle: {csv}"
+        );
         assert_eq!(csv.lines().count(), 3, "no row duplicated or lost: {csv}");
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "the CSV holds plaintext seed phrases: owner-only, always");
+            assert_eq!(
+                mode, 0o600,
+                "the CSV holds plaintext seed phrases: owner-only, always"
+            );
         }
     }
 
@@ -10872,7 +11048,50 @@ EOF
         app.drain_matches();
 
         let csv = std::fs::read_to_string(&path).unwrap();
-        assert!(csv.contains("0xfallback"), "fallback writer must not drop a match: {csv}");
+        assert!(
+            csv.contains("0xfallback"),
+            "fallback writer must not drop a match: {csv}"
+        );
+    }
+
+    #[test]
+    fn a_failed_csv_write_is_counted_and_never_evicts_the_only_copy() {
+        // Neither writer can succeed: `csv_path` points inside a directory that
+        // does not exist. The match must survive in memory — with the write
+        // failed, that in-memory row is the ONLY copy of the seed phrase — and
+        // the user must be told, because Step 7 otherwise swallows the error.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new();
+        app.csv_path = dir.path().join("no-such-dir").join("vanity_wallets.csv");
+        assert!(app.csv_file.is_none());
+
+        let (tx, rx) = mpsc::channel();
+        app.rx = Some(rx);
+        tx.send(Match {
+            chain: "EVM".to_string(),
+            address: "0xdoomed".to_string(),
+            secret_hex: "33".repeat(32),
+            mnemonic: "abandon abandon abandon".to_string(),
+            verified: crate::verify::Verified::cpu_reference(),
+        })
+        .unwrap();
+        drop(tx);
+
+        app.drain_matches();
+
+        assert_eq!(
+            app.csv_write_failures, 1,
+            "the failed write must be counted"
+        );
+        assert_eq!(
+            app.matches.len(),
+            1,
+            "the in-memory row is now the ONLY copy"
+        );
+        assert!(
+            app.error_message.is_some(),
+            "the user must be told the CSV is not being written"
+        );
     }
 ```
 
@@ -10893,8 +11112,10 @@ error[E0609]: no field `csv_file` on type `App`
 ```rust
     /// The CSV handle held open for the whole search. At a 1-character EVM
     /// vanity the match rate reaches ~1,700/s; reopening per row costs ~5,100
-    /// syscalls/s (open + fstat + chmod) on the UI thread. 0600 is re-asserted
-    /// on this one open, exactly as before.
+    /// syscalls/s (open + fstat + chmod) on the UI thread. 0600 is asserted on
+    /// this open, as on every other — but note this CHANGES the guarantee
+    /// CLAUDE.md states: it is re-asserted once per search now, not once per
+    /// row. Step 8a rewrites that line to match.
     csv_file: Option<File>,
 ```
 
@@ -10915,7 +11136,9 @@ error[E0609]: no field `csv_file` on type `App`
 /// cannot be constructed without a `verify::Verified` token, so an unverified
 /// GPU candidate has no path to disk.
 fn write_match_row(file: &mut File, m: &Match) -> io::Result<()> {
-    let mut wtr = WriterBuilder::new().has_headers(false).from_writer(&mut *file);
+    let mut wtr = WriterBuilder::new()
+        .has_headers(false)
+        .from_writer(&mut *file);
     wtr.write_record([&m.chain, &m.address, &m.secret_hex, &m.mnemonic])?;
     wtr.flush()
 }
@@ -10968,8 +11191,11 @@ with:
             Ok(mut file) => {
                 let needs_header = file.metadata().map(|m| m.len() == 0).unwrap_or(true);
                 if needs_header {
-                    let mut wtr = WriterBuilder::new().has_headers(false).from_writer(&mut file);
-                    let _ = wtr.write_record(["Chain", "Address", "Private Key (hex)", "Seed Phrase"]);
+                    let mut wtr = WriterBuilder::new()
+                        .has_headers(false)
+                        .from_writer(&mut file);
+                    let _ =
+                        wtr.write_record(["Chain", "Address", "Private Key (hex)", "Seed Phrase"]);
                     let _ = wtr.flush();
                 }
                 self.csv_file = Some(file);
@@ -10990,15 +11216,23 @@ with:
 with:
 
 ```rust
-                match self.csv_file.as_mut() {
-                    Some(file) => {
-                        let _ = write_match_row(file, &payload);
-                    }
+                let write_result = match self.csv_file.as_mut() {
+                    Some(file) => write_match_row(file, &payload),
                     // No handle held (start_search's open failed, or this is a
                     // test driving drain_matches directly). Never drop a match.
-                    None => {
-                        let _ = append_match_row(&self.csv_path, &payload);
-                    }
+                    None => append_match_row(&self.csv_path, &payload),
+                };
+                // Do NOT discard this. Task 6.4 Step 7 evicts on the claim that
+                // an evicted row is "already durably in the CSV", and Step 6
+                // above removed the `.expect()` that used to make a failed open
+                // loud. With both, a `let _ =` here means a mid-run ENOSPC
+                // silently destroys seed phrases while the exit summary reports
+                // them saved.
+                if let Err(e) = write_result {
+                    self.csv_write_failures += 1;
+                    self.error_message = Some(format!(
+                        "CSV write failed ({e}); matches are NOT being saved"
+                    ));
                 }
 ```
 
@@ -11017,7 +11251,32 @@ Expect `test result: ok. 1 passed`.
 cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test drain_falls_back_to_the_path
 ```
 
-Expect `test result: ok. 1 passed`.
+```sh
+cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test a_failed_csv_write_is_counted
+```
+
+Expect `test result: ok. 1 passed` from each.
+
+- [ ] **Step 8a: Make CLAUDE.md's 0600 convention true.** This task moves the
+re-assert from once per ROW to once per SEARCH. `CLAUDE.md:50` states the old
+behaviour as a hard convention — *"**CSV is `chmod 0600` always.** `start_search`
+and `drain_matches` both reassert mode-0o600 on every open in case the user (or
+another process) loosened it. Don't remove that."* — and Task 8.6's edit list
+(plan:14999) covers CLAUDE.md lines 7, 20-28, 33-45, 52, 56-69 and 77-85, so line
+50 falls in the gap and would silently stay false. Replace that whole line with:
+
+```
+- **CSV is `chmod 0600` always.** `open_csv_secure` is the single chokepoint: it sets `.mode(0o600)` at create AND re-asserts 0600 after every open. `start_search` opens once and holds the handle for the search; `drain_matches` writes through it. `append_match_row` (the no-handle fallback, and every test path) still re-asserts per open. Don't remove either half.
+```
+
+Verify the claim the new line makes, and that the old one is gone:
+
+```sh
+cd /Users/shawnhopkinson/Rust/Vanaddy && grep -n 'chmod 0600' CLAUDE.md
+```
+
+Expect one line, naming `open_csv_secure` — and no mention of `drain_matches`
+re-asserting.
 
 - [ ] **Step 9: Run the whole suite and the milestone gate, then commit.**
 
@@ -11029,10 +11288,11 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && cargo clippy --all-targets 2>&1 | grep 
 
 Expected: the suite passes, `11` (the pre-existing `src/app.rs` drift count), and exactly the 12 baseline
 clippy lines listed in the milestone preamble — no new line, and none pointing
-into `src/gpu/` or `src/verify.rs`. Never run bare `cargo fmt`.
+into `src/gpu/` or `src/verify.rs`. Never run bare `cargo fmt`, and **never run `rustfmt` on `src/app.rs` without `--check`** — that would reformat the 11 pre-existing drift hunks as well and permanently destroy the `11` baseline this gate, the milestone preamble and Milestone 7's preamble (plan:12205) all pin. Every snippet in this milestone has been pre-formatted with `rustfmt --edition 2021`, so a count above `11` means YOUR insertion is not rustfmt-shaped: fix it by hand, or paste it into a scratch file under `/tmp` and run `rustfmt --edition 2021` on that.
 
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && git add -A && git commit -F- <<'EOF'
+cd /Users/shawnhopkinson/Rust/Vanaddy && git status --porcelain   # look first; leave anything you do not own alone
+cd /Users/shawnhopkinson/Rust/Vanaddy && git commit --only src/app.rs CLAUDE.md -F- <<'EOF'
 feat(app): hold the CSV open for the search, one row writer
 
 At a 1-character EVM vanity the match rate reaches ~1,700/s and
@@ -11066,13 +11326,19 @@ EOF
 ```rust
     #[test]
     fn gpu_spawn_is_skipped_while_a_previous_engine_is_still_winding_down() {
-        assert!(gpu_spawn_allowed(true, 0), "validated and nothing parked -> spawn");
+        assert!(
+            gpu_spawn_allowed(true, 0),
+            "validated and nothing parked -> spawn"
+        );
         assert!(
             !gpu_spawn_allowed(true, 1),
             "a previous engine has not finished -> skip the GPU this run, NEVER join"
         );
         assert!(!gpu_spawn_allowed(true, 3));
-        assert!(!gpu_spawn_allowed(false, 0), "user, chain or status said no");
+        assert!(
+            !gpu_spawn_allowed(false, 0),
+            "user, chain or status said no"
+        );
         assert!(!gpu_spawn_allowed(false, 2));
     }
 
@@ -11091,8 +11357,14 @@ EOF
         assert!(!app.validated_gpu);
 
         app.start_search();
-        assert!(app.gpu_rx.is_none(), "no GPU channel when the GPU is not effective");
-        assert!(app.gpu_engines.is_empty(), "no engine spawned when the GPU is not effective");
+        assert!(
+            app.gpu_rx.is_none(),
+            "no GPU channel when the GPU is not effective"
+        );
+        assert!(
+            app.gpu_engines.is_empty(),
+            "no engine spawned when the GPU is not effective"
+        );
         assert!(app.state == AppState::Searching);
 
         app.stop_search();
@@ -11255,12 +11527,13 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && cargo clippy --all-targets 2>&1 | grep 
 
 Expected: the suite passes, `11` (the pre-existing `src/app.rs` drift count), and exactly the 12 baseline
 clippy lines listed in the milestone preamble — no new line, and none pointing
-into `src/gpu/` or `src/verify.rs`. Never run bare `cargo fmt`.
+into `src/gpu/` or `src/verify.rs`. Never run bare `cargo fmt`, and **never run `rustfmt` on `src/app.rs` without `--check`** — that would reformat the 11 pre-existing drift hunks as well and permanently destroy the `11` baseline this gate, the milestone preamble and Milestone 7's preamble (plan:12205) all pin. Every snippet in this milestone has been pre-formatted with `rustfmt --edition 2021`, so a count above `11` means YOUR insertion is not rustfmt-shaped: fix it by hand, or paste it into a scratch file under `/tmp` and run `rustfmt --edition 2021` on that.
 
 In particular there must be no `unused variable: health` line — if there is, Step 4a's deletion did not happen.
 
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && git add -A && git commit -F- <<'EOF'
+cd /Users/shawnhopkinson/Rust/Vanaddy && git status --porcelain   # look first; leave anything you do not own alone
+cd /Users/shawnhopkinson/Rust/Vanaddy && git commit --only src/app.rs -F- <<'EOF'
 feat(gpu): start_search reaps non-blocking, then spawns
 
 is_finished()/reap() only touch engines that have already returned, so
@@ -11286,7 +11559,7 @@ EOF
 
 **Interfaces:**
 - Consumes: `crate::gpu::GpuEngine::signal_stop(&self)` (non-blocking, never joins)
-- Produces: `stop_search` signals every parked engine, drops `gpu_rx` and `csv_file`, and returns immediately
+- Produces: `stop_search` drains any queued matches FIRST, then signals every parked engine, drops `gpu_rx` and `csv_file`, and returns immediately
 
 - [ ] **Step 1: Write the failing test.** Add this test inside `mod tests` in `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs`:
 
@@ -11294,13 +11567,32 @@ EOF
     #[test]
     fn stop_search_releases_everything_and_never_blocks_the_ui_thread() {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = App::new();
+        // NOT `App::new()`. That is
+        // `with_gpu_status(GpuStatus::Unavailable("not probed"))`, so
+        // `gpu_requested` is false on EVERY target, no engine is ever spawned,
+        // and both the "never joins a GPU thread" timing assertion and the
+        // `gpu_rx` assertion below are vacuous everywhere — Task 6.1's own
+        // `app_new_never_requests_a_gpu_it_has_not_probed` asserts exactly that.
+        // Probe for real; the probe result decides whether it takes effect.
+        let mut app = App::with_gpu_status(crate::gpu::GpuEngine::probe());
+        app.gpu_requested = true;
         app.csv_path = dir.path().join("vanity_wallets.csv");
         app.chain = crate::chains::ChainKind::Evm;
         app.vanity_prefix = "aaaaaaaa".into();
         app.thread_count = "2".into();
         app.validate().unwrap();
         app.start_search();
+
+        // On a machine that really has a device, prove the precondition rather
+        // than assuming it: without a parked engine there is nothing a join
+        // could block on, and the timing assertion below means nothing.
+        #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
+        if app.validated_gpu {
+            assert!(
+                !app.gpu_engines.is_empty(),
+                "precondition: a real engine must be parked for the never-join assertion to mean anything"
+            );
+        }
 
         assert!(app.csv_file.is_some(), "start_search holds the CSV open");
 
@@ -11314,10 +11606,55 @@ EOF
         );
         assert!(app.stop.load(Ordering::Relaxed), "workers are told to exit");
         assert!(app.rx.is_none(), "match channel released");
-        assert!(app.gpu_rx.is_none(), "GPU channel released — this is producer wake-path #2");
+        assert!(
+            app.gpu_rx.is_none(),
+            "GPU channel released — this is producer wake-path #2"
+        );
         assert!(app.csv_file.is_none(), "CSV handle closed and flushed");
         assert!(app.thread_pool.is_none());
         assert!(app.state == AppState::Configuring);
+    }
+
+    #[test]
+    fn stop_search_drains_matches_still_queued_at_stop_time() {
+        // Every match sitting in the mpsc queue when the user presses Ctrl+C is
+        // a FOUND WALLET. Dropping the receiver without a final drain destroys
+        // it: never written to the CSV, never counted, unrecoverable. Step 3
+        // therefore drains FIRST, before `self.rx = None` and before the CSV
+        // handle is closed.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vanity_wallets.csv");
+        let mut app = App::new();
+        app.csv_path = path.clone();
+        app.csv_file = Some(open_csv_secure(&path).unwrap());
+        app.state = AppState::Searching;
+
+        let (tx, rx) = mpsc::channel();
+        app.rx = Some(rx);
+        for i in 0..5 {
+            tx.send(Match {
+                chain: "EVM".to_string(),
+                address: format!("0x{i:040x}"),
+                secret_hex: "44".repeat(32),
+                mnemonic: "abandon abandon abandon".to_string(),
+                verified: crate::verify::Verified::cpu_reference(),
+            })
+            .unwrap();
+        }
+        drop(tx);
+
+        app.stop_search();
+
+        assert_eq!(
+            app.total_matches, 5,
+            "a match queued at stop time is still a found wallet"
+        );
+        let csv = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            csv.lines().count(),
+            5,
+            "every queued match reached the CSV: {csv}"
+        );
     }
 ```
 
@@ -11338,6 +11675,13 @@ CSV handle closed and flushed
 
 ```rust
     pub fn stop_search(&mut self) {
+        // FIRST, before anything is released. Everything still in the mpsc
+        // queue is a match a worker already found and verified; dropping the
+        // receiver below would discard it silently — never written to the CSV,
+        // never counted in total_matches. `drain_matches` is a `try_recv` loop,
+        // so it is bounded and non-blocking, and the CSV handle is still open
+        // at this point (it is closed at the bottom of this function).
+        self.drain_matches();
         self.stop.store(true, Ordering::Relaxed);
         self.rx = None;
         // Dropping App's Receiver clone is producer wake-path #2: once App and
@@ -11367,7 +11711,13 @@ CSV handle closed and flushed
 cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test stop_search_releases_everything
 ```
 
-Expect `test result: ok. 1 passed`.
+```sh
+cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test stop_search_drains_matches_still_queued
+```
+
+Expect `test result: ok. 1 passed` from each. Two invocations, not one: `cargo
+test` takes a single positional filter and rejects a second with `error:
+unexpected argument '...' found` before compiling anything.
 
 - [ ] **Step 5: Run the whole suite and the milestone gate, then commit.**
 
@@ -11379,10 +11729,11 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && cargo clippy --all-targets 2>&1 | grep 
 
 Expected: the suite passes, `11` (the pre-existing `src/app.rs` drift count), and exactly the 12 baseline
 clippy lines listed in the milestone preamble — no new line, and none pointing
-into `src/gpu/` or `src/verify.rs`. Never run bare `cargo fmt`.
+into `src/gpu/` or `src/verify.rs`. Never run bare `cargo fmt`, and **never run `rustfmt` on `src/app.rs` without `--check`** — that would reformat the 11 pre-existing drift hunks as well and permanently destroy the `11` baseline this gate, the milestone preamble and Milestone 7's preamble (plan:12205) all pin. Every snippet in this milestone has been pre-formatted with `rustfmt --edition 2021`, so a count above `11` means YOUR insertion is not rustfmt-shaped: fix it by hand, or paste it into a scratch file under `/tmp` and run `rustfmt --edition 2021` on that.
 
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && git add -A && git commit -F- <<'EOF'
+cd /Users/shawnhopkinson/Rust/Vanaddy && git status --porcelain   # look first; leave anything you do not own alone
+cd /Users/shawnhopkinson/Rust/Vanaddy && git commit --only src/app.rs -F- <<'EOF'
 feat(gpu): stop_search signals and parks, never joins
 
 Set the stop flag, drop the match channel, drop App's GPU receiver clone
@@ -11405,7 +11756,7 @@ EOF
 
 **Interfaces:**
 - Consumes: `GpuHealth::disable: AtomicBool`; `GpuHealth::raise(&self, GpuDisableReason)`; `GpuHealth::take_reason(&self) -> Option<GpuDisableReason>`; `GpuEngine::{status, is_finished}`
-- Produces: `fn is_unexpected_gpu_exit(state: AppState, gpu_live: bool, disabled: bool, engine_finished: bool) -> bool`; `drain_matches` promotes faults to `GpuStatus::Disabled` and makes them sticky
+- Produces: `struct GpuExitCheck { state: AppState, gpu_live: bool, disabled: bool, engine_finished: bool }`; `fn is_unexpected_gpu_exit(c: GpuExitCheck) -> bool`; `drain_matches` promotes faults to `GpuStatus::Disabled` and makes them sticky
 
 - [ ] **Step 1: Write the failing tests.** Add these tests inside `mod tests` in `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs`:
 
@@ -11414,12 +11765,27 @@ EOF
     fn mismatch_disables_gpu_and_leaves_app_running() {
         use crate::gpu::{GpuDisableReason, GpuStatus};
 
-        let mut app = App::with_gpu_status(GpuStatus::Running { device: "Apple M1".to_string() });
+        let mut app = App::with_gpu_status(GpuStatus::Running {
+            device: "Apple M1".to_string(),
+        });
         app.chain = crate::chains::ChainKind::Evm;
         app.gpu_requested = true;
         app.validated_gpu = true;
         app.state = AppState::Searching;
         app.start_time = Some(Instant::now());
+
+        // Bind a LIVE drain side. `with_gpu_status` initialises `gpu_rx: None`
+        // and nothing else in this milestone ever assigns it, so without this
+        // the `gpu_rx.is_none()` assertion below is vacuous: deleting
+        // `self.gpu_rx = None;` from Step 4's promotion block leaves the test
+        // green. `crossbeam-channel` is an unconditional dependency, so this is
+        // portable to every leg.
+        let (keep_tx, rx) = crossbeam_channel::bounded::<Box<crate::gpu::SeedBlock>>(1);
+        app.gpu_rx = Some(rx);
+        assert!(
+            app.gpu_rx.is_some(),
+            "precondition: a live drain side exists"
+        );
 
         // A Rayon worker found a GPU candidate that MATCHED the pattern but did
         // not re-derive on the CPU. That is a GPU fault, never a false positive.
@@ -11430,34 +11796,64 @@ EOF
         app.drain_matches();
 
         assert!(
-            matches!(app.gpu_status, GpuStatus::Disabled(GpuDisableReason::VerifyMismatch { .. })),
+            matches!(
+                app.gpu_status,
+                GpuStatus::Disabled(GpuDisableReason::VerifyMismatch { .. })
+            ),
             "the fault must be promoted to a visible status on the next tick"
         );
         assert!(!app.gpu_requested, "sticky for the process");
         assert!(!app.validated_gpu, "sticky for the process");
-        assert!(!app.gpu_effective(), "a faulted GPU can never turn itself back on");
-        assert!(app.gpu_rx.is_none(), "the drain side is released so workers stop draining");
+        assert!(
+            !app.gpu_effective(),
+            "a faulted GPU can never turn itself back on"
+        );
+        assert!(
+            app.gpu_rx.is_none(),
+            "the drain side is released so workers stop draining"
+        );
 
         // And the whole point: the app keeps searching on CPU.
         assert!(!app.should_quit, "a GPU fault must never quit the app");
-        assert!(app.state == AppState::Searching, "the search continues on CPU");
+        assert!(
+            app.state == AppState::Searching,
+            "the search continues on CPU"
+        );
         assert!(
             !app.stop.load(Ordering::Relaxed),
             "the GPU has its OWN stop flag; App::stop must be untouched or every worker exits"
         );
+        drop(keep_tx);
     }
 
     #[test]
     fn fault_promotion_is_idempotent_and_never_overwrites_the_first_reason() {
         use crate::gpu::{GpuDisableReason, GpuStatus};
 
-        let mut app = App::with_gpu_status(GpuStatus::Running { device: "Apple M1".to_string() });
+        let mut app = App::with_gpu_status(GpuStatus::Running {
+            device: "Apple M1".to_string(),
+        });
         app.chain = crate::chains::ChainKind::Evm;
         app.gpu_requested = true;
         app.state = AppState::Searching;
 
-        app.gpu_health.raise(GpuDisableReason::AuditMismatch { index: 5183 });
+        app.gpu_health
+            .raise(GpuDisableReason::AuditMismatch { index: 5183 });
         app.drain_matches();
+
+        // A DIFFERENT reason on a FRESH cell. Re-ticking the SAME cell proves
+        // nothing: `GpuHealth::reason` is a set-once `OnceLock` and
+        // `take_reason` clones without consuming, so ticks 2 and 3 re-derive
+        // the identical `AuditMismatch { index: 5183 }` and every field the
+        // promotion body writes is idempotent — removing the
+        // `!matches!(.., Disabled(_))` guard at Step 4, the guard this test
+        // exists to protect, leaves it green (and the set-once property itself
+        // is already covered by
+        // `gpu::tests::raise_records_the_first_reason_and_never_overwrites_it`).
+        // With a fresh cell carrying a different reason, an unguarded second
+        // promotion overwrites the first and this test fails.
+        app.gpu_health = Arc::new(crate::gpu::GpuHealth::default());
+        app.gpu_health.raise(GpuDisableReason::Panicked);
         app.drain_matches();
         app.drain_matches();
 
@@ -11472,17 +11868,77 @@ EOF
     fn unexpected_gpu_exit_is_detected_only_on_a_live_faultless_run() {
         // Searching, live channel, no fault raised, yet the engine finished:
         // the producer died quietly and the TUI would report Running at 0/s.
-        assert!(is_unexpected_gpu_exit(AppState::Searching, true, false, true));
+        assert!(is_unexpected_gpu_exit(GpuExitCheck {
+            state: AppState::Searching,
+            gpu_live: true,
+            disabled: false,
+            engine_finished: true,
+        }));
         // A finished engine after a clean stop is expected, not a fault.
-        assert!(!is_unexpected_gpu_exit(AppState::Configuring, true, false, true));
+        assert!(!is_unexpected_gpu_exit(GpuExitCheck {
+            state: AppState::Configuring,
+            gpu_live: true,
+            disabled: false,
+            engine_finished: true,
+        }));
         // The GPU was skipped this run (no live channel): a leftover engine from
         // the previous run finishing is exactly what we asked it to do.
-        assert!(!is_unexpected_gpu_exit(AppState::Searching, false, false, true));
+        assert!(!is_unexpected_gpu_exit(GpuExitCheck {
+            state: AppState::Searching,
+            gpu_live: false,
+            disabled: false,
+            engine_finished: true,
+        }));
         // A fault was already raised: the promotion branch owns that case and
         // has the real reason. Do not overwrite it with Panicked.
-        assert!(!is_unexpected_gpu_exit(AppState::Searching, true, true, true));
+        assert!(!is_unexpected_gpu_exit(GpuExitCheck {
+            state: AppState::Searching,
+            gpu_live: true,
+            disabled: true,
+            engine_finished: true,
+        }));
         // Engine still running: nothing to report.
-        assert!(!is_unexpected_gpu_exit(AppState::Searching, true, false, false));
+        assert!(!is_unexpected_gpu_exit(GpuExitCheck {
+            state: AppState::Searching,
+            gpu_live: true,
+            disabled: false,
+            engine_finished: false,
+        }));
+    }
+
+    #[test]
+    fn status_refresh_leaves_the_status_alone_when_no_engine_is_parked() {
+        use crate::gpu::GpuStatus;
+
+        // Step 2's whole branch is guarded by `self.gpu_rx.is_some()`, which no
+        // other test in this milestone ever makes true — omit Step 2 entirely
+        // and all three tests above still pass. Bind a live receiver so the
+        // branch is actually entered, with nothing parked to read a status
+        // from: the status must survive untouched, the empty `gpu_engines` list
+        // must not panic, and a faultless tick must not release the channel.
+        let (keep_tx, rx) = crossbeam_channel::bounded::<Box<crate::gpu::SeedBlock>>(1);
+        let mut app = App::with_gpu_status(GpuStatus::Initializing);
+        app.chain = crate::chains::ChainKind::Evm;
+        app.gpu_requested = true;
+        app.state = AppState::Searching;
+        app.gpu_rx = Some(rx);
+        assert!(
+            app.gpu_engines.is_empty(),
+            "precondition: nothing is parked"
+        );
+
+        app.drain_matches();
+
+        assert_eq!(
+            app.gpu_status,
+            GpuStatus::Initializing,
+            "no engine, so no status to read"
+        );
+        assert!(
+            app.gpu_rx.is_some(),
+            "a faultless tick must not release the channel"
+        );
+        drop(keep_tx);
     }
 ```
 
@@ -11516,6 +11972,20 @@ the fault must be promoted to a visible status on the next tick
 - [ ] **Step 3: Add the pure unexpected-exit predicate.** In `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs`, insert this free function immediately after `fn gpu_spawn_allowed(..)` (added in Task 6.6):
 
 ```rust
+/// The four facts the quiet-death check weighs.
+///
+/// NAMED FIELDS, not four positional `bool`s. At the call site in
+/// `drain_matches` three consecutive booleans are passed; transposing
+/// `gpu_live` with `disabled` there COMPILES, silently disables quiet-death
+/// detection for the life of the binary, and no test of the predicate itself
+/// can see it. With named fields the same mistake is a compile error.
+struct GpuExitCheck {
+    state: AppState,
+    gpu_live: bool,
+    disabled: bool,
+    engine_finished: bool,
+}
+
 /// Did a GPU engine die quietly?
 ///
 /// A producer that returns without raising a reason — a panic that escaped the
@@ -11526,13 +11996,8 @@ the fault must be promoted to a visible status on the next tick
 ///
 /// Pure, so it is testable on targets where a live `GpuEngine` cannot be
 /// constructed in a test.
-fn is_unexpected_gpu_exit(
-    state: AppState,
-    gpu_live: bool,
-    disabled: bool,
-    engine_finished: bool,
-) -> bool {
-    state == AppState::Searching && gpu_live && !disabled && engine_finished
+fn is_unexpected_gpu_exit(c: GpuExitCheck) -> bool {
+    c.state == AppState::Searching && c.gpu_live && !c.disabled && c.engine_finished
 }
 ```
 
@@ -11576,12 +12041,12 @@ fn is_unexpected_gpu_exit(
 
         // ---- 3. Unexpected exit: the engine finished but nothing was raised.
         let engine_finished = self.gpu_engines.iter().any(|e| e.is_finished());
-        if is_unexpected_gpu_exit(
-            self.state,
-            self.gpu_rx.is_some(),
-            self.gpu_health.disable.load(Ordering::Relaxed),
+        if is_unexpected_gpu_exit(GpuExitCheck {
+            state: self.state,
+            gpu_live: self.gpu_rx.is_some(),
+            disabled: self.gpu_health.disable.load(Ordering::Relaxed),
             engine_finished,
-        ) {
+        }) {
             self.gpu_status = GpuStatus::Disabled(crate::gpu::GpuDisableReason::Panicked);
             self.gpu_requested = false;
             self.validated_gpu = false;
@@ -11596,7 +12061,7 @@ The rest of `drain_matches` (the `while let Ok(payload) = rx.try_recv()` loop fr
 
 - [ ] **Step 5: Run the tests and watch them pass.**
 
-Three invocations, not one: `cargo test` takes a single positional filter and rejects a second
+Four invocations, not one: `cargo test` takes a single positional filter and rejects a second
 with `error: unexpected argument '...' found` before compiling anything.
 
 ```sh
@@ -11611,6 +12076,10 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test fault_promotion_is_idempoten
 cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test unexpected_gpu_exit_is_detected
 ```
 
+```sh
+cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test status_refresh_leaves_the_status_alone
+```
+
 Expect `test result: ok. 1 passed` from each.
 
 - [ ] **Step 6: Run the whole suite and the milestone gate, then commit.**
@@ -11623,10 +12092,11 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && cargo clippy --all-targets 2>&1 | grep 
 
 Expected: the suite passes, `11` (the pre-existing `src/app.rs` drift count), and exactly the 12 baseline
 clippy lines listed in the milestone preamble — no new line, and none pointing
-into `src/gpu/` or `src/verify.rs`. Never run bare `cargo fmt`.
+into `src/gpu/` or `src/verify.rs`. Never run bare `cargo fmt`, and **never run `rustfmt` on `src/app.rs` without `--check`** — that would reformat the 11 pre-existing drift hunks as well and permanently destroy the `11` baseline this gate, the milestone preamble and Milestone 7's preamble (plan:12205) all pin. Every snippet in this milestone has been pre-formatted with `rustfmt --edition 2021`, so a count above `11` means YOUR insertion is not rustfmt-shaped: fix it by hand, or paste it into a scratch file under `/tmp` and run `rustfmt --edition 2021` on that.
 
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && git add -A && git commit -F- <<'EOF'
+cd /Users/shawnhopkinson/Rust/Vanaddy && git status --porcelain   # look first; leave anything you do not own alone
+cd /Users/shawnhopkinson/Rust/Vanaddy && git commit --only src/app.rs -F- <<'EOF'
 feat(gpu): drain_matches promotes GPU faults on the UI tick
 
 One path for every failure: GpuDisableReason -> GpuHealth::raise ->
@@ -11680,15 +12150,29 @@ EOF
     /// implementation — an unbounded join included. So this test parks a REAL,
     /// still-running engine: the deadline is then the thing actually under test.
     ///
-    /// Sequencing: wait for the first block, which puts the ~60-95 ms shader
-    /// compile and the ~300 ms self-test behind us, then shut down with a 10 ms
-    /// deadline. In steady state the producer cannot react to the stop flag
-    /// faster than one command buffer draining through the in-flight ring
-    /// (8.8 ms x PIPELINE_DEPTH ~= 26 ms; ~135 ms worst case), so at 10 ms it is
-    /// guaranteed to still be running and the bound must be what ends the wait.
-    /// A join would take ~135 ms and blow the upper assertion; the lower
-    /// assertion pins that the deadline was genuinely reached, so the test can
-    /// never pass vacuously the way the empty-`gpu_engines` version did.
+    /// Sequencing: shut down DURING STARTUP, not in steady state. The producer
+    /// is then inside `MetalPbkdf2::new()` — device creation plus a cold shader
+    /// compile — which does not observe the stop flag at all. MEASURED reaction
+    /// time there: 55-83 ms debug, 46-63 ms release; a 4.6x margin over the
+    /// 10 ms deadline in BOTH profiles, so the bound is always what ends the
+    /// wait.
+    ///
+    /// Waiting for the first block instead (the earlier shape of this test) put
+    /// the producer in steady state, where it reacts far faster than the
+    /// "~135 ms" this comment used to claim: the tree's own
+    /// `signal_stop_finishes_the_producer_within_200ms` measures 20-27 ms debug
+    /// and 3-6 ms release. That is below the 10 ms deadline in release, so the
+    /// lower assertion failed 3/3 there — and only ~27 ms in debug, so a
+    /// deliberately-wrong `shutdown_gpu` that waits unboundedly and then reaps
+    /// (the realistic O14 violation) passed ALL FOUR assertions. Measured.
+    ///
+    /// The `Arc::strong_count` assertion below is the timing-immune half. The
+    /// producer thread holds its own `Arc<GpuHealth>` clone for its whole life
+    /// (`src/gpu/metal.rs:588`, captured by the spawned closure) and
+    /// `shutdown_gpu` drops only the engine's clone, so a count of 1 on return
+    /// means the thread was already gone — i.e. this was a join. Measured:
+    /// bounded 11.6-14.8 ms with count 2 in both profiles; unbounded wait +
+    /// reap 48-341 ms with count 1.
     ///
     /// The engine is abandoned mid-flight, exactly as `shutdown_gpu`'s doc
     /// comment describes: its thread exits on the stop flag a few tens of ms
@@ -11720,18 +12204,14 @@ EOF
         // early and hand this test a free pass.
         app.gpu_rx = Some(rx.clone());
 
-        let first = rx
-            .recv_timeout(Duration::from_secs(180))
-            .expect("no block within 180 s of GpuEngine::start");
-        drop(first);
-
+        // No `recv` first: shut down while the producer is still starting up.
         let deadline = Duration::from_millis(10);
         let before = Instant::now();
         app.shutdown_gpu(deadline);
         let elapsed = before.elapsed();
 
         assert!(
-            elapsed < deadline + Duration::from_millis(50),
+            elapsed < deadline + Duration::from_millis(25),
             "shutdown_gpu is a bounded wait, never a join: {elapsed:?}"
         );
         assert!(
@@ -11740,10 +12220,18 @@ EOF
              is_finished — must be what ended the wait: {elapsed:?}"
         );
         assert!(
+            std::sync::Arc::strong_count(&app.gpu_health) >= 2,
+            "shutdown_gpu joined the producer: the thread's Arc<GpuHealth> was already \
+             dropped when the call returned, so this was a join, not a bounded wait"
+        );
+        assert!(
             app.gpu_engines.is_empty(),
             "an engine still running past the deadline is abandoned, not left parked"
         );
-        assert!(app.gpu_rx.is_none(), "shutdown_gpu drops App's channel clone");
+        assert!(
+            app.gpu_rx.is_none(),
+            "shutdown_gpu drops App's channel clone"
+        );
     }
 ```
 
@@ -11818,6 +12306,12 @@ with:
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
 
+    // A quit taken straight out of Searching leaves verified matches in the
+    // mpsc queue. This is the last chance to write them: `stop_search` was
+    // never called on this path, so without this drain they are found wallets
+    // destroyed at exit, and the summary below under-reports the run.
+    app.drain_matches();
+
     // Restore the terminal FIRST, then wind the GPU down. Worst case in steady
     // state is ~135 ms (one command buffer + the in-flight ring + one
     // send_timeout); ~400 ms during startup. 600 ms covers both. Anything still
@@ -11834,17 +12328,21 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test shutdown_gpu -- --nocapture
 ```
 
 Expect `test result: ok. 2 passed`. On this machine
-`shutdown_gpu_honours_its_deadline_with_a_live_engine` takes ~1 s (shader
-compile + self-test + first wave) and prints nothing; on a machine with no Metal
-device it prints `SKIP: no Metal device on this machine (...)` and passes in
-microseconds; on the stub leg (`cargo test --no-default-features shutdown_gpu`)
+`shutdown_gpu_honours_its_deadline_with_a_live_engine` returns in ~12-15 ms — it
+shuts the engine down DURING startup and never waits for a block, so the shader
+compile and self-test are still in flight when it returns; on a machine with no
+Metal device it prints `SKIP: no Metal device on this machine (...)` and passes
+in microseconds; on the stub leg (`cargo test --no-default-features shutdown_gpu`)
 its `#[cfg]` excludes it entirely and the run reports `1 passed`.
 
 If the live test fails on `the engine was still running, so the DEADLINE ... must
-be what ended the wait`, the producer reacted to the stop flag inside 10 ms —
-which contradicts the 8.8 ms-per-command-buffer pipeline. Investigate the
-producer before relaxing the assertion; do not delete it, or the deadline goes
-back to being untested.
+be what ended the wait`, the producer reacted faster than the deadline. Do NOT go
+looking for a bug in the producer first: check
+`signal_stop_finishes_the_producer_within_200ms` for the current measured
+reaction time (20-27 ms debug, 3-6 ms release as of this branch) and confirm the
+shutdown is still happening during startup rather than in steady state, which is
+the whole point of the sequencing above. Do not delete the assertion, or the
+deadline goes back to being untested.
 
 - [ ] **Step 6b: Remove the Milestone 1 dead-code blanket.** This is the first
 point in the branch at which the whole `GpuEngine` surface is consumed — `probe`
@@ -11909,7 +12407,7 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && cargo clippy --all-targets 2>&1 | grep 
 
 Expected: the suite passes, `11` for `src/app.rs` and `0` for `src/main.rs` (the pre-existing drift counts), and exactly the 12 baseline
 clippy lines listed in the milestone preamble — no new line, and none pointing
-into `src/gpu/` or `src/verify.rs`. Never run bare `cargo fmt`.
+into `src/gpu/` or `src/verify.rs`. Never run bare `cargo fmt`, and **never run `rustfmt` on `src/app.rs` without `--check`** — that would reformat the 11 pre-existing drift hunks as well and permanently destroy the `11` baseline this gate, the milestone preamble and Milestone 7's preamble (plan:12205) all pin. Every snippet in this milestone has been pre-formatted with `rustfmt --edition 2021`, so a count above `11` means YOUR insertion is not rustfmt-shaped: fix it by hand, or paste it into a scratch file under `/tmp` and run `rustfmt --edition 2021` on that.
 
 Also format the files this branch created, which have no drift to preserve:
 
@@ -11918,7 +12416,8 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 src/gpu/*.rs src
 ```
 
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && git add -A && git commit -F- <<'EOF'
+cd /Users/shawnhopkinson/Rust/Vanaddy && git status --porcelain   # look first; leave anything you do not own alone
+cd /Users/shawnhopkinson/Rust/Vanaddy && git commit --only src/app.rs src/main.rs src/gpu/mod.rs src/gpu/metal.rs src/gpu/stub.rs src/gpu/pack.rs src/gpu/producer.rs src/gpu/selftest.rs src/gpu/kernel_src.rs src/verify.rs -F- <<'EOF'
 feat(gpu): bounded process-exit reaper for the GPU thread
 
 main() restores the terminal first, then gives parked engines 600 ms to
@@ -11939,7 +12438,7 @@ EOF
 
 **Interfaces:**
 - Consumes: `App::{start_search, stop_search, shutdown_gpu}`; `App` fields `gpu_requested`, `gpu_engines`, `gpu_rx`, `csv_path`
-- Produces: nothing new — this task only strengthens an existing guard
+- Produces: `a_live_engine_never_accumulates_across_start_stop_cycles` (new, `#[cfg]`-gated to macOS/aarch64 + `metal`) — the CPU-only guard it accompanies is only strengthened
 
 - [ ] **Step 1: Replace the existing test with the extended version.** In `/Users/shawnhopkinson/Rust/Vanaddy/src/app.rs`, replace the whole of `start_stop_restart_does_not_leak_threads` (lines 563-584) with:
 
@@ -11961,7 +12460,10 @@ EOF
         app.validate().unwrap();
 
         app.start_search();
-        assert!(app.gpu_engines.is_empty(), "no engine spawned when the GPU is off");
+        assert!(
+            app.gpu_engines.is_empty(),
+            "no engine spawned when the GPU is off"
+        );
         assert!(app.gpu_rx.is_none());
         thread::sleep(Duration::from_millis(50));
         app.stop_search();
@@ -11986,6 +12488,46 @@ EOF
         assert!(before.elapsed() < Duration::from_millis(50));
         assert!(app.gpu_engines.is_empty());
     }
+
+    /// The half the CPU-only test above cannot reach. That test sets
+    /// `gpu_requested = false`, so `validate()` leaves `validated_gpu` false,
+    /// `gpu_spawn_allowed` is false, and NO engine is ever created on either
+    /// cycle: `gpu_engines` is empty because it was never non-empty, and
+    /// deleting Task 6.6 Step 4's whole reap loop leaves it green. This one
+    /// runs REAL engines through two start/stop cycles, so accumulation is
+    /// actually observable. Same graceful-skip idiom as Task 6.9 Step 1.
+    #[test]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
+    fn a_live_engine_never_accumulates_across_start_stop_cycles() {
+        if std::env::var_os("VANADDY_NO_GPU").is_some() {
+            eprintln!("SKIP: VANADDY_NO_GPU is set");
+            return;
+        }
+        if let GpuStatus::Unavailable(reason) = GpuEngine::probe() {
+            eprintln!("SKIP: no Metal device on this machine ({reason})");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_gpu_status(GpuEngine::probe());
+        app.csv_path = dir.path().join("vanity_wallets.csv");
+        app.chain = crate::chains::ChainKind::Evm;
+        app.vanity_prefix = "aaaaaaaa".into();
+        app.thread_count = "2".into();
+        app.gpu_requested = true;
+        for _ in 0..2 {
+            app.validate().unwrap();
+            app.start_search();
+            assert!(
+                app.gpu_engines.len() <= 1,
+                "at most one engine is ever live: {}",
+                app.gpu_engines.len()
+            );
+            thread::sleep(Duration::from_millis(50));
+            app.stop_search();
+        }
+        app.shutdown_gpu(Duration::from_millis(600));
+        assert!(app.gpu_engines.is_empty());
+    }
 ```
 
 - [ ] **Step 2: Run it and confirm it passes.**
@@ -11994,7 +12536,20 @@ EOF
 cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test start_stop_restart_does_not_leak_threads
 ```
 
-Expect `test result: ok. 1 passed`. If it fails on `app.gpu_engines.is_empty()`, the reap in `start_search` (Task 6.6, Step 4) is not running — re-read that step.
+```sh
+cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test a_live_engine_never_accumulates
+```
+
+Expect `test result: ok. 1 passed` from each (the second reports `SKIP: ...` and
+passes on a machine with no Metal device, and is `#[cfg]`-excluded entirely on
+the stub leg). Two invocations, not one: `cargo test` takes a single positional
+filter.
+
+`a_live_engine_never_accumulates_across_start_stop_cycles` is the one that
+exercises the reap in `start_search` (Task 6.6, Step 4) — if it fails on
+`app.gpu_engines.is_empty()` or on `at most one engine is ever live`, that reap
+is not running. `start_stop_restart_does_not_leak_threads` cannot tell you that:
+it never creates an engine at all.
 
 - [ ] **Step 3: Confirm the test no longer pollutes the repo.**
 
@@ -12014,10 +12569,11 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && cargo clippy --all-targets 2>&1 | grep 
 
 Expected: the suite passes, `11` (the pre-existing `src/app.rs` drift count), and exactly the 12 baseline
 clippy lines listed in the milestone preamble — no new line, and none pointing
-into `src/gpu/` or `src/verify.rs`. Never run bare `cargo fmt`.
+into `src/gpu/` or `src/verify.rs`. Never run bare `cargo fmt`, and **never run `rustfmt` on `src/app.rs` without `--check`** — that would reformat the 11 pre-existing drift hunks as well and permanently destroy the `11` baseline this gate, the milestone preamble and Milestone 7's preamble (plan:12205) all pin. Every snippet in this milestone has been pre-formatted with `rustfmt --edition 2021`, so a count above `11` means YOUR insertion is not rustfmt-shaped: fix it by hand, or paste it into a scratch file under `/tmp` and run `rustfmt --edition 2021` on that.
 
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && git add -A && git commit -F- <<'EOF'
+cd /Users/shawnhopkinson/Rust/Vanaddy && git status --porcelain   # look first; leave anything you do not own alone
+cd /Users/shawnhopkinson/Rust/Vanaddy && git commit --only src/app.rs -F- <<'EOF'
 test(app): extend the lifecycle leak guard for the GPU engine list
 
 Assert no engine accumulates across start/stop cycles, that the CSV
@@ -12057,9 +12613,12 @@ never accumulate, and at most one engine is ever live.
 >    not, and what the sampler showed.
 >
 > Reporting DONE here is a false pass on the milestone's acceptance gate. Note also that
-> Task 6.10's `start_stop_restart_does_not_leak_threads` already covers thread accumulation
-> and single-engine-liveness automatically; what genuinely needs a human is UI
-> responsiveness under key-mashing, and that is the part being handed back.
+> Task 6.10 covers thread accumulation automatically
+> (`start_stop_restart_does_not_leak_threads`, CPU-only) and single-engine-liveness on an
+> Apple-Silicon `metal` build only
+> (`a_live_engine_never_accumulates_across_start_stop_cycles`, which SKIPs elsewhere); what
+> genuinely needs a human is UI responsiveness under key-mashing, and that is the part being
+> handed back.
 
 - [ ] **Step 1: Build the release binary.**
 
@@ -12383,7 +12942,7 @@ assertion `left == right` failed: StartsWith fields: chain, match, vanity, case,
 cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test --bin vanaddy app::tests:: 2>&1 | tail -20
 ```
 
-Expect `test result: ok.` with 22 passed and 1 ignored — this task's four on top of the 18 already running in `app::tests` by the end of Milestone 6 (1 pre-existing `start_stop_restart_does_not_leak_threads` + 3 from Task 2.5 + 14 from Tasks 6.1/6.2/6.4/6.5/6.6/6.7/6.8/6.9). Task 5.3's live-GPU gate is the `#[ignore]`d one. What matters is that the count rose by exactly 4 and nothing failed.
+Expect `test result: ok.` with 26 passed and 1 ignored on the default macOS/aarch64 + `metal` leg — this task's four on top of the 22 already running in `app::tests` by the end of Milestone 6 (1 pre-existing `start_stop_restart_does_not_leak_threads` + 3 from Task 2.5 + 18 from Tasks 6.1/6.2/6.4/6.5/6.6/6.7/6.8/6.9/6.10, at +2/+1/+1/+3/+2/+2/+4/+2/+1 respectively; Task 6.3's two tests land in `src/main.rs`, i.e. the crate root, and `app::tests::` never matches them). Two of those 18 — `shutdown_gpu_honours_its_deadline_with_a_live_engine` and `a_live_engine_never_accumulates_across_start_stop_cycles` — are `#[cfg]`-gated to that leg, so `--no-default-features` reports two fewer. Task 5.3's live-GPU gate is the `#[ignore]`d one. What matters is that the count rose by exactly 4 and nothing failed.
 
 - [ ] **Step 5: Run the whole suite to confirm nothing else keyed off the old count.**
 
