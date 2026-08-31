@@ -31,6 +31,9 @@ use std::{
 /// screen with a shell that echoes nothing.
 fn install_terminal_restoring_panic_hook() {
     install_panic_hook_with(|| {
+        // Best-effort and deliberately independent: inside a panic hook there
+        // is nowhere to report an error, so both restores are attempted even
+        // if one fails, rather than short-circuiting on the first `Result`.
         let _ = disable_raw_mode();
         let _ = stdout().execute(LeaveAlternateScreen);
     });
@@ -124,42 +127,73 @@ mod tests {
     /// restore action is injected here and its ORDER asserted: it must run
     /// BEFORE the previous hook, which prints the message and backtrace that are
     /// unreadable in raw mode on the alternate screen.
+    ///
+    /// Panic hooks are PROCESS-GLOBAL, so this test's stand-in hook must be
+    /// undone unconditionally — including if an assertion below fails and
+    /// panics before reaching the end of the function. Without that, a
+    /// failed assertion would leave the silent stand-in hook installed as
+    /// the process-global hook for the rest of the `cargo test` binary, and
+    /// every later panic in the process — including other threads' — would
+    /// print nothing.
+    ///
+    /// This is NOT done with an RAII guard whose `Drop` calls
+    /// `std::panic::set_hook`. Measured: `set_hook` panics if the calling
+    /// thread is already unwinding, so a `Drop` reached while THIS test's
+    /// own assertion is unwinding double-panics on the same thread, which
+    /// Rust always turns into an immediate process abort (SIGABRT) —
+    /// `thread caused non-unwinding panic. aborting.` — regardless of
+    /// `panic = "unwind"`. That is strictly worse than the bug it would fix:
+    /// one broken test becomes one aborted `cargo test` run. Instead, the
+    /// exercise-and-assert body runs inside its own `catch_unwind`, which
+    /// returns this thread to a non-panicking state before the hook is
+    /// restored; a failed assertion is then re-raised with
+    /// `resume_unwind` so the test still reports FAILED.
     #[test]
     fn panic_hook_restores_terminal_and_still_calls_the_previous_hook() {
         static SEQ: AtomicUsize = AtomicUsize::new(1);
         static RESTORE_AT: AtomicUsize = AtomicUsize::new(0);
         static PREV_AT: AtomicUsize = AtomicUsize::new(0);
 
-        // Stand in a hook of our own so we can prove the chain is intact. The
-        // classic bug is forgetting `prev(info)`, which silently deletes every
-        // panic message and backtrace in the binary.
-        std::panic::set_hook(Box::new(|_| {
-            PREV_AT.store(SEQ.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
+        let original_hook = std::panic::take_hook();
+
+        let body = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Stand in a hook of our own so we can prove the chain is intact.
+            // The classic bug is forgetting `prev(info)`, which silently
+            // deletes every panic message and backtrace in the binary.
+            std::panic::set_hook(Box::new(|_| {
+                PREV_AT.store(SEQ.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
+            }));
+
+            // The SAME wiring main() installs, with a restore action this
+            // test can observe.
+            install_panic_hook_with(|| {
+                RESTORE_AT.store(SEQ.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
+            });
+
+            let result = std::panic::catch_unwind(|| panic!("deliberate test panic"));
+            assert!(result.is_err(), "the panic must still unwind");
+
+            let restore_at = RESTORE_AT.load(Ordering::SeqCst);
+            let prev_at = PREV_AT.load(Ordering::SeqCst);
+            assert_ne!(restore_at, 0, "the terminal restore never ran");
+            assert_ne!(
+                prev_at, 0,
+                "the installed hook must call the previous hook, or all panic output is lost"
+            );
+            assert!(
+                restore_at < prev_at,
+                "the terminal must be restored BEFORE the previous hook prints: {restore_at} vs {prev_at}"
+            );
         }));
 
-        // The SAME wiring main() installs, with a restore action this test can
-        // observe.
-        install_panic_hook_with(|| {
-            RESTORE_AT.store(SEQ.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
-        });
+        // This thread is no longer unwinding at this point (the body's own
+        // catch_unwind above already caught any assertion panic), so
+        // set_hook is safe to call here on every path.
+        std::panic::set_hook(original_hook);
 
-        let result = std::panic::catch_unwind(|| panic!("deliberate test panic"));
-        assert!(result.is_err(), "the panic must still unwind");
-
-        let restore_at = RESTORE_AT.load(Ordering::SeqCst);
-        let prev_at = PREV_AT.load(Ordering::SeqCst);
-        assert_ne!(restore_at, 0, "the terminal restore never ran");
-        assert_ne!(
-            prev_at, 0,
-            "the installed hook must call the previous hook, or all panic output is lost"
-        );
-        assert!(
-            restore_at < prev_at,
-            "the terminal must be restored BEFORE the previous hook prints: {restore_at} vs {prev_at}"
-        );
-
-        // Restore the default hook so unrelated tests print normally.
-        let _ = std::panic::take_hook();
+        if let Err(payload) = body {
+            std::panic::resume_unwind(payload);
+        }
     }
 
     #[test]
