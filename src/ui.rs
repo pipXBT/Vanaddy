@@ -210,7 +210,7 @@ fn render_stats(f: &mut Frame, area: Rect, app: &App) {
         let count = app.counter.load(Ordering::Relaxed);
         let secs = start.elapsed().as_secs();
         let rate = if secs > 0 { count / secs } else { 0 };
-        (count, rate, app.matches.len() as u64, secs)
+        (count, rate, app.total_matches, secs)
     } else {
         (0, 0, 0, 0)
     };
@@ -361,7 +361,13 @@ fn render_match_table(f: &mut Frame, area: Rect, app: &App) {
                 m.address.clone()
             };
             let cells = vec![
-                Cell::from(format!("{}", i + 1)),
+                // Number from the run's total, not the window index: after the
+                // cap evicts, restarting at 1 would silently claim the run found
+                // fewer matches than it did.
+                Cell::from(format!(
+                    "{}",
+                    (app.total_matches as usize).saturating_sub(app.matches.len()) + i + 1
+                )),
                 Cell::from(m.chain.clone()),
                 Cell::from(addr_display),
             ];

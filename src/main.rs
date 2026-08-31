@@ -91,7 +91,7 @@ fn main() -> io::Result<()> {
     stdout().execute(LeaveAlternateScreen)?;
 
     let total = app.counter.load(Ordering::Relaxed);
-    let matches = app.matches.len();
+    let matches = app.total_matches;
     if total > 0 {
         println!("\n==========================================================");
         println!("  Wallets checked : {}", total);
@@ -99,11 +99,17 @@ fn main() -> io::Result<()> {
         if let Some(start) = app.start_time {
             println!("  Elapsed time    : {:.2?}", start.elapsed());
         }
-        if matches > 0 {
-            println!("  Saved to        : vanity_wallets.csv");
+        if matches > 0 && app.csv_write_failures == 0 {
+            println!("  Saved to        : {}", app.csv_path.display());
             println!("  SECURITY WARNING: CSV contains plaintext seed phrases.");
             println!("                    File is chmod 0600 (owner-only). Move to");
             println!("                    an encrypted location and delete the original.");
+        } else if app.csv_write_failures > 0 {
+            println!(
+                "  NOT SAVED       : {} matches could not be written to {}",
+                app.csv_write_failures,
+                app.csv_path.display()
+            );
         }
         println!("==========================================================\n");
     }

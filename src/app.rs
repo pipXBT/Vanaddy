@@ -15,6 +15,18 @@ use std::{
 };
 
 use crate::gpu::{GpuEngine, GpuHealth, GpuRx, GpuStatus};
+use std::collections::VecDeque;
+use std::path::PathBuf;
+
+/// Cap on the in-memory match list.
+///
+/// `render_match_table` (src/ui.rs:352-370) rebuilds EVERY row — three `String`
+/// allocations each — on every 100 ms frame. At a 1-character EVM vanity the
+/// match rate is ~1 in 16, which the GPU roughly doubles to ~1,700/s; an
+/// uncapped `Vec` therefore reaches ~300,000 allocations per frame within a
+/// minute and the TUI hard-freezes. The cap bounds render cost. `total_matches`
+/// carries the honest count and the CSV carries every row, so nothing is lost.
+pub const MATCH_CAP: usize = 500;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum AppState {
@@ -42,7 +54,24 @@ pub struct App {
     pub show_help: bool,
 
     // Search state
-    pub matches: Vec<Match>,
+    pub matches: VecDeque<Match>,
+    /// Every match this run that reached `drain_matches`, including those
+    /// evicted by MATCH_CAP. Matches still queued when the user stops are
+    /// drained by `stop_search` before the receiver is dropped (Task 6.7
+    /// Step 3), so this is the honest run total. It is the number the stats
+    /// pane and the exit summary must show.
+    pub total_matches: u64,
+    /// Where the CSV lives. Production is `CSV_PATH`; tests point it at a temp
+    /// dir, because `cargo test` runs tests as threads in one process and
+    /// `set_current_dir` is therefore racy.
+    pub csv_path: PathBuf,
+    /// How many rows failed to reach the CSV this run. Nothing in this codebase
+    /// checks that a row was actually written, so eviction cannot claim "it is
+    /// already durably in the CSV" without this counter: while it is non-zero
+    /// the in-memory list is the ONLY copy of those seed phrases, so eviction
+    /// stops (Step 7) and the exit summary must not claim they were saved
+    /// (Step 9).
+    pub csv_write_failures: u64,
     pub selected_match: usize,
     pub counter: Arc<AtomicU64>,
     pub start_time: Option<Instant>,
@@ -117,7 +146,10 @@ impl App {
             validated_thread_count: 0,
             error_message: None,
             show_help: false,
-            matches: Vec::new(),
+            matches: VecDeque::new(),
+            total_matches: 0,
+            csv_path: PathBuf::from(CSV_PATH),
+            csv_write_failures: 0,
             selected_match: 0,
             counter: Arc::new(AtomicU64::new(0)),
             start_time: None,
@@ -310,6 +342,8 @@ impl App {
         let num_threads = self.validated_thread_count;
         self.error_message = None;
         self.matches.clear();
+        self.total_matches = 0;
+        self.csv_write_failures = 0;
         self.selected_match = 0;
         self.counter = Arc::new(AtomicU64::new(0));
         self.stop = Arc::new(AtomicBool::new(false));
@@ -372,10 +406,21 @@ impl App {
     pub fn drain_matches(&mut self) {
         if let Some(ref rx) = self.rx {
             while let Ok(payload) = rx.try_recv() {
-                // append_match_row is the only writer; it re-asserts 0600 on
-                // every open and cannot be handed anything unverified.
-                let _ = append_match_row(Path::new(CSV_PATH), &payload);
-                self.matches.push(payload);
+                let _ = append_match_row(&self.csv_path, &payload);
+
+                self.total_matches += 1;
+                self.matches.push_back(payload);
+                // Evict from the FRONT: the newest matches are the ones on
+                // screen. Eviction is only a RENDER budget while every row is
+                // durably on disk — and nothing above proves that until Task
+                // 6.5 Step 7 checks the write result. Once a write has failed,
+                // the in-memory list is the ONLY copy of those seed phrases, so
+                // stop evicting rather than destroying a found wallet.
+                if self.csv_write_failures == 0 {
+                    while self.matches.len() > MATCH_CAP {
+                        self.matches.pop_front();
+                    }
+                }
                 self.selected_match = self.matches.len().saturating_sub(1);
             }
         }
@@ -1110,6 +1155,59 @@ mod tests {
         eprintln!(
             "counter={n}  gpu_seeds={delivered}  cpu_candidates={}  csv_rows={rows}",
             n - delivered
+        );
+    }
+
+    #[test]
+    fn match_cap_evicts_oldest_and_total_keeps_counting() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new();
+        app.csv_path = dir.path().join("vanity_wallets.csv");
+
+        let (tx, rx) = mpsc::channel();
+        app.rx = Some(rx);
+        for i in 0..(MATCH_CAP + 7) {
+            tx.send(Match {
+                chain: "EVM".to_string(),
+                address: format!("0x{i:040x}"),
+                secret_hex: "00".repeat(32),
+                mnemonic: "abandon abandon abandon".to_string(),
+                verified: crate::verify::Verified::cpu_reference(),
+            })
+            .unwrap();
+        }
+        drop(tx);
+
+        app.drain_matches();
+
+        assert_eq!(app.matches.len(), MATCH_CAP, "the in-memory list is capped");
+        assert_eq!(
+            app.total_matches,
+            (MATCH_CAP + 7) as u64,
+            "total_matches keeps counting past the cap"
+        );
+        assert_eq!(
+            app.matches.front().unwrap().address,
+            format!("0x{:040x}", 7),
+            "the OLDEST matches are the ones evicted"
+        );
+        assert_eq!(
+            app.matches.back().unwrap().address,
+            format!("0x{:040x}", MATCH_CAP + 6),
+            "the newest match is retained"
+        );
+        assert_eq!(
+            app.selected_match,
+            MATCH_CAP - 1,
+            "selection tracks the newest row"
+        );
+
+        // Eviction is a RENDER budget, not data loss: every match is on disk.
+        let csv = std::fs::read_to_string(&app.csv_path).unwrap();
+        assert_eq!(
+            csv.lines().count(),
+            MATCH_CAP + 7,
+            "the CSV holds every match, cap or no cap"
         );
     }
 
