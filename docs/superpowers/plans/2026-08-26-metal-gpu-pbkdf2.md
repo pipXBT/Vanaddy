@@ -6994,11 +6994,14 @@ replaces the enum with the seven-variant shape above and adds
 before Milestone 4**: Step 5's `reason_from` is a one-line delegate to that `From`
 impl and does not compile without it.
 
-- [ ] **Step 1: Declare the module.** Open `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs` and add this line immediately above the `#[cfg_attr(...)]` attribute stack that precedes the `pub mod backend;` declaration — it is the `pub` spelling you are looking for, because Task 3.3 Step 6 promoted `mod backend;` to `pub mod backend;`, so a grep for the Milestone 1 spelling will miss it:
+- [ ] **Step 1: Declare the module.** Open `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs` and add this line on its own line immediately **after** the `pub mod backend;` declaration — that is where rustfmt's `reorder_modules` puts it anyway; do not place it between the explanatory comment and the `#[cfg_attr(` stack, which rustfmt will undo. It is the `pub` spelling you are looking for, because Task 3.3 Step 6 promoted `mod backend;` to `pub mod backend;`, so a grep for the Milestone 1 spelling will miss it:
 
 ```rust
+pub mod backend;
 pub(crate) mod producer;
 ```
+
+  (`rustfmt --check` exits 0.) Placing it above the explanatory comment block instead is also clean if that reads better.
 
   It is declared unconditionally — the GPU-free half of the file must compile and be tested on Linux and under `--no-default-features`.
 
@@ -7039,14 +7042,23 @@ mod tests {
             reason_from(GpuError::PipelineCreate("no function".into())),
             GpuDisableReason::PipelineCreate("no function".into())
         );
-        assert_eq!(reason_from(GpuError::BufferAlloc), GpuDisableReason::BufferAlloc);
+        assert_eq!(
+            reason_from(GpuError::BufferAlloc),
+            GpuDisableReason::BufferAlloc
+        );
         assert_eq!(
             reason_from(GpuError::BadConfig("tg 0".into())),
             GpuDisableReason::BadConfig("tg 0".into())
         );
         assert_eq!(
-            reason_from(GpuError::CommandBuffer { status: 5, message: "IOAF code 3".into() }),
-            GpuDisableReason::CommandBuffer { status: 5, message: "IOAF code 3".into() }
+            reason_from(GpuError::CommandBuffer {
+                status: 5,
+                message: "IOAF code 3".into()
+            }),
+            GpuDisableReason::CommandBuffer {
+                status: 5,
+                message: "IOAF code 3".into()
+            }
         );
     }
 
@@ -7054,7 +7066,10 @@ mod tests {
     fn salt_too_long_becomes_a_bad_config_naming_the_length() {
         match reason_from(GpuError::SaltTooLong { len: 200 }) {
             GpuDisableReason::BadConfig(m) => {
-                assert!(m.contains("200"), "message must name the offending length, got {m:?}");
+                assert!(
+                    m.contains("200"),
+                    "message must name the offending length, got {m:?}"
+                );
                 assert!(m.contains("107"), "message must name the limit, got {m:?}");
             }
             other => panic!("expected BadConfig, got {other:?}"),
@@ -7072,12 +7087,22 @@ mod tests {
             panic!("poison the lock while holding it");
         }));
         std::panic::set_hook(prev_hook);
-        assert!(cell.is_poisoned(), "the setup must actually poison the mutex");
+        assert!(
+            cell.is_poisoned(),
+            "the setup must actually poison the mutex"
+        );
 
-        set_status(&cell, GpuStatus::Running { device: "Apple M1".into() });
+        set_status(
+            &cell,
+            GpuStatus::Running {
+                device: "Apple M1".into(),
+            },
+        );
         assert_eq!(
             read_status(&cell),
-            GpuStatus::Running { device: "Apple M1".into() },
+            GpuStatus::Running {
+                device: "Apple M1".into()
+            },
             "a poisoned status cell must still be readable and writable"
         );
     }
@@ -7255,7 +7280,11 @@ use super::{GpuDisableReason, GpuError, GpuStatus, AUDITS_PER_WAVE};
         }
         // 800 draws from 8192 collapsing to one value has probability
         // 8192^-799; a fixed stride would produce exactly 4 distinct values.
-        assert!(seen.len() > 4, "indices must vary across waves, saw {}", seen.len());
+        assert!(
+            seen.len() > 4,
+            "indices must vary across waves, saw {}",
+            seen.len()
+        );
     }
 ```
 
@@ -7429,7 +7458,9 @@ use std::time::Duration;
         assert!(carve_and_send(&tx, &entropy, &seeds, &stop, &health));
 
         for c in 0..16 {
-            let block = rx.try_recv().unwrap_or_else(|e| panic!("block {c} missing: {e}"));
+            let block = rx
+                .try_recv()
+                .unwrap_or_else(|e| panic!("block {c} missing: {e}"));
             assert_eq!(block.len(), BLOCK, "block {c} is not {BLOCK} candidates");
             let cands = block.chunks(BLOCK).next().expect("one full chunk");
             for (j, cand) in cands.iter().enumerate() {
@@ -7485,7 +7516,10 @@ use std::time::Duration;
         });
 
         assert!(!finished, "must report stop");
-        assert!(started.elapsed() >= Duration::from_millis(300), "must have blocked, not dropped");
+        assert!(
+            started.elapsed() >= Duration::from_millis(300),
+            "must have blocked, not dropped"
+        );
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "must notice stop within one timeout, took {:?}",
@@ -7500,13 +7534,19 @@ use std::time::Duration;
 
     #[test]
     fn carve_and_send_exits_immediately_when_health_is_already_disabled() {
-        let (tx, _rx) = crossbeam_channel::bounded(super::super::CHANNEL_CAPACITY);
+        let (tx, rx) = crossbeam_channel::bounded(super::super::CHANNEL_CAPACITY);
         let stop = AtomicBool::new(false);
         let health = fresh_health();
         health.raise(GpuDisableReason::AuditMismatch { index: 5_183 });
         let (entropy, seeds) = marked_wave(8_192);
 
+        let started = std::time::Instant::now();
         assert!(!carve_and_send(&tx, &entropy, &seeds, &stop, &health));
+        assert!(
+            rx.try_recv().is_err(),
+            "a disabled GPU must deliver nothing"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
     }
 ```
 
@@ -7549,7 +7589,10 @@ pub(crate) fn carve_and_send(
     for (e_chunk, s_chunk) in entropy.chunks_exact(BLOCK).zip(seeds.chunks_exact(BLOCK)) {
         let mut block = Box::new(SeedBlock::with_capacity(BLOCK));
         for (e, s) in e_chunk.iter().zip(s_chunk.iter()) {
-            block.push(GpuCandidate { entropy: *e, seed: *s });
+            block.push(GpuCandidate {
+                entropy: *e,
+                seed: *s,
+            });
         }
         let mut pending = Some(block);
         while let Some(b) = pending.take() {
@@ -7746,7 +7789,10 @@ use std::sync::{Arc, Mutex};
         let finished = Arc::new(AtomicBool::new(false));
         run_guarded(&health, finished.clone(), || Ok(()));
 
-        assert!(finished.load(Ordering::Acquire), "finished must be set on a clean return");
+        assert!(
+            finished.load(Ordering::Acquire),
+            "finished must be set on a clean return"
+        );
         assert!(!health.disable.load(Ordering::Relaxed));
         assert_eq!(health.take_reason(), None);
     }
@@ -7759,13 +7805,19 @@ use std::sync::{Arc, Mutex};
             Err(GpuDisableReason::AuditMismatch { index: 5_183 })
         });
 
-        assert!(health.disable.load(Ordering::Relaxed), "a fault must disable the GPU");
+        assert!(
+            health.disable.load(Ordering::Relaxed),
+            "a fault must disable the GPU"
+        );
         assert_eq!(
             health.take_reason(),
             Some(GpuDisableReason::AuditMismatch { index: 5_183 }),
             "the exact reason must survive to the UI"
         );
-        assert!(finished.load(Ordering::Acquire), "finished must be set on a fault return");
+        assert!(
+            finished.load(Ordering::Acquire),
+            "finished must be set on a fault return"
+        );
     }
 
     #[test]
@@ -7775,7 +7827,9 @@ use std::sync::{Arc, Mutex};
 
         let prev_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        run_guarded(&health, finished.clone(), || panic!("simulated kernel-side unwrap"));
+        run_guarded(&health, finished.clone(), || {
+            panic!("simulated kernel-side unwrap")
+        });
         std::panic::set_hook(prev_hook);
 
         assert!(health.disable.load(Ordering::Relaxed));
@@ -7790,20 +7844,27 @@ use std::sync::{Arc, Mutex};
     fn the_fault_is_visible_to_anyone_who_sees_finished() {
         // The ordering Milestone 6's drain_matches depends on: seeing
         // `finished` implies seeing `disable`, so a fault never looks like an
-        // unexplained quiet death.
+        // unexplained quiet death. This test polls `finished` directly rather
+        // than `.join()`-ing first: `join()` is itself a full synchronisation
+        // edge, so it would pass even if `FinishGuard::drop` used `Relaxed` or
+        // the store ran before `health.raise` -- moving the store above the
+        // `match` in `run_guarded` must turn this test red.
         let health = Arc::new(fresh_health());
         let finished = Arc::new(AtomicBool::new(false));
         let h = health.clone();
         let f = finished.clone();
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             run_guarded(&h, f, || Err(GpuDisableReason::BufferAlloc));
-        })
-        .join()
-        .expect("guarded thread must not propagate a panic");
+        });
 
-        assert!(finished.load(Ordering::Acquire));
+        while !finished.load(Ordering::Acquire) {
+            std::hint::spin_loop();
+        }
         assert!(health.disable.load(Ordering::Relaxed));
         assert_eq!(health.take_reason(), Some(GpuDisableReason::BufferAlloc));
+        handle
+            .join()
+            .expect("guarded thread must not propagate a panic");
     }
 ```
 
@@ -7917,6 +7978,10 @@ mod gpu_tests {
     /// per-wave fill is slow enough to starve the GPU and the test drags.
     #[test]
     fn producer_delivers_three_waves_whose_every_seed_matches_ring() {
+        if std::env::var_os("VANADDY_NO_GPU").is_some() {
+            eprintln!("SKIP: VANADDY_NO_GPU is set");
+            return;
+        }
         let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAPACITY);
         let stop = AtomicBool::new(false);
         let health = fresh_health();
@@ -7925,10 +7990,10 @@ mod gpu_tests {
         let want = 3 * (WAVE / BLOCK);
         let mut blocks: Vec<Box<SeedBlock>> = Vec::with_capacity(want);
 
-        std::thread::scope(|s| {
+        let no_device = std::thread::scope(|s| {
             let worker = s.spawn(|| producer(tx, &stop, &health, &status));
             let deadline = Instant::now() + Duration::from_secs(180);
-            while blocks.len() < want {
+            while blocks.len() < want && !worker.is_finished() {
                 assert!(
                     Instant::now() < deadline,
                     "only {} of {want} blocks in 180 s (status {:?}, reason {:?})",
@@ -7942,8 +8007,16 @@ mod gpu_tests {
             }
             stop.store(true, Ordering::Relaxed);
             let outcome = worker.join().expect("producer must not panic");
+            if outcome == Err(GpuDisableReason::NoDevice) {
+                return true;
+            }
             assert_eq!(outcome, Ok(()), "producer returned a fault");
+            false
         });
+        if no_device {
+            eprintln!("SKIP: no Metal device on this machine");
+            return;
+        }
 
         assert!(
             matches!(read_status(&status), GpuStatus::Running { .. }),
@@ -8205,6 +8278,10 @@ The stop flag is created *inside* `start` and belongs to the producer alone. It 
 
     #[test]
     fn signal_stop_finishes_the_producer_within_200ms() {
+        if std::env::var_os("VANADDY_NO_GPU").is_some() {
+            eprintln!("SKIP: VANADDY_NO_GPU is set");
+            return;
+        }
         let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAPACITY);
         let health = Arc::new(fresh_health());
         let engine = GpuEngine::start(tx, health.clone());
@@ -8228,6 +8305,10 @@ The stop flag is created *inside* `start` and belongs to the producer alone. It 
 
     #[test]
     fn dropping_the_receiver_exits_the_producer_cleanly() {
+        if std::env::var_os("VANADDY_NO_GPU").is_some() {
+            eprintln!("SKIP: VANADDY_NO_GPU is set");
+            return;
+        }
         let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAPACITY);
         let health = Arc::new(fresh_health());
         let engine = GpuEngine::start(tx, health.clone());
@@ -8255,6 +8336,10 @@ The stop flag is created *inside* `start` and belongs to the producer alone. It 
 
     #[test]
     fn status_reports_disabled_once_health_carries_a_reason() {
+        if std::env::var_os("VANADDY_NO_GPU").is_some() {
+            eprintln!("SKIP: VANADDY_NO_GPU is set");
+            return;
+        }
         let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAPACITY);
         let health = Arc::new(fresh_health());
         let engine = GpuEngine::start(tx, health.clone());
@@ -8391,13 +8476,12 @@ impl GpuEngine {
 }
 ```
 
-- [ ] **Step 4: Add the imports the new code needs.** At the top of `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/metal.rs`, add to the existing `use` block (dropping any that are already there):
+- [ ] **Step 4: Add the imports the new code needs.** At the top of `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/metal.rs`, add to the existing `use` block. `GpuStatus` is already in the `crate::gpu::{…}` group at metal.rs:10-13, and `AtomicBool`/`Ordering` are already imported at metal.rs:23 — add neither:
 
 ```rust
 use super::producer::{producer, read_status, run_guarded, set_status};
-use super::{GpuDisableReason, GpuHealth, GpuStatus, SeedBlock};
+use super::{GpuDisableReason, GpuHealth, SeedBlock};
 use crossbeam_channel::Sender;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 ```
@@ -8468,10 +8552,10 @@ impl GpuEngine {
 }
 ```
 
-  and add to the `use` block at the top of the same file:
+  and add to the `use` block at the top of the same file. `GpuStatus` is already imported at `src/gpu/stub.rs:6` as `use crate::gpu::GpuStatus;` — leave that line alone and do not re-import it:
 
 ```rust
-use super::{GpuDisableReason, GpuHealth, GpuStatus, SeedBlock};
+use super::{GpuDisableReason, GpuHealth, SeedBlock};
 use crossbeam_channel::Sender;
 use std::sync::Arc;
 ```
@@ -8482,7 +8566,7 @@ use std::sync::Arc;
 cd /Users/shawnhopkinson/Rust/Vanaddy && cargo build --no-default-features && cargo test --no-default-features 2>&1 | tail -10
 ```
 
-  Expect a clean build and `test result: ok.` with the pre-existing 63 tests plus this milestone's 17 GPU-free ones, 0 failed.
+  Expect a clean build and `test result: ok.` with 0 failed. The count is the current `--no-default-features` baseline — **110** at the end of Milestone 3 — plus this milestone's GPU-free producer tests (16, plus the macOS-only QoS test = 17 on macOS), i.e. **127** on macOS.
 
 - [ ] **Step 8: Run the whole suite, then gate the lints on the baseline delta.** Per this milestone's preamble: no bare `cargo fmt`, and the gate is "no NEW warning", not "no warnings".
 
@@ -8527,16 +8611,23 @@ Measure with a saturated CPU, not on an idle machine: throughput was reproducibl
 - [ ] **Step 1: Write the failing measurement test.** Append inside the `mod gpu_tests` block in `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/producer.rs`:
 
 ```rust
-    /// MEASUREMENT, not a gate. Run it when the kernel, the wave geometry or
-    /// the machine changes, then update `EVM_GPU_SEEDS_PER_SEC` to match:
+    /// MEASUREMENT, not a gate. Run it under CPU load (Task 4.8 Step 4) when
+    /// the kernel, the wave geometry or the machine changes, then run Step 5
+    /// to fold the result into `EVM_GPU_SEEDS_PER_SEC`:
     ///
     ///   cargo test --release gpu_seed_rate_end_to_end -- --ignored --nocapture
     ///
-    /// The assertion floor is the observed compositor-contention floor
-    /// (~3,000 seeds/s), not the target: a number below that means something is
-    /// broken, a number above it is data, not a pass/fail.
+    /// Three independent 10 s windows, not one 30 s window: a single sample
+    /// cannot tell "this machine does 13,800/s" from "this machine got one
+    /// lucky window". The floor (3,000 seeds/s) is the observed
+    /// compositor-contention floor, not the target: below it means something
+    /// is broken; a spread above 15% between the three windows means the run
+    /// was not clean (compositor busy, thermal throttling) and must be
+    /// re-run with the display otherwise quiescent. On success, appends
+    /// `rate,device_name,timestamp` to `/tmp/vanaddy-rate/measured.txt` for
+    /// Step 5 to read back — this test never edits the constant itself.
     #[test]
-    #[ignore = "measurement; run with --release --nocapture"]
+    #[ignore = "measurement; run with --release --nocapture, see Task 4.8 Step 4"]
     fn gpu_seed_rate_end_to_end() {
         let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAPACITY);
         let health = Arc::new(fresh_health());
@@ -8549,32 +8640,76 @@ Measure with a saturated CPU, not on an idle machine: throughput was reproducibl
             .expect("no block within 180 s of start");
         drop(first);
 
-        let window = Duration::from_secs(30);
-        let started = Instant::now();
-        let mut blocks = 0u64;
-        while started.elapsed() < window {
-            if rx.recv_timeout(Duration::from_millis(500)).is_ok() {
-                blocks += 1;
+        let mut rates = Vec::with_capacity(3);
+        for window_ix in 0..3 {
+            let window = Duration::from_secs(10);
+            let started = Instant::now();
+            let mut blocks = 0u64;
+            while started.elapsed() < window {
+                if rx.recv_timeout(Duration::from_millis(500)).is_ok() {
+                    blocks += 1;
+                }
             }
+            let secs = started.elapsed().as_secs_f64();
+            let rate = (blocks as f64) * (BLOCK as f64) / secs;
+            eprintln!(
+                "window {window_ix}: {rate:.0} seeds/s ({blocks} blocks x {BLOCK} over {secs:.1}s)"
+            );
+            rates.push(rate);
         }
-        let secs = started.elapsed().as_secs_f64();
+
+        let device_name = match engine.status() {
+            GpuStatus::Running { device } => device,
+            other => format!("{other:?}"),
+        };
+
         engine.signal_stop();
         await_finished(&engine, Duration::from_secs(5), "measurement stop");
         engine.reap();
 
-        let rate = (blocks as f64) * (BLOCK as f64) / secs;
+        let min = rates.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = rates.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let mean = rates.iter().sum::<f64>() / rates.len() as f64;
+        let spread = (max - min) / mean;
         eprintln!(
-            "\nEVM_GPU_SEEDS_PER_SEC measured: {rate:.0} seeds/s \
-             ({blocks} blocks x {BLOCK} over {secs:.1}s)\n\
-             current constant: {:.0}\n",
+            "\nEVM_GPU_SEEDS_PER_SEC measured: {mean:.0} seeds/s (mean of 3 x 10s windows, \
+             spread {:.1}%)\ncurrent constant: {:.0}\n",
+            spread * 100.0,
             crate::gpu::EVM_GPU_SEEDS_PER_SEC
         );
         assert!(
-            rate > 3_000.0,
-            "delivered rate {rate:.0}/s is below the compositor-contention floor; \
+            min > 3_000.0,
+            "delivered rate {min:.0}/s is below the compositor-contention floor; \
              something is wrong with the pipeline, not just busy"
         );
-        assert_eq!(health.take_reason(), None, "no fault during the measurement");
+        assert!(
+            spread < 0.15,
+            "run-to-run spread {:.1}% exceeds 15% -- the display was not quiescent \
+             or the machine was thermally throttling; re-run",
+            spread * 100.0
+        );
+        assert_eq!(
+            health.take_reason(),
+            None,
+            "no fault during the measurement"
+        );
+
+        std::fs::create_dir_all("/tmp/vanaddy-rate").expect("create /tmp/vanaddy-rate");
+        let timestamp = std::process::Command::new("date")
+            .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown-time".to_string());
+        let line = format!("{mean:.0},{device_name},{timestamp}\n");
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/vanaddy-rate/measured.txt")
+            .and_then(|mut f| f.write_all(line.as_bytes()))
+            .expect("append /tmp/vanaddy-rate/measured.txt");
     }
 ```
 
@@ -8590,11 +8725,54 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test --release gpu_seed_rate_end_
 error[E0425]: cannot find value `EVM_GPU_SEEDS_PER_SEC` in module `crate::gpu`
 ```
 
-- [ ] **Step 3: Add the constant with the spec's provisional value.** In `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs`, immediately after `pub const AUDITS_PER_WAVE: usize = 4;`, add:
+- [ ] **Step 3: Add the constant with a PROVISIONAL value.** In `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs`, immediately after `pub const AUDITS_PER_WAVE: usize = 4;`, add:
+
+```rust
+/// PROVISIONAL: carried over from the prototype's kernel-level 13,634-14,768/s
+/// range. This is NOT an end-to-end measurement — Task 4.8 Step 5
+/// (docs/superpowers/plans/2026-08-26-metal-gpu-pbkdf2.md) replaces this
+/// comment and the value below with the measured end-to-end delivery rate
+/// (seeds handed to the workers per wall-second, under CPU load).
+///
+/// Re-measure with:
+///   cargo test --release gpu_seed_rate_end_to_end -- --ignored --nocapture
+pub const EVM_GPU_SEEDS_PER_SEC: f64 = 13_600.0;
+```
+
+- [ ] **Step 4: Run the measurement under a scriptable CPU load.** The interactive TUI cannot be driven by an unattended implementer, so this generates the same 8-thread CPU load without it. Display state matters: run this with the display otherwise quiescent (no other app compositing or animating) — a compositor-busy run collapses the *live* rate for a different reason (GPU contention with the compositor, spec risk area, not CPU contention) than what this constant models, and is invalid; if the display was busy during the run, discard the result and re-run.
+
+```sh
+cd /Users/shawnhopkinson/Rust/Vanaddy && cargo build --release
+mkdir -p /tmp/vanaddy-rate
+for i in $(seq 1 8); do yes > /dev/null & done
+YES_PIDS=$(jobs -p)
+cargo test --release gpu_seed_rate_end_to_end -- --ignored --nocapture 2>&1 | tail -30
+kill $YES_PIDS 2>/dev/null
+```
+
+  Eight `yes > /dev/null` processes saturate 8 CPU threads the same way an 8-thread EVM search does, without a second terminal or a Ratatui session. Expect `test result: ok. 1 passed`, three per-window rate lines and a spread under 15%, and `/tmp/vanaddy-rate/measured.txt` to gain a new line: `<rate>,<device_name>,<timestamp>`. If the spread assertion fails, the display was probably not quiescent (or the machine throttled) — close other apps and re-run.
+
+- [ ] **Step 5: Read the measurement back and update the constant.** Do not trust a remembered number or terminal scrollback — read `/tmp/vanaddy-rate/measured.txt` itself, and gate on it being both present and fresh:
+
+```sh
+cd /Users/shawnhopkinson/Rust/Vanaddy \
+  && test -f /tmp/vanaddy-rate/measured.txt || { echo 'FAIL: no measurement file — Step 4 did not run or was skipped'; exit 1; } \
+  && FILE_TS=$(stat -f %m /tmp/vanaddy-rate/measured.txt 2>/dev/null || stat -c %Y /tmp/vanaddy-rate/measured.txt) \
+  && COMMIT_TS=$(git log -1 --format=%ct) \
+  && { [ "$FILE_TS" -ge "$COMMIT_TS" ] || { echo 'FAIL: measurement predates the current commit — re-run Step 4'; exit 1; }; } \
+  && tail -1 /tmp/vanaddy-rate/measured.txt
+```
+
+  (`stat -f %m` is the macOS/BSD form, `stat -c %Y` the GNU/Linux form; one of the two resolves on any machine this runs on.) If the gate fails, go back to Step 4 — do not hand-edit the constant from a number you remember.
+
+  The last line printed is `<rate>,<device_name>,<timestamp>`. Replace BOTH the value and the doc comment in `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs` — the PROVISIONAL wording must not survive a completed measurement, even when the number does not move. If `<rate>` differs from 13,600 by more than 5% (i.e. is outside 12,920–14,280), round it to the nearest 100; otherwise keep `13_600.0`:
 
 ```rust
 /// Measured end-to-end delivery rate: seeds handed to the workers per
 /// wall-second, under CPU load — NOT the idle solo kernel peak (14,768/s).
+/// Measured on <device_name>, <date from the timestamp field>, under an
+/// 8-thread CPU search with the display otherwise quiescent (see
+/// /tmp/vanaddy-rate/measured.txt and Task 4.8 Step 4).
 ///
 /// `App::estimated_rate` uses this for the PRE-search ETA only; once a search
 /// is running the ETA switches to the live counter, which is automatically
@@ -8603,34 +8781,20 @@ error[E0425]: cannot find value `EVM_GPU_SEEDS_PER_SEC` in module `crate::gpu`
 /// modelled from this: mid-run collapse to 3,000-7,000 seeds/s under compositor
 /// load is reproducible, and a modelled rate would lie by up to 4x.
 ///
+/// On Apple Silicon other than the machine above this is an ESTIMATE, not a
+/// measurement: the PRE-search ETA will be wrong until re-measured on that
+/// device (spec risk 7).
+///
 /// Re-measure with:
 ///   cargo test --release gpu_seed_rate_end_to_end -- --ignored --nocapture
-pub const EVM_GPU_SEEDS_PER_SEC: f64 = 13_600.0;
-```
-
-- [ ] **Step 4: Run the measurement on an otherwise-busy machine.** In one terminal, saturate the CPU the way a real search does:
-
-```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && cargo build --release && ./target/release/vanaddy
-```
-
-  configure an EVM search with prefix `dead`, 8 threads, press Enter, and leave it running. In a second terminal:
-
-```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test --release gpu_seed_rate_end_to_end -- --ignored --nocapture 2>&1 | tail -20
-```
-
-  Expect `test result: ok. 1 passed` and a printed line like `EVM_GPU_SEEDS_PER_SEC measured: 13840 seeds/s (811 blocks x 512 over 30.0s)`. Quit the TUI with `q` afterwards.
-
-- [ ] **Step 5: Update the constant if the measurement disagrees.** If the measured rate differs from 13,600 by more than 5% (i.e. is outside 12,920–14,280), edit `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs` and change the value to the measured number rounded to the nearest 100 — for a measured 13,840 that is:
-
-```rust
 pub const EVM_GPU_SEEDS_PER_SEC: f64 = 13_800.0;
 ```
 
-  If it is within 5%, leave the value at `13_600.0`. Either way, record the number you measured in the commit message in Step 7.
+  (13,800 shown for a measured 13,840, rounded to the nearest 100 — substitute your own measured value and device/date.)
 
   **This is the single definition of the constant in the tree.** `App::estimated_rate` (Milestone 7, Task 7.7) reads it as `crate::gpu::EVM_GPU_SEEDS_PER_SEC` and must never declare a second copy in `src/app.rs`, so editing the value here is exactly what changes the pre-search ETA. If you find a `const EVM_GPU_SEEDS_PER_SEC` anywhere outside `src/gpu/mod.rs`, delete it — a shadow copy in `src/app.rs` would silently swallow this measurement, which is the entire point of this task.
+
+  **If any part of this step cannot be completed without a human** (no machine available to run Step 4, the gate keeps failing for a reason you cannot resolve, etc.), do not commit the placeholder labelled as measured. Stop and report `DONE_WITH_CONCERNS`, stating exactly what could not be done.
 
 - [ ] **Step 6: Re-run the whole suite, then re-gate the lints on the baseline delta.**
 
@@ -8648,10 +8812,12 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && rustfmt --edition 2021 src/gpu/producer
 
   Expect `NEW-FILES-FMT-CLEAN` and exactly the 12 pre-existing clippy lines, none of them in `src/gpu/`.
 
-- [ ] **Step 7: Commit.** Replace `13840` with the number you actually measured:
+- [ ] **Step 7: Commit.** Replace `<MEASURED>`, `<DEVICE>` and `<DATE>` with the values read back in Step 5 — do not commit this template verbatim, and do not reuse the worked example numbers from Step 4's sample output:
 
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && git add src/gpu/mod.rs src/gpu/producer.rs && git commit -m "gpu: EVM_GPU_SEEDS_PER_SEC from a measured end-to-end rate (13840 seeds/s under CPU load)
+cd /Users/shawnhopkinson/Rust/Vanaddy && git add src/gpu/mod.rs src/gpu/producer.rs && git commit -m "gpu: EVM_GPU_SEEDS_PER_SEC from a measured end-to-end rate (<MEASURED> seeds/s on <DEVICE>, <DATE>, under an 8-thread CPU search)
+
+On Apple Silicon other than <DEVICE> this is an estimate until re-measured (spec risk 7).
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
@@ -8663,7 +8829,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 All four must hold before starting Milestone 5:
 
 1. `cargo test --release -- --test-threads=1` passes with 0 failures, including every pinned vector in CLAUDE.md and `producer_delivers_three_waves_whose_every_seed_matches_ring` (24,576 GPU seeds, all equal to `ring`).
-2. `cargo test --no-default-features` passes: the 17 GPU-free producer tests run with no Metal in the tree.
+2. `cargo test --no-default-features` passes: **127** tests total on macOS (the 110-test baseline plus this milestone's 17 GPU-free producer tests), with no Metal in the tree.
 3. `signal_stop_finishes_the_producer_within_200ms` and `dropping_the_receiver_exits_the_producer_cleanly` pass — both wake paths work independently, and neither blocks.
 4. `rustfmt --edition 2021 --check src/gpu/producer.rs src/gpu/metal.rs src/gpu/stub.rs src/gpu/mod.rs` prints nothing, and `cargo clippy --all-targets 2>&1 | grep -- '-->' | sort | uniq -c` still shows exactly the 12 pre-existing baseline lines from Milestone 1 Task 1.8 Step 5 with none of them in `src/gpu/`. The clean baseline is NOT warning-free and is NOT rustfmt-clean, so the gate is "no new warning, no new fmt drift", never "clean".
 
