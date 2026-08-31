@@ -346,6 +346,49 @@ mod tests {
         );
     }
 
+    /// The routing property `chain_kind_search_with_no_gpu_source_is_unchanged`
+    /// cannot see: with `gpu: Some(rx)` actually holding a block, `ChainKind::Evm
+    /// .search` must route through `search_hybrid` and drain it. If the `Evm` arm
+    /// ever regressed to `search::<evm::Evm>(..)`, this would still compile (Evm
+    /// implements both traits) and the block would sit undrained forever.
+    #[test]
+    fn chain_kind_search_evm_drains_a_real_gpu_block() {
+        use crate::gpu::{GpuHealth, SeedBlock};
+
+        const N: usize = LANES; // == Evm::BATCH: whole block is one GPU_CHUNK_BATCHES chunk
+        let (block, _want) = ring_seed_block(N);
+
+        // "ffffffff" cannot match any deterministically ring-derived address, so
+        // nothing is emitted and only the drain bookkeeping matters here.
+        let matcher = Matcher::new("ffffffff".into(), String::new(), false, ChainKind::Evm);
+        let stop = AtomicBool::new(false);
+        let counter = AtomicU64::new(0);
+        let health = GpuHealth::default();
+        let (gpu_tx, gpu_rx) = crossbeam_channel::bounded::<Box<SeedBlock>>(1);
+        gpu_tx.send(Box::new(block)).unwrap();
+        let (tx, _rx) = mpsc::channel();
+
+        thread::scope(|s| {
+            s.spawn(|| {
+                ChainKind::Evm.search(&matcher, &stop, &counter, &tx, Some(&gpu_rx), &health)
+            });
+            thread::sleep(Duration::from_millis(50));
+            stop.store(true, Ordering::Relaxed);
+        });
+
+        assert_eq!(
+            health.seeds_delivered.load(Ordering::Relaxed),
+            N as u64,
+            "ChainKind::Evm.search with gpu: Some(..) must drain the block through \
+             search_hybrid, not silently fall back to search::<Evm> which ignores \
+             gpu entirely"
+        );
+        assert!(
+            gpu_rx.try_recv().is_err(),
+            "the pre-loaded block must have been consumed"
+        );
+    }
+
     /// The CPU path is the reference, so its matches mint `Verified::cpu_reference()`
     /// directly — but they must still actually re-derive. This is the property the
     /// whole gate exists to preserve, asserted on the path that does not need a GPU.
