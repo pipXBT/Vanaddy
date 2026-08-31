@@ -87,8 +87,11 @@ fn main() -> io::Result<()> {
         }
     }
 
-    disable_raw_mode()?;
-    stdout().execute(LeaveAlternateScreen)?;
+    // Deliberately NOT `?`. Everything below this point is loss-bearing: two
+    // drains that write found wallets to the CSV, and the GPU wind-down. A
+    // failure restoring the terminal must not skip them.
+    let _ = disable_raw_mode();
+    let _ = stdout().execute(LeaveAlternateScreen);
 
     // A quit taken straight out of Searching leaves verified matches in the
     // mpsc queue. This is the last chance to write them: `stop_search` was
@@ -101,6 +104,14 @@ fn main() -> io::Result<()> {
     // send_timeout); ~400 ms during startup. 600 ms covers both. Anything still
     // running past that is abandoned rather than hanging the exit.
     app.shutdown_gpu(Duration::from_millis(600));
+
+    // Second drain, and not redundant: a worker that had not yet seen
+    // `app.stop` when the first drain ran can enqueue a verified match
+    // microseconds later, and `shutdown_gpu` may then burn up to 600 ms before
+    // `main` returns and drops the receiver. Inert with respect to the GPU --
+    // `gpu_rx` is None and `gpu_engines` is empty by now, so sections 1-3 of
+    // `drain_matches` do nothing.
+    app.drain_matches();
 
     let total = app.counter.load(Ordering::Relaxed);
     let matches = app.total_matches;

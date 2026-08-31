@@ -555,8 +555,11 @@ impl App {
         for engine in &self.gpu_engines {
             engine.signal_stop();
         }
-        // Also disconnect the channel, so a producer parked in send_timeout
-        // wakes on Disconnected instead of waiting out its 100 ms.
+        // Drop App's clone of the receiver. This alone does NOT disconnect the
+        // channel: every Rayon worker holds its own clone, so a producer parked
+        // in `send_timeout` only wakes on `Disconnected` once the last worker
+        // has dropped too. At process exit that follows shortly, because the
+        // workers see `app.stop`.
         self.gpu_rx = None;
 
         let start = Instant::now();
@@ -2122,6 +2125,11 @@ mod tests {
     #[test]
     fn shutdown_gpu_returns_immediately_when_nothing_is_parked() {
         let mut app = App::new();
+        // Without this the assertion below is vacuous: `App::new()` already
+        // leaves `gpu_rx` None, so it holds whether or not `shutdown_gpu`
+        // clears it.
+        let (keep_tx, rx) = crossbeam_channel::bounded::<Box<crate::gpu::SeedBlock>>(1);
+        app.gpu_rx = Some(rx);
         let before = Instant::now();
         app.shutdown_gpu(Duration::from_millis(600));
         let elapsed = before.elapsed();
@@ -2131,42 +2139,39 @@ mod tests {
         );
         assert!(app.gpu_engines.is_empty());
         assert!(app.gpu_rx.is_none());
+        drop(keep_tx);
     }
 
-    /// The deadline path — the half the test above cannot reach. `App::new()`
-    /// leaves `gpu_engines` EMPTY, so `shutdown_gpu`'s
-    /// `while !self.gpu_engines.is_empty() && start.elapsed() < deadline` loop
-    /// never runs one iteration and the call returns in microseconds under ANY
-    /// implementation — an unbounded join included. So this test parks a REAL,
-    /// still-running engine: the deadline is then the thing actually under test.
+    /// A real, still-running engine is parked before the call, so this exercises
+    /// the path `shutdown_gpu_returns_immediately_when_nothing_is_parked` cannot:
+    /// `App::new()` leaves `gpu_engines` empty, so the polling loop never runs an
+    /// iteration there and the call returns in microseconds under ANY
+    /// implementation, an unbounded join included.
     ///
-    /// Sequencing: shut down DURING STARTUP, not in steady state. The producer
-    /// is then inside `MetalPbkdf2::new()` — device creation plus a cold shader
-    /// compile — which does not observe the stop flag at all. MEASURED reaction
-    /// time there: 55-83 ms debug, 46-63 ms release; a 4.6x margin over the
-    /// 10 ms deadline in BOTH profiles, so the bound is always what ends the
-    /// wait.
+    /// WHAT THIS TEST PROVES: the engine is signalled, it winds down on its own,
+    /// and the call returns within `deadline + 25 ms` rather than joining.
     ///
-    /// Waiting for the first block instead (the earlier shape of this test) put
-    /// the producer in steady state, where it reacts far faster than the
-    /// "~135 ms" this comment used to claim: the tree's own
-    /// `signal_stop_finishes_the_producer_within_200ms` measures 20-27 ms debug
-    /// and 3-6 ms release. That is below the 10 ms deadline in release, so the
-    /// lower assertion failed 3/3 there — and only ~27 ms in debug, so a
-    /// deliberately-wrong `shutdown_gpu` that waits unboundedly and then reaps
-    /// (the realistic O14 violation) passed ALL FOUR assertions. Measured.
+    /// WHAT IT DELIBERATELY DOES NOT PROVE: that the DEADLINE, rather than an
+    /// early `is_finished()`, is what ended the wait. It cannot, and an earlier
+    /// version of this test that tried to — `assert!(elapsed >= deadline)` — was
+    /// actively harmful. That assertion demands the producer still be starting up
+    /// at the 10 ms mark, which holds only with a COLD Metal shader compile. Warm,
+    /// `MetalPbkdf2::new()` returns in ~5 ms, the stop flag lands, the engine
+    /// finishes early and `shutdown_gpu` reaps it cleanly at ~7.7 ms. The result:
+    /// the CORRECT implementation failed, while a mutant with the `signal_stop`
+    /// loop deleted PASSED — the engine then never finished, the loop ran the full
+    /// 10 ms, and the assertion was satisfied by the bug. Measured 2026-08-31.
     ///
-    /// The `Arc::strong_count` assertion below is the timing-immune half. The
+    /// The `Arc::strong_count` poll below is the timing-immune replacement. The
     /// producer thread holds its own `Arc<GpuHealth>` clone for its whole life
-    /// (`src/gpu/metal.rs:588`, captured by the spawned closure) and
-    /// `shutdown_gpu` drops only the engine's clone, so a count of 1 on return
-    /// means the thread was already gone — i.e. this was a join. Measured:
-    /// bounded 11.6-14.8 ms with count 2 in both profiles; unbounded wait +
-    /// reap 48-341 ms with count 1.
+    /// (`src/gpu/metal.rs:588`, captured by the spawned closure), and this test
+    /// keeps `rx` alive so there is no `Disconnected` shortcut — so the thread can
+    /// only ever exit via the stop flag. Delete the `signal_stop` loop from
+    /// `shutdown_gpu` and the count never reaches 1, on any machine, at any cache
+    /// temperature. Verified by mutation.
     ///
-    /// The engine is abandoned mid-flight, exactly as `shutdown_gpu`'s doc
-    /// comment describes: its thread exits on the stop flag a few tens of ms
-    /// after this test returns.
+    /// The engine is abandoned mid-flight, exactly as `shutdown_gpu`'s doc comment
+    /// describes: its thread exits on the stop flag shortly after this returns.
     #[test]
     #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
     fn shutdown_gpu_honours_its_deadline_with_a_live_engine() {
@@ -2243,6 +2248,15 @@ mod tests {
     /// abandoned while definitely still live. This is the path that keeps a
     /// GPU wedged inside `waitUntilCompleted` from hanging process exit, and
     /// unlike a timing assertion it is deterministic everywhere.
+    ///
+    /// KNOWN GAP: no test here kills the deadline itself. Drop
+    /// `&& start.elapsed() < deadline` from the loop and all three tests still
+    /// pass on a warm machine, because every producer winds down inside the
+    /// bounds. Closing it deterministically needs the engine's finished/stop
+    /// state to be injectable, which is an API change and out of scope. A
+    /// tighter wall-clock bound was considered and rejected: the honest margin
+    /// is 3-5 ms, so it would flake under full-suite load. The live witness for
+    /// "quitting never hangs" is the manual acceptance run in Task 6.11.
     #[test]
     #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
     fn shutdown_gpu_abandons_a_live_engine_rather_than_waiting() {

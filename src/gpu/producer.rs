@@ -31,6 +31,13 @@ use std::time::Duration;
 /// future chain feeds a salt longer than `pbkdf2_lanes::MAX_SALT_LEN` (107),
 /// so the `From` impl degrades it to `BadConfig`
 /// carrying both the offending length and the limit.
+// The `#[allow(dead_code)]` attributes below are UNCONDITIONAL, which means they
+// also suppress detection on the metal leg, where every one of these items is
+// live. The narrower
+// `#[cfg_attr(not(all(target_os = "macos", target_arch = "aarch64", feature = "metal")), allow(dead_code))]`
+// was considered and rejected as unreadable at 10 sites. The trade: if one of
+// these genuinely dies on the metal leg, nothing will warn. Re-check them by
+// hand if this module is ever substantially reworked.
 // no production consumer on the stub leg as of Milestone 6: `producer()` is the
 // only production caller and it is metal-only; the portable `#[cfg(test)]`
 // block below exercises this directly instead.
