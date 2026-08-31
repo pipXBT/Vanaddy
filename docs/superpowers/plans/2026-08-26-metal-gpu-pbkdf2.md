@@ -2362,7 +2362,7 @@ cargo test search_counts_whole_batches_and_honours_stop
 ```
 
 Both must print `... ok`. `search_counts_whole_batches_and_honours_stop`
-(`src/chains/mod.rs:130-146`) calls `search::<Solana>`, whose signature is unchanged,
+(`src/chains/mod.rs`) calls `search::<Solana>`, whose signature is unchanged,
 and its `n % LANES == 0` assertion at line 145 must still hold.
 
 - [ ] **Step 9: Run the whole suite.**
@@ -8855,7 +8855,7 @@ Two CLAUDE.md rules bound every edit here:
 - **The hot loop stays allocation-free.** Nothing in this milestone touches `matches_raw`. `drain_gpu_block` calls `C::matches_raw(matcher, &addr)` on a stack `[u8; 20]` and allocates only on the ~1-in-16^n path where a match is actually emitted.
 - **Monomorphization, not dyn dispatch.** `ChainKind::search` keeps its single `match self` — evaluated once per thread spawn — and picks either `search::<C>` or `search_hybrid::<C>`. There is no `Box<dyn Chain>`, no trait object, and no per-candidate indirection anywhere in the added code.
 
-The pinned test `search_counts_whole_batches_and_honours_stop` (`src/chains/mod.rs:130-146`) calls the free function `search::<Solana>`, whose signature is **unchanged**. Every task below ends with a check that this one test's body was not touched: extract it — from its `fn` line through the first line that is exactly four spaces and a closing brace — out of the milestone's base commit and out of the working tree, then `diff` the two. That is an exact byte comparison of this test and nothing else. Do **not** substitute a `git diff … | grep -c` for it: git diff's leading context drags in neighbouring lines, and this milestone's own new tests legitimately contain the string `n % LANES`, so such a count can never reach `0` and would be a false alarm with no correct action behind it.
+The pinned test `search_counts_whole_batches_and_honours_stop` (`src/chains/mod.rs`) calls the free function `search::<Solana>`, whose signature is **unchanged**. Every task below ends with a check that this one test's body was not touched: extract it — from its `fn` line through the first line that is exactly four spaces and a closing brace — out of the milestone's base commit and out of the working tree, then `diff` the two. That is an exact byte comparison of this test and nothing else. Do **not** substitute a `git diff … | grep -c` for it: git diff's leading context drags in neighbouring lines, and this milestone's own new tests legitimately contain the string `n % LANES`, so such a count can never reach `0` and would be a false alarm with no correct action behind it.
 
 ---
 
@@ -9753,7 +9753,7 @@ EOF
 
 **Milestone 5 exit criteria**
 
-- `cargo test` green, with `search_counts_whole_batches_and_honours_stop` passing and its source byte-identical to `src/chains/mod.rs:130-146` before this milestone.
+- `cargo test` green, with `search_counts_whole_batches_and_honours_stop` passing and its body byte-identical to this milestone's base commit — compared by NAME, not by line range (`sed -n '/fn search_counts_whole_batches_and_honours_stop/,/^    }$/p'`), because this branch edits `src/chains/mod.rs` and any line number quoted here rots.
 - `chain_kind_search_with_no_gpu_source_is_unchanged` and `gpu_drain_stop_granularity_is_one_chunk` green — *alongside*, not in place of, Milestone 2's `search_with_no_gpu_source_is_unchanged` and `gpu_drain_honours_stop_mid_block`, which must both still exist and still pass.
 - `cargo test --release -- --ignored --nocapture hybrid_evm_search_with_live_gpu_emits_only_rederivable_matches` green, with hand-checked counter arithmetic.
 - `cargo clippy --all-targets 2>&1 | grep -- '-->' | sort | uniq -c` still prints exactly the 12 pre-existing lines Milestone 1 Task 1.8 Step 5 recorded, with none pointing into `src/gpu/`, `src/verify.rs`, or `src/chains/mod.rs`. No bare `cargo fmt` was ever run: `rustfmt --edition 2021 --check src/gpu/mod.rs` is silent, and the `^Diff in` counts are unchanged — `1` for `src/chains/mod.rs` when filtered to that file's own hunks (`… | grep '^Diff in' | grep -c '/chains/mod.rs:'`, because rustfmt follows `mod` declarations and reports 45 hunks across the whole `chains` tree), and `11` for `src/app.rs`, which declares no submodules and needs no filter.
