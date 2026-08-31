@@ -707,11 +707,16 @@ fn gpu_spawn_allowed(validated_gpu: bool, engines_parked: usize) -> bool {
 
 /// The four facts the quiet-death check weighs.
 ///
-/// NAMED FIELDS, not four positional `bool`s. At the call site in
-/// `drain_matches` three consecutive booleans are passed; transposing
-/// `gpu_live` with `disabled` there COMPILES, silently disables quiet-death
-/// detection for the life of the binary, and no test of the predicate itself
-/// can see it. With named fields the same mistake is a compile error.
+/// NAMED FIELDS, not four positional `bool`s — but be precise about what that
+/// buys, because an earlier draft of this comment overclaimed it. Named fields
+/// do NOT make a transposition a compile error: struct literals are keyed by
+/// name, so reordering them is a no-op, and writing the wrong expression under
+/// the right name (`gpu_live: self.gpu_health.disable.load(..)`) still compiles
+/// cleanly. What they DO buy is narrower and still worth it: omitting a field
+/// is a hard error, so `engine_finished` can never be silently dropped at the
+/// call site, and a wrong expression is legible next to its name instead of
+/// hiding in argument position. The transposition itself is caught by review
+/// and by the live-engine test in Task 6.10, not by the type system.
 struct GpuExitCheck {
     state: AppState,
     gpu_live: bool,
@@ -2026,18 +2031,24 @@ mod tests {
     fn status_refresh_leaves_the_status_alone_when_no_engine_is_parked() {
         use crate::gpu::GpuStatus;
 
-        // The only test that runs a full faultless tick with a LIVE channel,
-        // which is what makes it the only one that can catch a wrong
-        // `is_unexpected_gpu_exit` call site: drop `engine_finished` from the
-        // predicate and this test fails, because the tick then treats an
-        // idle-but-alive GPU as a quiet death and releases the channel.
+        // The only test that runs a full faultless tick with a LIVE channel, so
+        // it is the only one that notices section 3 firing when it must not:
+        // change `gpu_engines.iter().any(..)` to `.all(..)` and this test fails,
+        // because `all()` is vacuously true on the empty list and the tick then
+        // treats an idle-but-alive GPU as a quiet death and releases the
+        // channel. Measured: that one-character edit fails this test and no
+        // other in the suite.
         //
-        // It does NOT prove the status-refresh block is present. With nothing
-        // parked, `gpu_engines.last()` is None, so that block is a no-op
+        // It does NOT cover the opposite error — a call site that UNDER-reports,
+        // such as a transposed `gpu_live`/`disabled` — because `gpu_engines` is
+        // empty in every test here, so section 3's true branch never executes.
+        // That needs a live engine: Task 6.10.
+        //
+        // It also does NOT prove the status-refresh block is present. With
+        // nothing parked, `gpu_engines.last()` is None, so that block is a no-op
         // whether it exists or not — deleting it outright leaves this test
         // green (measured). Refresh behaviour that actually reads a parked
-        // engine needs a live `GpuEngine`, so it is covered by the
-        // metal-gated test in Task 6.10, not here.
+        // engine is covered by the metal-gated test in Task 6.10, not here.
         let (keep_tx, rx) = crossbeam_channel::bounded::<Box<crate::gpu::SeedBlock>>(1);
         let mut app = App::with_gpu_status(GpuStatus::Initializing);
         app.chain = crate::chains::ChainKind::Evm;
