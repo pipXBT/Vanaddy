@@ -388,9 +388,22 @@ impl App {
                     let mut wtr = WriterBuilder::new()
                         .has_headers(false)
                         .from_writer(&mut file);
-                    let _ =
-                        wtr.write_record(["Chain", "Address", "Private Key (hex)", "Seed Phrase"]);
-                    let _ = wtr.flush();
+                    // Do NOT discard these. A swallowed header failure leaves
+                    // the CSV with data rows and no header — subtly malformed
+                    // — while the UI reports nothing wrong, the same class of
+                    // silent-loss this task's drain_matches fix (below) exists
+                    // to prevent for row writes.
+                    if let Err(e) =
+                        wtr.write_record(["Chain", "Address", "Private Key (hex)", "Seed Phrase"])
+                    {
+                        self.error_message = Some(format!(
+                            "Failed to write CSV header ({e}); the file may be missing its header row"
+                        ));
+                    } else if let Err(e) = wtr.flush() {
+                        self.error_message = Some(format!(
+                            "Failed to write CSV header ({e}); the file may be missing its header row"
+                        ));
+                    }
                 }
                 self.csv_file = Some(file);
             }
