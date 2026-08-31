@@ -44,6 +44,29 @@ pub const MAX_THREADS_PER_THREADGROUP: usize = 256; // 384 measured 13% SLOWER o
 pub const COMPRESSIONS_PER_SEED: u32 = 4_098; // 2 + 2 + 2*2047
 pub const AUDITS_PER_WAVE: usize = 4; // RANDOM indices, not a fixed stride
 
+/// Measured end-to-end delivery rate: seeds handed to the workers per
+/// wall-second, under CPU load — NOT the idle solo kernel peak (14,768/s).
+/// Measured on Apple M1, 2026-08-31, under an 8-thread CPU search with the
+/// display otherwise quiescent (see /tmp/vanaddy-rate/measured.txt and Task
+/// 4.8 Step 4). The measured rate (14,276/s) was within 5% of this constant,
+/// so the value is unchanged from its provisional carry-over — only this
+/// comment's provenance is new.
+///
+/// `App::estimated_rate` uses this for the PRE-search ETA only; once a search
+/// is running the ETA switches to the live counter, which is automatically
+/// correct because GPU candidates increment the same counter. The displayed
+/// GPU rate in the stats pane must likewise be measured per wave, never
+/// modelled from this: mid-run collapse to 3,000-7,000 seeds/s under compositor
+/// load is reproducible, and a modelled rate would lie by up to 4x.
+///
+/// On Apple Silicon other than the machine above this is an ESTIMATE, not a
+/// measurement: the PRE-search ETA will be wrong until re-measured on that
+/// device (spec risk 7).
+///
+/// Re-measure with:
+///   cargo test --release gpu_seed_rate_end_to_end -- --ignored --nocapture
+pub const EVM_GPU_SEEDS_PER_SEC: f64 = 13_600.0;
+
 /// Every way the GPU backend can fail. One shape for all of them, because
 /// there is exactly one response: raise it as a sticky `GpuDisableReason`,
 /// drop the wave, and let the CPU search continue at full CPU-only rate.

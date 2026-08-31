@@ -970,4 +970,105 @@ mod gpu_tests {
         await_finished(&engine, Duration::from_secs(5), "post-fault stop");
         engine.reap();
     }
+
+    /// MEASUREMENT, not a gate. Run it under CPU load (Task 4.8 Step 4) when
+    /// the kernel, the wave geometry or the machine changes, then run Step 5
+    /// to fold the result into `EVM_GPU_SEEDS_PER_SEC`:
+    ///
+    ///   cargo test --release gpu_seed_rate_end_to_end -- --ignored --nocapture
+    ///
+    /// Three independent 10 s windows, not one 30 s window: a single sample
+    /// cannot tell "this machine does 13,800/s" from "this machine got one
+    /// lucky window". The floor (3,000 seeds/s) is the observed
+    /// compositor-contention floor, not the target: below it means something
+    /// is broken; a spread above 15% between the three windows means the run
+    /// was not clean (compositor busy, thermal throttling) and must be
+    /// re-run with the display otherwise quiescent. On success, appends
+    /// `rate,device_name,timestamp` to `/tmp/vanaddy-rate/measured.txt` for
+    /// Step 5 to read back — this test never edits the constant itself.
+    #[test]
+    #[ignore = "measurement; run with --release --nocapture, see Task 4.8 Step 4"]
+    fn gpu_seed_rate_end_to_end() {
+        let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAPACITY);
+        let health = Arc::new(fresh_health());
+        let engine = GpuEngine::start(tx, health.clone());
+
+        // Discard the first block: it hides the ~95 ms shader compile and the
+        // ~300 ms self-test, which are startup cost, not steady-state rate.
+        let first = rx
+            .recv_timeout(Duration::from_secs(180))
+            .expect("no block within 180 s of start");
+        drop(first);
+
+        let mut rates = Vec::with_capacity(3);
+        for window_ix in 0..3 {
+            let window = Duration::from_secs(10);
+            let started = Instant::now();
+            let mut blocks = 0u64;
+            while started.elapsed() < window {
+                if rx.recv_timeout(Duration::from_millis(500)).is_ok() {
+                    blocks += 1;
+                }
+            }
+            let secs = started.elapsed().as_secs_f64();
+            let rate = (blocks as f64) * (BLOCK as f64) / secs;
+            eprintln!(
+                "window {window_ix}: {rate:.0} seeds/s ({blocks} blocks x {BLOCK} over {secs:.1}s)"
+            );
+            rates.push(rate);
+        }
+
+        let device_name = match engine.status() {
+            GpuStatus::Running { device } => device,
+            other => format!("{other:?}"),
+        };
+
+        engine.signal_stop();
+        await_finished(&engine, Duration::from_secs(5), "measurement stop");
+        engine.reap();
+
+        let min = rates.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = rates.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let mean = rates.iter().sum::<f64>() / rates.len() as f64;
+        let spread = (max - min) / mean;
+        eprintln!(
+            "\nEVM_GPU_SEEDS_PER_SEC measured: {mean:.0} seeds/s (mean of 3 x 10s windows, \
+             spread {:.1}%)\ncurrent constant: {:.0}\n",
+            spread * 100.0,
+            crate::gpu::EVM_GPU_SEEDS_PER_SEC
+        );
+        assert!(
+            min > 3_000.0,
+            "delivered rate {min:.0}/s is below the compositor-contention floor; \
+             something is wrong with the pipeline, not just busy"
+        );
+        assert!(
+            spread < 0.15,
+            "run-to-run spread {:.1}% exceeds 15% -- the display was not quiescent \
+             or the machine was thermally throttling; re-run",
+            spread * 100.0
+        );
+        assert_eq!(
+            health.take_reason(),
+            None,
+            "no fault during the measurement"
+        );
+
+        std::fs::create_dir_all("/tmp/vanaddy-rate").expect("create /tmp/vanaddy-rate");
+        let timestamp = std::process::Command::new("date")
+            .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown-time".to_string());
+        let line = format!("{mean:.0},{device_name},{timestamp}\n");
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/vanaddy-rate/measured.txt")
+            .and_then(|mut f| f.write_all(line.as_bytes()))
+            .expect("append /tmp/vanaddy-rate/measured.txt");
+    }
 }
