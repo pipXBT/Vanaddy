@@ -4054,13 +4054,38 @@ mod tests {
     fn gpu_threadgroup_size_is_a_positive_multiple_of_the_execution_width() {
         let Some(gpu) = gpu_for_test() else { return };
         let tg = gpu.threadgroup_size();
-        assert!(tg > 0, "threadgroup size must be positive");
+        // Compare against the values the device actually reported, not against
+        // constants this formula is derived from. `tg <= MAX_THREADS_PER_THREADGROUP`
+        // and `tg % 32 == 0` are both TAUTOLOGIES of Step 4's
+        //     tg = ((maxt.min(want) / tew).max(1) * tew).min(maxt)
+        // when `want` is the constant and `tew` is 32 — they restate the formula
+        // rather than testing it, and `tg > 0` is already guaranteed by the
+        // `if tg == 0 { return Err(..) }` two lines above it in `new()`.
+        let (tew, maxt) = gpu.threadgroup_bounds();
+        assert!(tew > 0 && maxt > 0, "device reported tew={tew} maxt={maxt}");
         assert!(
-            tg <= MAX_THREADS_PER_THREADGROUP,
-            "threadgroup {tg} exceeds the measured M1 optimum clamp of {MAX_THREADS_PER_THREADGROUP} \
-             (384 measured 13% SLOWER here)"
+            tg > 0 && tg <= maxt,
+            "threadgroup {tg} must fit the device's own maxTotalThreadsPerThreadgroup {maxt}"
         );
-        assert_eq!(tg % 32, 0, "threadgroup {tg} is not a multiple of the M1 SIMD width");
+        assert_eq!(
+            tg % tew,
+            0,
+            "threadgroup {tg} is not a multiple of this device's execution width {tew}"
+        );
+        // The M1 perf clamp is a TUNING choice, not a hardware bound: this M1
+        // reports maxTotalThreadsPerThreadgroup = 384, and 384 measured 13% SLOWER
+        // than 256. Only assert the clamp when the override is absent — otherwise
+        // `VANADDY_GPU_TG=512`, a tuning path this very brief documents, makes the
+        // formula yield 384 and panics here. A test that fails on a documented
+        // knob gets "fixed" by deleting the assertion, and this is the only
+        // load-bearing one in the function.
+        if std::env::var_os("VANADDY_GPU_TG").is_none() {
+            assert!(
+                tg <= MAX_THREADS_PER_THREADGROUP,
+                "default threadgroup {tg} exceeds the measured M1 optimum clamp of \
+                 {MAX_THREADS_PER_THREADGROUP} (384 measured 13% SLOWER here)"
+            );
+        }
     }
 
     #[test]
@@ -4084,17 +4109,31 @@ mod tests {
 cargo test gpu_device_opens
 ```
 
-Expected failure, verbatim:
+Expected, verbatim:
 
 ```
-error[E0583]: file not found for module `backend`
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 109 filtered out
 ```
 
-(`src/gpu/metal.rs` is not yet reachable from any module, so nothing in it is
-compiled; the failure you see is the one the next steps fix.) If `src/gpu/mod.rs`
-does not yet contain a `mod backend;`, the failure is instead that
-`cargo test gpu_device_opens` runs `0 tests` — which is the same signal: the test
-you just wrote is not being compiled.
+**That `ok` IS the red signal — read it carefully.** `src/gpu/metal.rs` is an orphan
+file that no `mod` declaration reaches, so the test you just wrote is never compiled
+and the filter matches nothing. Zero tests ran.
+
+Do **not** expect `error[E0583]: file not found for module `backend``. That error is
+unreachable here: `src/gpu/mod.rs` already carries `#[path = "stub.rs"] mod backend;`
+(Milestone 1 Task 1.3) and `src/gpu/stub.rs` exists, so the module resolves fine.
+An earlier draft of this step predicted E0583 and offered a "if `src/gpu/mod.rs` does
+not yet contain a `mod backend;`" fallback; both describe a tree that no longer
+exists, and following either would have you record a red you never observed.
+
+Confirm the count: `109 filtered out` is the whole suite as of Task 3.2. If a later
+task has added tests, the number rises — what must hold is **`0 passed`**.
+
+> **Note for Step 4:** the test above calls `gpu.threadgroup_bounds() -> (usize, usize)`,
+> returning `(threadExecutionWidth, maxTotalThreadsPerThreadgroup)` as the device reported
+> them. Store both on the backend struct when you compute `threadgroup_size()` and add that
+> accessor — the test must compare against what the hardware said, not against the constants
+> the formula is derived from, or it only restates the formula.
 
 - [ ] **Step 3: Add the deps and the feature.** Replace the tail of `Cargo.toml`
       (everything from `zeroize = …` onwards) with:
@@ -5510,17 +5549,22 @@ messages carry index, phrase and both hex seeds so a red build replays by index.
 cargo test gpu_ring_and_4lane_agree
 ```
 
-Expected failure, verbatim:
+**This test is GREEN on its first run — there is no red phase here, and you should
+not manufacture one.** Everything it consumes already exists: Task 3.3 Step 3 added
+`rand_chacha = "0.3"` under `[dev-dependencies]`, and Step 1 pastes the helper,
+`CORPUS_LEN` and both `#[test]` fns in a single block, so there is no intermediate
+state in which `deterministic_corpus` is missing.
 
-```
-error[E0433]: failed to resolve: use of undeclared crate or module `rand_chacha`
-```
+Do **not** expect either of these, which an earlier draft predicted:
+`` error[E0433]: ... undeclared crate or module `rand_chacha` `` (the dep resolves —
+`rand_chacha` 0.3.1 is already in `Cargo.lock` against the same `rand_core` 0.6.4 that
+`rand` 0.8 uses), or `` error[E0425]: cannot find function `deterministic_corpus` ``
+(pasted in the same block as its callers).
 
-(If you already added `rand_chacha = "0.3"` under `[dev-dependencies]` in
-Task 3.3 Step 3, the failure is instead
-`` error[E0425]: cannot find function `deterministic_corpus` in this scope `` on
-the first run before you paste the helper — either way the test is red before
-the code exists.)
+**The real red phase for this task is Step 5's mutation** — `k.0[0] ^= 1` on the packed
+key block. That is what proves the differential is wired to anything. Run it, watch the
+three-way comparison fail, and revert. If Step 5's mutation does *not* fail, stop: the
+differential is not comparing what it claims to.
 
 - [ ] **Step 3: Confirm `rand_chacha = "0.3"` is present** under `[dev-dependencies]`
       in `Cargo.toml` (Task 3.3 Step 3 added it). If it is missing, add it now:
@@ -6824,8 +6868,16 @@ means something unrelated was edited by accident — find it before continuing.
 cargo test --release gpu:: -- --nocapture 2>&1 | grep -E '^test gpu::|SKIP'
 ```
 
-Expected: every `gpu::backend::tests::gpu_*` line reads `... ok`, and **no**
-`SKIP:` line appears. If you see `SKIP: no Metal device on this machine` on a
+Expected: every `gpu::backend::tests::gpu_*` line reads `... ok`, **except**
+`gpu_no_rss_growth_over_100k_dispatches`, which reads `... ignored` — Step 1 declares
+it `#[ignore]` by design and Step 2 runs it separately with `--ignored`. A run without
+`--ignored` prints `ignored` for it, and this grep captures that line.
+
+Do not treat that `ignored` as a gate failure, and do not remove the `#[ignore]` to make
+this line read `ok` — the test takes minutes and is deliberately opt-in. If you prefer a
+clean all-`ok` read, append `| grep -v gpu_no_rss_growth` to the pipeline.
+
+And **no** `SKIP:` line appears. If you see `SKIP: no Metal device on this machine` on a
 machine that has one, stop — the differential did not run.
 
 - [ ] **Step 7: Commit.**
@@ -6852,7 +6904,21 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
   is left alone.
 - `src/gpu/pbkdf2_bip39.metal` hashes to
   `871ef1706bd5ba0a9ddb420872ea6a2db3556bf6951453942678d364b123f4b2`.
-- No file outside `Cargo.toml`, `Cargo.lock` and `src/gpu/` was modified.
+- No file outside `Cargo.toml`, `Cargo.lock` and `src/gpu/` was modified **by Milestone 3**:
+
+  ```sh
+  git diff --name-only 9ea2906..HEAD
+  ```
+
+  Expected: only those paths. `9ea2906` is the commit Milestone 3 started from (Task 2.5's
+  final commit), recorded in `.superpowers/sdd/2026-08-26-metal-gpu-pbkdf2/.base-3.1`.
+
+  **Scope this to Milestone 3's own base, never to the branch base.** Measured against the
+  branch base (`4854a59`) this criterion is *already false and cannot be made true*:
+  Milestones 1 and 2 legitimately created `src/verify.rs` and edited `src/main.rs`,
+  `src/app.rs`, `src/chains/mod.rs`, `src/chains/evm.rs`, `src/seed.rs` and
+  `src/pbkdf2_lanes.rs`. The literal remedy for a branch-wide reading — reverting those
+  files — would destroy two completed milestones.
 
 ---
 
