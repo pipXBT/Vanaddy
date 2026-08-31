@@ -8646,7 +8646,7 @@ use std::sync::Arc;
 cd /Users/shawnhopkinson/Rust/Vanaddy && cargo build --no-default-features && cargo test --no-default-features 2>&1 | tail -10
 ```
 
-  Expect a clean build and `test result: ok.` with 0 failed. The count is the current `--no-default-features` baseline — **110** at the end of Milestone 3 — plus this milestone's GPU-free producer tests (16, plus the macOS-only QoS test = 17 on macOS), i.e. **127** on macOS.
+  Expect a clean build and `test result: ok.` with 0 failed. Do **not** pin an absolute number here — earlier drafts said 63, then 127, and both had rotted by the time anyone ran them, because every Milestone 4 task adds GPU-free tests to this leg. Gate on the RELATION instead: record `cargo test --no-default-features` immediately BEFORE your first edit and again after, and the two must be **equal**. Every test this task adds lives in `mod gpu_tests`, which is gated on `feature = "metal"` and is therefore absent from this leg, so this task must move the count by zero. A rise means a test you meant to be GPU-only is not gated; a fall means you broke something that was passing.
 
 - [ ] **Step 8: Run the whole suite, then gate the lints on the baseline delta.** Per this milestone's preamble: no bare `cargo fmt`, and the gate is "no NEW warning", not "no warnings".
 
