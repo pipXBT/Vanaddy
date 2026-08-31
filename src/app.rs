@@ -65,6 +65,13 @@ pub struct App {
     /// dir, because `cargo test` runs tests as threads in one process and
     /// `set_current_dir` is therefore racy.
     pub csv_path: PathBuf,
+    /// The CSV handle held open for the whole search. At a 1-character EVM
+    /// vanity the match rate reaches ~1,700/s; reopening per row costs ~5,100
+    /// syscalls/s (open + fstat + chmod) on the UI thread. 0600 is asserted on
+    /// this open, as on every other — but note this CHANGES the guarantee
+    /// CLAUDE.md states: it is re-asserted once per search now, not once per
+    /// row. Step 8a rewrites that line to match.
+    csv_file: Option<File>,
     /// How many rows failed to reach the CSV this run. Nothing in this codebase
     /// checks that a row was actually written, so eviction cannot claim "it is
     /// already durably in the CSV" without this counter: while it is non-zero
@@ -149,6 +156,7 @@ impl App {
             matches: VecDeque::new(),
             total_matches: 0,
             csv_path: PathBuf::from(CSV_PATH),
+            csv_file: None,
             csv_write_failures: 0,
             selected_match: 0,
             counter: Arc::new(AtomicU64::new(0)),
@@ -368,15 +376,27 @@ impl App {
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
 
-        // Ensure CSV has header
-        {
-            let file =
-                open_csv_secure(Path::new(CSV_PATH)).expect("Failed to open vanity_wallets.csv");
-            let needs_header = file.metadata().map(|m| m.len() == 0).unwrap_or(true);
-            if needs_header {
-                let mut wtr = WriterBuilder::new().has_headers(false).from_writer(file);
-                wtr.write_record(["Chain", "Address", "Private Key (hex)", "Seed Phrase"]).unwrap();
-                wtr.flush().unwrap();
+        // Open the CSV ONCE for this search and keep the handle. 0600 is
+        // asserted here, on create and on the post-open re-assert inside
+        // open_csv_secure. No `expect`: a panic here now runs inside the
+        // alternate screen, and a search that cannot write its CSV should
+        // report that in the UI, not take the process down.
+        match open_csv_secure(&self.csv_path) {
+            Ok(mut file) => {
+                let needs_header = file.metadata().map(|m| m.len() == 0).unwrap_or(true);
+                if needs_header {
+                    let mut wtr = WriterBuilder::new()
+                        .has_headers(false)
+                        .from_writer(&mut file);
+                    let _ =
+                        wtr.write_record(["Chain", "Address", "Private Key (hex)", "Seed Phrase"]);
+                    let _ = wtr.flush();
+                }
+                self.csv_file = Some(file);
+            }
+            Err(e) => {
+                self.csv_file = None;
+                self.error_message = Some(format!("Cannot open {}: {e}", self.csv_path.display()));
             }
         }
 
@@ -406,7 +426,24 @@ impl App {
     pub fn drain_matches(&mut self) {
         if let Some(ref rx) = self.rx {
             while let Ok(payload) = rx.try_recv() {
-                let _ = append_match_row(&self.csv_path, &payload);
+                let write_result = match self.csv_file.as_mut() {
+                    Some(file) => write_match_row(file, &payload),
+                    // No handle held (start_search's open failed, or this is a
+                    // test driving drain_matches directly). Never drop a match.
+                    None => append_match_row(&self.csv_path, &payload),
+                };
+                // Do NOT discard this. Task 6.4 Step 7 evicts on the claim that
+                // an evicted row is "already durably in the CSV", and Step 6
+                // above removed the `.expect()` that used to make a failed open
+                // loud. With both, a `let _ =` here means a mid-run ENOSPC
+                // silently destroys seed phrases while the exit summary reports
+                // them saved.
+                if let Err(e) = write_result {
+                    self.csv_write_failures += 1;
+                    self.error_message = Some(format!(
+                        "CSV write failed ({e}); matches are NOT being saved"
+                    ));
+                }
 
                 self.total_matches += 1;
                 self.matches.push_back(payload);
@@ -460,15 +497,27 @@ fn open_csv_secure(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-/// The SINGLE writer of match rows. It takes a `&Match`, and a `Match` cannot be
-/// constructed without a `crate::verify::Verified` token, so an unverified
-/// candidate is unrepresentable here rather than merely filtered out.
-fn append_match_row(path: &Path, m: &Match) -> io::Result<()> {
-    let file = open_csv_secure(path)?;
-    let mut wtr = WriterBuilder::new().has_headers(false).from_writer(file);
+/// The single place a `Match` becomes CSV bytes. Both writers — the held-open
+/// handle in `drain_matches` and the path-based `append_match_row` — funnel
+/// through here, so a row can never be written two different ways.
+///
+/// Taking `&Match` is the enforcement point for the trust boundary: a `Match`
+/// cannot be constructed without a `verify::Verified` token, so an unverified
+/// GPU candidate has no path to disk.
+fn write_match_row(file: &mut File, m: &Match) -> io::Result<()> {
+    let mut wtr = WriterBuilder::new()
+        .has_headers(false)
+        .from_writer(&mut *file);
     wtr.write_record([&m.chain, &m.address, &m.secret_hex, &m.mnemonic])?;
-    wtr.flush()?;
-    Ok(())
+    wtr.flush()
+}
+
+/// Append one verified match to the CSV at `path`, opening it 0600 for the
+/// write. Used when no handle is held open (a failed `start_search` open, and
+/// every test that does not run a real search).
+fn append_match_row(path: &Path, m: &Match) -> io::Result<()> {
+    let mut file = open_csv_secure(path)?;
+    write_match_row(&mut file, m)
 }
 
 /// Rollback lever #2: `VANADDY_GPU=0` (equivalently `VANADDY_NO_GPU=1`) turns the
@@ -1233,5 +1282,141 @@ mod tests {
             stop.store(true, Ordering::Relaxed);
             m
         })
+    }
+
+    #[test]
+    fn held_open_csv_file_takes_every_row_and_stays_0600() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vanity_wallets.csv");
+
+        let mut app = App::new();
+        app.csv_path = path.clone();
+        // Pre-create the file LOOSE, so the post-open `set_permissions` inside
+        // `open_csv_secure` is what makes the mode assertion below pass — not
+        // `.mode(0o600)` at create, which passes even with the re-assert
+        // deleted. (Measured: deleting the re-assert leaves this test green and
+        // correctly fails `open_csv_secure_reasserts_0600_on_preexisting_0644`.)
+        //
+        // Note what this task CHANGES: the mode is now re-asserted per OPEN,
+        // i.e. once per search, not once per row. A chmod applied by another
+        // process mid-search is no longer corrected until the next
+        // `start_search`. That is the contract this test pins.
+        std::fs::write(&path, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        app.csv_file = Some(open_csv_secure(&path).unwrap());
+
+        let (tx, rx) = mpsc::channel();
+        app.rx = Some(rx);
+        for addr in ["0xaaaa", "0xbbbb", "0xcccc"] {
+            tx.send(Match {
+                chain: "EVM".to_string(),
+                address: addr.to_string(),
+                secret_hex: "11".repeat(32),
+                mnemonic: "abandon abandon abandon".to_string(),
+                verified: crate::verify::Verified::cpu_reference(),
+            })
+            .unwrap();
+        }
+        drop(tx);
+
+        app.drain_matches();
+
+        let csv = std::fs::read_to_string(&path).unwrap();
+        assert!(csv.contains("0xaaaa"), "first row landed: {csv}");
+        assert!(
+            csv.contains("0xbbbb"),
+            "second row landed through the SAME handle: {csv}"
+        );
+        assert!(
+            csv.contains("0xcccc"),
+            "third row landed through the SAME handle: {csv}"
+        );
+        assert_eq!(csv.lines().count(), 3, "no row duplicated or lost: {csv}");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "the CSV holds plaintext seed phrases: owner-only, always"
+            );
+        }
+    }
+
+    #[test]
+    fn drain_falls_back_to_the_path_when_no_file_is_held() {
+        // start_search could not open the CSV (read-only dir, ENOSPC). A found
+        // match must still be written, not silently dropped.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vanity_wallets.csv");
+
+        let mut app = App::new();
+        app.csv_path = path.clone();
+        assert!(app.csv_file.is_none());
+
+        let (tx, rx) = mpsc::channel();
+        app.rx = Some(rx);
+        tx.send(Match {
+            chain: "EVM".to_string(),
+            address: "0xfallback".to_string(),
+            secret_hex: "22".repeat(32),
+            mnemonic: "abandon abandon abandon".to_string(),
+            verified: crate::verify::Verified::cpu_reference(),
+        })
+        .unwrap();
+        drop(tx);
+
+        app.drain_matches();
+
+        let csv = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            csv.contains("0xfallback"),
+            "fallback writer must not drop a match: {csv}"
+        );
+    }
+
+    #[test]
+    fn a_failed_csv_write_is_counted_and_never_evicts_the_only_copy() {
+        // Neither writer can succeed: `csv_path` points inside a directory that
+        // does not exist. The match must survive in memory — with the write
+        // failed, that in-memory row is the ONLY copy of the seed phrase — and
+        // the user must be told, because Step 7 otherwise swallows the error.
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new();
+        app.csv_path = dir.path().join("no-such-dir").join("vanity_wallets.csv");
+        assert!(app.csv_file.is_none());
+
+        let (tx, rx) = mpsc::channel();
+        app.rx = Some(rx);
+        tx.send(Match {
+            chain: "EVM".to_string(),
+            address: "0xdoomed".to_string(),
+            secret_hex: "33".repeat(32),
+            mnemonic: "abandon abandon abandon".to_string(),
+            verified: crate::verify::Verified::cpu_reference(),
+        })
+        .unwrap();
+        drop(tx);
+
+        app.drain_matches();
+
+        assert_eq!(
+            app.csv_write_failures, 1,
+            "the failed write must be counted"
+        );
+        assert_eq!(
+            app.matches.len(),
+            1,
+            "the in-memory row is now the ONLY copy"
+        );
+        assert!(
+            app.error_message.is_some(),
+            "the user must be told the CSV is not being written"
+        );
     }
 }
