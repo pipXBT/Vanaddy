@@ -6,19 +6,49 @@
 //! used and dropped on one thread.
 
 use crate::gpu::kernel_src::KERNEL_SRC;
-use crate::gpu::{GpuError, GpuStatus, MAX_THREADS_PER_THREADGROUP, WAVE};
-use objc2::rc::Retained;
+use crate::gpu::pack::{pack_key_block, pack_salt_block, KeyBlock};
+use crate::gpu::{
+    classify_command_buffer_status, GpuError, GpuStatus, DISPATCHES_PER_COMMAND_BUFFER,
+    ITERS_PER_DISPATCH, MAX_THREADS_PER_THREADGROUP, PIPELINE_DEPTH, WAVE,
+};
+use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
 use objc2_metal::{
-    MTLBuffer, MTLCommandQueue, MTLCompileOptions, MTLComputePipelineState,
-    MTLCreateSystemDefaultDevice, MTLDevice, MTLLanguageVersion, MTLLibrary, MTLResourceOptions,
+    MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLCompileOptions,
+    MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice,
+    MTLLanguageVersion, MTLLibrary, MTLResourceOptions, MTLSize,
 };
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
+use zeroize::Zeroizing;
 
 // `MTLCreateSystemDefaultDevice` lives in CoreGraphics, which objc2-metal does
 // not link for us.
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {}
+
+/// Host mirror of the kernel's `struct Params { uint count, iters, finalize, _pad; }`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Params {
+    count: u32,
+    /// U-iterations to advance in THIS dispatch. May be 0 (see the do-while in
+    /// `run_wave`): PBKDF2 with c == 1 is T == U_1, already computed by the
+    /// prologue, so the last dispatch only has to carry `finalize`.
+    iters: u32,
+    /// Nonzero => write the big-endian seed bytes for this candidate.
+    finalize: u32,
+    _pad: u32,
+}
+
+// The kernel indexes key blocks as `keyblocks + 16 * tid` over `ulong`, i.e. a
+// 128-byte stride. If `KeyBlock` ever stops being exactly that, every candidate
+// except tid 0 derives from the wrong key block.
+const _: () = assert!(std::mem::size_of::<KeyBlock>() == 128);
+const _: () = assert!(std::mem::size_of::<Params>() == 16);
+
+type Cb = Retained<ProtocolObject<dyn MTLCommandBuffer>>;
 
 type Buf = Retained<ProtocolObject<dyn MTLBuffer>>;
 
@@ -173,6 +203,260 @@ impl MetalPbkdf2 {
     pub fn threadgroup_bounds(&self) -> (usize, usize) {
         (self.tew, self.maxt)
     }
+
+    fn check_status(&self, cb: &ProtocolObject<dyn MTLCommandBuffer>) -> Result<(), GpuError> {
+        let status = cb.status().0 as i64;
+        let message = cb.error().map(|e| e.localizedDescription().to_string());
+        classify_command_buffer_status(status, message)
+    }
+
+    /// Wait on every outstanding command buffer in `ring`, THEN check status on
+    /// each — never interleaved. Interleaving (wait, check, wait, check, ...)
+    /// means a bad status on an early buffer would `?`-return before the later
+    /// buffers are ever waited on, leaving them executing on the GPU while
+    /// `WaveBuffers::Drop`'s "no command buffer is in flight here" assumption
+    /// is violated on exactly that path. Every entry is drained (and the ring
+    /// cleared to `None`) regardless of outcome, so this is safe to call from
+    /// any early-return site. Returns the first error found, by ring position.
+    fn drain_ring(&self, ring: &mut [Option<Cb>; PIPELINE_DEPTH]) -> Result<(), GpuError> {
+        for cb in ring.iter().flatten() {
+            cb.waitUntilCompleted();
+        }
+        let mut first_err = None;
+        for slot in ring.iter_mut() {
+            if let Some(cb) = slot.take() {
+                if let Err(e) = self.check_status(&cb) {
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// Derive `keys.len()` seeds. `Ok(None)` means the wave was abandoned
+    /// because `stop` was raised; the whole wave is discarded on any command
+    /// buffer failure — there is deliberately no partial-success shape.
+    ///
+    /// The returned slice is EXACTLY `keys.len()` long and borrows `self`, so
+    /// the next wave cannot overwrite seeds the caller still holds.
+    pub fn run_wave(
+        &mut self,
+        keys: &[KeyBlock],
+        salt_block: &[u64; 16],
+        total_iters: u32,
+        stop: &AtomicBool,
+    ) -> Result<Option<&[[u8; 64]]>, GpuError> {
+        assert!(total_iters >= 1, "iterations must be at least 1"); // mirrors src/pbkdf2_lanes.rs:26
+        if keys.is_empty() || keys.len() > WAVE {
+            return Err(GpuError::BadConfig(format!(
+                "wave takes 1..={WAVE} candidates, got {}",
+                keys.len()
+            )));
+        }
+        let count = keys.len() as u32;
+
+        // Poison the seeds region so a missing finalize yields obvious garbage
+        // rather than the PREVIOUS wave's still-valid 64-byte seed.
+        unsafe {
+            std::ptr::write_bytes(
+                self.bufs.seeds.contents().as_ptr() as *mut u8,
+                0xA5,
+                WAVE * 64,
+            )
+        };
+        // `KeyBlock` is #[repr(C, align(16))] over [u64; 16]: 128 bytes,
+        // exactly the kernel's per-thread stride, and the u64s are already the
+        // big-endian-decoded words the kernel expects, so the kernel contains
+        // zero endianness code and the host does no byteswap.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                keys.as_ptr() as *const u8,
+                self.bufs.keys.contents().as_ptr() as *mut u8,
+                std::mem::size_of_val(keys),
+            )
+        };
+
+        // 1 prologue command buffer: ipad/opad midstates and U_1, which the
+        // kernel writes into BOTH states[i].u and states[i].t — so `states`
+        // needs no clearing between waves.
+        //
+        // No `ring` exists yet at this point — nothing has been committed —
+        // so an early return here can never leave a command buffer in flight;
+        // this is the one wait/check site where a bare `?` is correct.
+        autoreleasepool(|_| -> Result<(), GpuError> {
+            let cb = self.queue.commandBuffer().ok_or(GpuError::BufferAlloc)?;
+            let enc = cb.computeCommandEncoder().ok_or(GpuError::BufferAlloc)?;
+            enc.setComputePipelineState(&self.prologue);
+            let p = Params {
+                count,
+                iters: 0,
+                finalize: 0,
+                _pad: 0,
+            };
+            unsafe {
+                enc.setBuffer_offset_atIndex(Some(&self.bufs.keys), 0, 0);
+                enc.setBuffer_offset_atIndex(Some(&self.bufs.states), 0, 1);
+                enc.setBytes_length_atIndex(NonNull::from(salt_block).cast(), 128, 2);
+                enc.setBytes_length_atIndex(
+                    NonNull::from(&p).cast(),
+                    std::mem::size_of::<Params>(),
+                    3,
+                );
+            }
+            enc.dispatchThreads_threadsPerThreadgroup(
+                MTLSize {
+                    width: count as usize,
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: self.tg,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+            enc.endEncoding();
+            cb.commit();
+            cb.waitUntilCompleted();
+            self.check_status(&cb) // checked, not assumed
+        })?;
+
+        // do-while: ALWAYS at least one iterate dispatch, so total_iters == 1
+        // still carries finalize=1. (Verified: c=1 via [iters=0, finalize=1]
+        // matches the reference byte-for-byte — the loop no-ops and t = U_1.)
+        let mut remaining = total_iters - 1; // 2047 for BIP-39
+        let mut ring: [Option<Cb>; PIPELINE_DEPTH] = Default::default();
+        let mut slot_ix = 0usize;
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                // Drain-then-check the WHOLE ring, not just what happens to be
+                // in `prev` below: up to PIPELINE_DEPTH command buffers can be
+                // executing concurrently, and abandoning mid-drain on the
+                // first bad status would leave the rest in flight.
+                self.drain_ring(&mut ring)?;
+                return Ok(None);
+            }
+            let prev = ring[slot_ix].take();
+            // ONE AUTORELEASE POOL PER COMMAND BUFFER. Non-negotiable: without
+            // it this leaks 1,861 B per command buffer = ~700 MB/hour.
+            // `prev` is moved in, so its release also happens inside the pool.
+            let built = autoreleasepool(|_| -> Result<Cb, GpuError> {
+                if let Some(prev) = prev {
+                    prev.waitUntilCompleted();
+                    self.check_status(&prev)?; // at EVERY wait, not just the last
+                }
+                let cb = self.queue.commandBuffer().ok_or(GpuError::BufferAlloc)?;
+                // A serial compute encoder auto-barriers between dispatches,
+                // which is what makes the depth-3 ring safe on one `states`.
+                let enc = cb.computeCommandEncoder().ok_or(GpuError::BufferAlloc)?;
+                enc.setComputePipelineState(&self.iterate);
+                unsafe {
+                    enc.setBuffer_offset_atIndex(Some(&self.bufs.states), 0, 0);
+                    enc.setBuffer_offset_atIndex(Some(&self.bufs.seeds), 0, 1);
+                }
+                for _ in 0..DISPATCHES_PER_COMMAND_BUFFER {
+                    let iters = remaining.min(ITERS_PER_DISPATCH);
+                    remaining -= iters;
+                    let p = Params {
+                        count,
+                        iters,
+                        finalize: (remaining == 0) as u32,
+                        _pad: 0,
+                    };
+                    unsafe {
+                        enc.setBytes_length_atIndex(
+                            NonNull::from(&p).cast(),
+                            std::mem::size_of::<Params>(),
+                            2,
+                        )
+                    };
+                    enc.dispatchThreads_threadsPerThreadgroup(
+                        MTLSize {
+                            width: count as usize,
+                            height: 1,
+                            depth: 1,
+                        },
+                        MTLSize {
+                            width: self.tg,
+                            height: 1,
+                            depth: 1,
+                        },
+                    );
+                    if remaining == 0 {
+                        break;
+                    }
+                }
+                enc.endEncoding();
+                cb.commit();
+                Ok(cb)
+            });
+            let cb = match built {
+                Ok(cb) => cb,
+                Err(e) => {
+                    // `prev` (if it was the failure) already had
+                    // `waitUntilCompleted` + `check_status` called on it above
+                    // and is safely dropped. But up to PIPELINE_DEPTH - 1
+                    // OTHER ring slots may still hold command buffers still
+                    // executing on the GPU (this is exactly what pipelining
+                    // means) — `ring[slot_ix]` is already `None` (taken into
+                    // `prev`), so this only drains the genuinely outstanding
+                    // ones. Their status is intentionally discarded: `e` is
+                    // already the first-found error and there is no
+                    // partial-success shape to report into, but every one of
+                    // them still gets `waitUntilCompleted` + `check_status`
+                    // so nothing returns with a command buffer in flight.
+                    let _ = self.drain_ring(&mut ring);
+                    return Err(e);
+                }
+            };
+            // objc2's `Retained` IS the retain the Objective-C prototype had to
+            // take by hand inside the pool: it is +1 owned, so moving it out
+            // here keeps the command buffer alive past the pool drain.
+            ring[slot_ix] = Some(cb);
+            slot_ix = (slot_ix + 1) % PIPELINE_DEPTH;
+            if remaining == 0 {
+                break;
+            }
+        }
+        // The host reads `seeds` only after EVERY command buffer of the wave
+        // reports Completed.
+        self.drain_ring(&mut ring)?;
+
+        // SAFETY: `seeds` is WAVE * 64 bytes of StorageModeShared memory owned
+        // by this engine; every command buffer of the wave has reported
+        // Completed, so the GPU is no longer writing it; `[u8; 64]` has
+        // alignment 1 and no invalid bit patterns; and the returned slice
+        // borrows `&mut self` for its whole lifetime.
+        let p = self.bufs.seeds.contents().as_ptr() as *const [u8; 64];
+        let all: &[[u8; 64]] = unsafe { std::slice::from_raw_parts(p, WAVE) };
+        // Slots >= count still hold 0xA5 poison and are never returned.
+        Ok(Some(&all[..keys.len()]))
+    }
+
+    /// Convenience wrapper: pack phrases, run one wave, copy the seeds out.
+    /// The `Vec<KeyBlock>` holds the plaintext phrases, so it is `Zeroizing`.
+    pub fn derive(
+        &mut self,
+        phrases: &[&str],
+        iters: u32,
+    ) -> Result<Vec<Zeroizing<[u8; 64]>>, GpuError> {
+        let salt = pack_salt_block(crate::seed::BIP39_SALT)?;
+        let keys: Zeroizing<Vec<KeyBlock>> = Zeroizing::new(
+            phrases
+                .iter()
+                .map(|p| pack_key_block(p.as_bytes()))
+                .collect(),
+        );
+        match self.run_wave(&keys, &salt, iters, &AtomicBool::new(false))? {
+            Some(seeds) => Ok(seeds.iter().map(|s| Zeroizing::new(*s)).collect()),
+            None => Err(GpuError::BadConfig(
+                "wave abandoned without a stop request".to_string(),
+            )),
+        }
+    }
 }
 
 /// The skip helper. Absence must be LOUD where the backend actually ships.
@@ -260,6 +544,25 @@ fn objc2_surface_probe(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CANONICAL_PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const CANONICAL_SEED_HEX: &str = "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4";
+
+    /// The BIP-39 canonical vector, against the same hex constant already
+    /// pinned at src/seed.rs:41. This is the anchor to external ground truth:
+    /// every other GPU test in this file compares against `ring`, which would
+    /// be circular if `ring` were wrong.
+    #[test]
+    fn gpu_seed_matches_bip39_canonical_vector() {
+        let Some(mut gpu) = gpu_for_test() else {
+            return;
+        };
+        let out = gpu
+            .derive(&[CANONICAL_PHRASE], crate::seed::PBKDF2_ROUNDS)
+            .expect("wave");
+        assert_eq!(out.len(), 1);
+        assert_eq!(hex::encode(*out[0]), CANONICAL_SEED_HEX);
+    }
 
     #[test]
     fn gpu_device_opens_and_reports_a_name() {
