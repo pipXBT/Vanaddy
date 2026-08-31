@@ -44,7 +44,14 @@ impl GpuEngine {
         true
     }
 
-    pub fn reap(self) {}
+    pub fn reap(self) {
+        debug_assert!(
+            self.is_finished(),
+            "reap() joins the producer thread: calling it before is_finished() can hang the UI \
+             thread inside a wedged waitUntilCompleted, with the terminal still in raw mode. \
+             Park the engine and reap it on a later pass instead."
+        );
+    }
 }
 
 #[cfg(test)]

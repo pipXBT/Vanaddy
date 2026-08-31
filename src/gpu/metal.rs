@@ -646,6 +646,12 @@ impl GpuEngine {
     /// Joins the thread. Only call once `is_finished()` is true, or from the
     /// reaper at process exit where a wedged thread is accepted.
     pub fn reap(mut self) {
+        debug_assert!(
+            self.is_finished(),
+            "reap() joins the producer thread: calling it before is_finished() can hang the UI \
+             thread inside a wedged waitUntilCompleted, with the terminal still in raw mode. \
+             Park the engine and reap it on a later pass instead."
+        );
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
