@@ -1161,7 +1161,16 @@ mod tests {
             // Deleting Task 6.8's section-2 block makes the assert below fail:
             // the app would sit on the probe's status forever while the engine
             // reports Running.
-            let deadline = Instant::now() + Duration::from_secs(30);
+            //
+            // 60s, not 30s, and not for the reason a first reading suggests.
+            // Cycle 0 reaches Running in ~7.0s debug / ~1.3s release, so 30s
+            // already looked like 4x headroom -- but this test was MEASURED
+            // failing at 114.99s wall with a load average of 20.31 (a second
+            // Claude session compiling in the same checkout). A timeout only
+            // costs wall-clock when the test is already failing, so buying
+            // immunity to contention is nearly free; a flaky test in this
+            // suite is not, because it teaches people to ignore red.
+            let deadline = Instant::now() + Duration::from_secs(60);
             while Instant::now() < deadline {
                 app.drain_matches();
                 if matches!(app.gpu_status, GpuStatus::Running { .. }) {
@@ -1172,7 +1181,7 @@ mod tests {
             assert!(
                 matches!(app.gpu_status, GpuStatus::Running { .. }),
                 "cycle {cycle}: drain_matches must refresh the status from the \
-                 parked engine within 30s, got {:?}",
+                 parked engine within 60s, got {:?}",
                 app.gpu_status
             );
 
@@ -1189,13 +1198,13 @@ mod tests {
             // Measured: with only the 50 ms sleep, cycle 1 reached "Running" in
             // under 2 microseconds because `gpu_rx` was None and the refresh
             // block never re-entered.
-            let give_up = Instant::now() + Duration::from_secs(30);
+            let give_up = Instant::now() + Duration::from_secs(60);
             while !app.gpu_engines.iter().all(|e| e.is_finished()) && Instant::now() < give_up {
                 thread::sleep(Duration::from_millis(10));
             }
             assert!(
                 app.gpu_engines.iter().all(|e| e.is_finished()),
-                "cycle {cycle}: the engine must wind down within 30s of stop_search"
+                "cycle {cycle}: the engine must wind down within 60s of stop_search"
             );
         }
         app.shutdown_gpu(Duration::from_millis(600));
