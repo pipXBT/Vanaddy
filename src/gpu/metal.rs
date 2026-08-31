@@ -381,8 +381,16 @@ impl MetalPbkdf2 {
                 return Ok(None);
             }
             let prev = ring[slot_ix].take();
-            // ONE AUTORELEASE POOL PER COMMAND BUFFER. Non-negotiable: without
-            // it this leaks 1,861 B per command buffer = ~700 MB/hour.
+            // ONE AUTORELEASE POOL PER COMMAND BUFFER. Keep it — but not for
+            // the reason originally written here. The spec predicted 1,861 B
+            // leaked per command buffer without it (~700 MB/hour); that figure
+            // is UNVERIFIED on this hardware. Removing this pool produced no
+            // reproducible RSS difference at all — see
+            // `gpu_rss_does_not_run_away_over_100k_dispatches` below for the
+            // measurements — because objc2 routes `commandBuffer()` through
+            // `retain_autoreleased`, which can often avoid the pool entirely.
+            // That optimisation is best-effort, not guaranteed, so the pool is
+            // still what bounds memory whenever it does not fire.
             // `prev` is moved in, so its release also happens inside the pool.
             let built = autoreleasepool(|_| -> Result<Cb, GpuError> {
                 if let Some(prev) = prev {
