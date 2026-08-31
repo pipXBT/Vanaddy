@@ -989,15 +989,29 @@ mod gpu_tests {
     #[test]
     #[ignore = "measurement; run with --release --nocapture, see Task 4.8 Step 4"]
     fn gpu_seed_rate_end_to_end() {
+        if std::env::var_os("VANADDY_NO_GPU").is_some() {
+            eprintln!("SKIP: VANADDY_NO_GPU is set");
+            return;
+        }
         let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAPACITY);
         let health = Arc::new(fresh_health());
         let engine = GpuEngine::start(tx, health.clone());
 
         // Discard the first block: it hides the ~95 ms shader compile and the
         // ~300 ms self-test, which are startup cost, not steady-state rate.
-        let first = rx
-            .recv_timeout(Duration::from_secs(180))
-            .expect("no block within 180 s of start");
+        let first = match rx.recv_timeout(Duration::from_secs(180)) {
+            Ok(b) => b,
+            Err(e) => {
+                if engine.status() == GpuStatus::Disabled(GpuDisableReason::NoDevice) {
+                    eprintln!("SKIP: no Metal device on this machine");
+                    engine.signal_stop();
+                    await_finished(&engine, Duration::from_secs(5), "no-device skip");
+                    engine.reap();
+                    return;
+                }
+                panic!("no block within 180 s of start: {e}");
+            }
+        };
         drop(first);
 
         let mut rates = Vec::with_capacity(3);
