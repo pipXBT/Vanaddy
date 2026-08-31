@@ -687,8 +687,11 @@ mod tests {
 
     /// The kernel is resumable: all live state is in `states`, so a wave can be
     /// split across arbitrarily many dispatches. If that were not exactly true,
-    /// depth-3 pipelining over one `states` buffer would be unsound. Three
-    /// schedules, one of them irregular, must be BIT-IDENTICAL.
+    /// depth-3 pipelining over one `states` buffer would be unsound. Five
+    /// schedules, two of them irregular, must be BIT-IDENTICAL. The second
+    /// irregular schedule sums to less than 2047, so it also exercises the
+    /// "last entry repeats" branch of `Schedule::iters_for` and the
+    /// `.min(remaining)` clamp on the repeated, over-long tail.
     #[test]
     fn gpu_chunk_schedule_invariance() {
         let Some(mut gpu) = gpu_for_test() else {
@@ -700,6 +703,10 @@ mod tests {
             ("production R=8", Schedule::Production),
             ("irregular", Schedule::Irregular(&[1, 1000, 46, 1000])),
             ("R=1", Schedule::Uniform(1)),
+            (
+                "irregular repeat-tail",
+                Schedule::Irregular(&[500, 500, 500]),
+            ),
         ];
         for (label, schedule) in schedules {
             let out = gpu
