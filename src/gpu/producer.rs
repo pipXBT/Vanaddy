@@ -56,6 +56,13 @@ pub(crate) fn read_status(cell: &Mutex<GpuStatus>) -> GpuStatus {
 ///
 /// `ring` is the reference because `crate::seed::derive_seed` (src/seed.rs:8)
 /// is what every pinned vector in CLAUDE.md already pins.
+///
+/// An out-of-range index or a `from_entropy` failure is a CALLER bug, not a
+/// property of the device — `audit_indices` only ever draws `0..wave`, and 16
+/// bytes is always valid 12-word BIP-39 entropy — so both degrade to
+/// `BadConfig`, never `AuditMismatch`, following the same principle
+/// `reason_from`'s doc comment states for `SaltTooLong` above: a programming
+/// error must not be reported as a hardware fault the user goes on to debug.
 pub(crate) fn audit_wave(
     entropy: &[[u8; 16]],
     seeds: &[[u8; 64]],
@@ -63,10 +70,17 @@ pub(crate) fn audit_wave(
 ) -> Result<(), GpuDisableReason> {
     for &i in indices {
         if i >= entropy.len() || i >= seeds.len() {
-            return Err(GpuDisableReason::AuditMismatch { index: i });
+            return Err(GpuDisableReason::BadConfig(format!(
+                "audit index {i} is out of range for a wave of {} candidates",
+                entropy.len().min(seeds.len())
+            )));
         }
-        let m = bip39::Mnemonic::from_entropy(&entropy[i], bip39::Language::English)
-            .map_err(|_| GpuDisableReason::AuditMismatch { index: i })?;
+        let m =
+            bip39::Mnemonic::from_entropy(&entropy[i], bip39::Language::English).map_err(|e| {
+                GpuDisableReason::BadConfig(format!(
+                    "audit index {i}: 16-byte entropy must always be valid BIP-39, got {e}"
+                ))
+            })?;
         if crate::seed::derive_seed(&m) != seeds[i] {
             return Err(GpuDisableReason::AuditMismatch { index: i });
         }
@@ -210,11 +224,25 @@ mod tests {
 
     #[test]
     fn audit_wave_rejects_an_out_of_range_index() {
+        // An out-of-range index can only come from a caller bug -
+        // `audit_indices` never draws outside `0..wave` - so this must be
+        // reported as `BadConfig`, not `AuditMismatch`: a real device fault
+        // and a programming error must not share a reason, or the reason
+        // stops telling anyone what to go debug.
         let (entropy, seeds) = honest_wave(8);
-        assert_eq!(
-            audit_wave(&entropy, &seeds, &[9]),
-            Err(GpuDisableReason::AuditMismatch { index: 9 })
-        );
+        match audit_wave(&entropy, &seeds, &[9]) {
+            Err(GpuDisableReason::BadConfig(m)) => {
+                assert!(
+                    m.contains('9'),
+                    "message must name the bad index, got {m:?}"
+                );
+                assert!(
+                    m.contains('8'),
+                    "message must name the wave length, got {m:?}"
+                );
+            }
+            other => panic!("expected BadConfig, got {other:?}"),
+        }
     }
 
     #[test]
