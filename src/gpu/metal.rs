@@ -454,6 +454,20 @@ impl MetalPbkdf2 {
         Ok(Some(&all[..keys.len()]))
     }
 
+    /// Raw read of one 64-byte slot of the `seeds` buffer, INCLUDING slots past
+    /// the live count that `run_wave` refuses to return. Exists so
+    /// `gpu_slots_beyond_count_keep_their_poison` can prove that nothing wrote
+    /// past the live count and the 0xA5 poison survived there — the only way to
+    /// observe a slot the safe API deliberately hides.
+    pub fn raw_seed_slot(&self, i: usize) -> [u8; 64] {
+        assert!(i < WAVE, "slot {i} is outside the {WAVE}-candidate wave");
+        // SAFETY: `seeds` is WAVE * 64 bytes owned by this engine, no command
+        // buffer is in flight (`run_wave` waits on every one before returning),
+        // and `[u8; 64]` has alignment 1 and no invalid bit patterns.
+        let p = self.bufs.seeds.contents().as_ptr() as *const [u8; 64];
+        unsafe { *p.add(i) }
+    }
+
     /// One wave under the measured production schedule. This is the entry point
     /// the producer thread uses.
     pub fn derive(
@@ -819,6 +833,84 @@ mod tests {
                     chunk[k].phrase()
                 );
             }
+        }
+    }
+
+    /// Counts chosen to straddle the threadgroup size (256), the SIMD width
+    /// (32), and the channel block size (512).
+    const RAGGED_COUNTS: [usize; 9] = [1, 2, 31, 33, 255, 257, 511, 512, 513];
+
+    #[test]
+    fn gpu_handles_ragged_counts() {
+        let Some(mut gpu) = gpu_for_test() else {
+            return;
+        };
+        let corpus = deterministic_corpus();
+        let phrases: Vec<&str> = corpus.iter().map(|m| m.phrase()).collect();
+        for n in RAGGED_COUNTS {
+            let out = gpu
+                .derive(&phrases[..n], crate::seed::PBKDF2_ROUNDS)
+                .expect("wave");
+            assert_eq!(out.len(), n, "run_wave must return EXACTLY count entries");
+            for i in [0usize, n / 2, n - 1] {
+                assert_eq!(
+                    hex::encode(*out[i]),
+                    hex::encode(crate::seed::derive_seed(&corpus[i])),
+                    "n={n} index={i} phrase=`{}`",
+                    corpus[i].phrase()
+                );
+            }
+        }
+    }
+
+    /// A thread past the live count must not write. If it did, a later wave
+    /// with a larger count would silently serve the previous wave's seed for
+    /// those slots.
+    #[test]
+    fn gpu_slots_beyond_count_keep_their_poison() {
+        let Some(mut gpu) = gpu_for_test() else {
+            return;
+        };
+        let corpus = deterministic_corpus();
+        let phrases: Vec<&str> = corpus.iter().map(|m| m.phrase()).collect();
+        for n in RAGGED_COUNTS {
+            let _ = gpu
+                .derive(&phrases[..n], crate::seed::PBKDF2_ROUNDS)
+                .expect("wave");
+            for slot in [n, n + 1, crate::gpu::WAVE - 1] {
+                assert_eq!(
+                    gpu.raw_seed_slot(slot),
+                    [0xA5u8; 64],
+                    "slot {slot} was written by a wave of count {n}"
+                );
+            }
+        }
+    }
+
+    /// Two identical waves must produce bit-identical seeds. A GPU that is
+    /// racing on `states` — the failure mode depth-3 pipelining could
+    /// introduce — shows up here as an intermittent difference.
+    #[test]
+    fn gpu_repeat_wave_is_bit_identical() {
+        let Some(mut gpu) = gpu_for_test() else {
+            return;
+        };
+        let corpus = deterministic_corpus();
+        let phrases: Vec<&str> = corpus[..512].iter().map(|m| m.phrase()).collect();
+        let first: Vec<String> = gpu
+            .derive(&phrases, crate::seed::PBKDF2_ROUNDS)
+            .expect("wave")
+            .iter()
+            .map(|s| hex::encode(**s))
+            .collect();
+        for round in 0..3 {
+            let again: Vec<String> = gpu
+                .derive(&phrases, crate::seed::PBKDF2_ROUNDS)
+                .expect("wave")
+                .iter()
+                .map(|s| hex::encode(**s))
+                .collect();
+            assert_eq!(first, again, "wave {round} differed from the first");
         }
     }
 }
