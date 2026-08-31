@@ -323,6 +323,15 @@ impl Schedule {
     }
 }
 
+/// A self-test failure is a correctness fault, not a transient: it becomes a
+/// sticky `GpuDisableReason` for the life of the process. Milestone 4's
+/// producer uses this via `?`.
+impl From<selftest::SelfTestError> for GpuDisableReason {
+    fn from(e: selftest::SelfTestError) -> Self {
+        GpuDisableReason::SelfTest(e)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
