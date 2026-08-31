@@ -4678,13 +4678,19 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Three things in this code are load-bearing and are not stylistic.**
 
-1. **One autorelease pool per command buffer.** Measured on this machine:
-   without a pool, `+1,861 B per command buffer` = 199 KB/s = **700 MB/hour =
-   16.4 GB/day**; with a per-command-buffer pool, RSS is flat or negative, at
-   identical throughput (13,829 vs 13,804 seeds/s). **The fix is free.** A bare
-   `std::thread::spawn` body has no ambient pool, and a single outer pool never
-   drains and leaks identically. A multi-day vanity search is the stated use
-   case; without this the process is jetsammed overnight.
+1. **One autorelease pool per command buffer.** The design spec PREDICTED
+   `+1,861 B per command buffer` = 199 KB/s = **700 MB/hour = 16.4 GB/day**
+   without a pool. Task 3.11 later tried to reproduce that and could not: with
+   the pool removed the RSS deltas were +4080, +3296 and −1856 KiB, against
+   −2560, −1056, −1728 and −1696 KiB with it in place — no separation, not even
+   in direction. objc2 routes `queue.commandBuffer()` through
+   `retain_autoreleased`, which can often avoid the pool entirely. **Keep the
+   pool anyway:** that elision is best-effort, not guaranteed, so the pool is
+   what bounds memory whenever it does not fire, and it is free (identical
+   throughput, 13,829 vs 13,804 seeds/s). A bare `std::thread::spawn` body has
+   no ambient pool, and a single outer pool never drains. What is load-bearing
+   is the practice; the 700 MB/hour number is not evidence and must not be
+   quoted as measurement.
 2. **`check_status` at EVERY wait, not only the last.** See Task 3.2.
 3. **`0xA5` poison before every wave, and an exact-length return.** Poisoning
    means a missing `finalize` yields obvious garbage rather than the *previous*
@@ -4887,8 +4893,16 @@ type Cb = Retained<ProtocolObject<dyn MTLCommandBuffer>>;
                 return Ok(None);
             }
             let prev = ring[slot_ix].take();
-            // ONE AUTORELEASE POOL PER COMMAND BUFFER. Non-negotiable: without
-            // it this leaks 1,861 B per command buffer = ~700 MB/hour.
+            // ONE AUTORELEASE POOL PER COMMAND BUFFER. Keep it — but not for
+            // the reason originally written here. The spec predicted 1,861 B
+            // leaked per command buffer without it (~700 MB/hour); that figure
+            // is UNVERIFIED on this hardware. Removing this pool produced no
+            // reproducible RSS difference at all — see
+            // `gpu_rss_does_not_run_away_over_100k_dispatches` below for the
+            // measurements — because objc2 routes `commandBuffer()` through
+            // `retain_autoreleased`, which can often avoid the pool entirely.
+            // That optimisation is best-effort, not guaranteed, so the pool is
+            // still what bounds memory whenever it does not fire.
             // `prev` is moved in, so its release also happens inside the pool.
             let cb = autoreleasepool(|_| -> Result<Cb, GpuError> {
                 if let Some(prev) = prev {
@@ -6700,12 +6714,15 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Consumes: `MetalPbkdf2::derive` (Task 3.4)
 - Produces: nothing new.
 
-The autorelease-pool bug is invisible in short tests and only surfaces after
-hours: `+1,861 B per command buffer` = **700 MB/hour = 16.4 GB/day**. A multi-day
-vanity search is the stated use case; without the pool the process is jetsammed
-overnight. This test runs 390 waves of 512 candidates = 100,230 dispatches over
-25,350 command buffers — enough that a missing pool costs ~47 MB, which an 8 MiB
-threshold separates cleanly from noise. It is `#[ignore]`d because it takes ~65 s.
+This test was written to catch the autorelease-pool bug the design spec predicted —
+`+1,861 B per command buffer` = **700 MB/hour = 16.4 GB/day**, invisible in short
+tests and surfacing only after hours. Step 3 below records that the prediction did
+not reproduce on this hardware, so what shipped is a **general no-runaway guard**:
+390 waves of 512 candidates = 100,230 dispatches over 25,350 command buffers, with
+an 8 MiB absolute threshold on process-wide RSS. It will catch memory running away
+from any cause over that run; it will **not** tell you whether the pool is present.
+It is `#[ignore]`d because it takes ~65 s. Name and doc comment say so:
+`gpu_rss_does_not_run_away_over_100k_dispatches`.
 
 RSS is read by shelling out to `ps`, which adds no dependency.
 
