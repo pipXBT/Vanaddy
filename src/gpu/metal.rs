@@ -204,6 +204,59 @@ pub(crate) fn gpu_for_test() -> Option<MetalPbkdf2> {
     }
 }
 
+/// Compile-time proof that the `objc2-metal` surface `run_wave` (Task 3.4)
+/// depends on resolved to the selector spellings and arities this file assumes.
+/// Never called, never shipped in any meaningful sense — it exists so that a
+/// binding mismatch fails here, naming the one selector that moved, instead of
+/// inside the kernel work where it looks like a Metal bug.
+#[allow(dead_code)]
+fn objc2_surface_probe(
+    q: &ProtocolObject<dyn objc2_metal::MTLCommandQueue>,
+    pipe: &ProtocolObject<dyn MTLComputePipelineState>,
+    buf: &ProtocolObject<dyn MTLBuffer>,
+) {
+    use objc2_metal::{MTLCommandBuffer, MTLCommandEncoder, MTLComputeCommandEncoder, MTLSize};
+
+    let _: usize = pipe.threadExecutionWidth();
+    let _: usize = pipe.maxTotalThreadsPerThreadgroup();
+    let _: std::ptr::NonNull<std::ffi::c_void> = buf.contents();
+
+    // Pin `autoreleasepool`'s closure arity and the shape of the pool argument.
+    // Task 3.4 calls this three times and Task 3.3's own rationale names it as a
+    // reason for choosing objc2 over metal-rs, so it belongs in this probe: if the
+    // closure took no argument, or returned `()` only, 3.4 would not compile and the
+    // failure would surface 300 lines into a task this probe exists to de-risk.
+    let _: u32 = objc2::rc::autoreleasepool(|_pool| 0u32);
+
+    let Some(cb) = q.commandBuffer() else { return };
+    let _: i64 = cb.status().0 as i64;
+    let _: Option<String> = cb.error().map(|e| e.localizedDescription().to_string());
+
+    if let Some(enc) = cb.computeCommandEncoder() {
+        enc.setComputePipelineState(pipe);
+        let p: u32 = 0;
+        unsafe {
+            enc.setBuffer_offset_atIndex(Some(buf), 0, 0);
+            enc.setBytes_length_atIndex(std::ptr::NonNull::from(&p).cast(), 4, 1);
+        }
+        enc.dispatchThreads_threadsPerThreadgroup(
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+        );
+        enc.endEncoding();
+    }
+    cb.commit();
+    cb.waitUntilCompleted();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
