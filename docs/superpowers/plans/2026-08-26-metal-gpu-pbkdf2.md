@@ -6726,19 +6726,30 @@ RSS is read by shelling out to `ps`, which adds no dependency.
             .expect("ps printed a number")
     }
 
-    /// The autorelease-pool regression guard. `#[ignore]`d: ~65 s.
+    /// General no-runaway-leak guard over a long dispatch run. `#[ignore]`d: ~65 s.
     ///
     /// Run it by hand with:
-    ///   cargo test --release -- --ignored --nocapture gpu_no_rss_growth
+    ///   cargo test --release -- --ignored --nocapture gpu_rss_does_not_run_away
     ///
-    /// Without a per-command-buffer autorelease pool this leaks 1,861 B per
-    /// command buffer; 25,350 command buffers is ~47 MB, so an 8 MiB threshold
-    /// separates a real leak from allocator noise. Measured on an M1 with the
-    /// pool in place: 15,616 KiB before → 14,064 KiB after (RSS went DOWN).
+    /// Does NOT prove the per-command-buffer autorelease pool in `run_wave`
+    /// is load-bearing: removing it measured deltas of +4080, +3296, -1856
+    /// KiB across three runs, indistinguishable from four pool-intact deltas
+    /// of -2560, -1056, -1728, -1696 KiB — no threshold separates the two.
+    /// `queue.commandBuffer()` returns a `Retained<T>`; objc2's
+    /// `retain_autoreleased` **can sometimes** avoid putting the object in
+    /// the pool (a best-effort runtime handshake, not a guarantee — it needs
+    /// specific inlining and callee cooperation, and falls back to a real
+    /// autorelease when it doesn't fire), which plausibly explains a leak
+    /// far smaller than the spec predicted without implying there is no
+    /// autorelease traffic at all. Because the elision isn't guaranteed, the
+    /// pool remains real insurance rather than decoration, even though this
+    /// test cannot demonstrate its value on this hardware.
     #[test]
     #[ignore]
-    fn gpu_no_rss_growth_over_100k_dispatches() {
-        let Some(mut gpu) = gpu_for_test() else { return };
+    fn gpu_rss_does_not_run_away_over_100k_dispatches() {
+        let Some(mut gpu) = gpu_for_test() else {
+            return;
+        };
         let phrases: Vec<&str> = vec![CANONICAL_PHRASE; 512];
 
         // 30 warm-up waves so the baseline is taken after the allocator, the
@@ -6765,8 +6776,8 @@ RSS is read by shelling out to `ps`, which adds no dependency.
         );
         assert!(
             end.saturating_sub(base) < 8 * 1024,
-            "RSS grew {} KiB over 100,230 dispatches — the per-command-buffer \
-             autorelease pool in run_wave is missing or was moved outside the loop",
+            "RSS grew {} KiB over 100,230 dispatches — cause unknown, needs \
+             investigation",
             end - base
         );
     }
@@ -6775,7 +6786,7 @@ RSS is read by shelling out to `ps`, which adds no dependency.
 - [ ] **Step 2: Run it and watch it pass.**
 
 ```sh
-cargo test --release -- --ignored --nocapture gpu_no_rss_growth
+cargo test --release -- --ignored --nocapture gpu_rss_does_not_run_away
 ```
 
 Expected output shape (numbers will differ slightly):
@@ -6786,10 +6797,15 @@ test result: ok. 1 passed
 ```
 
 **This is the second gate the milestone brief names: do not proceed past this
-milestone until RSS is flat.** A positive delta above ~8 MiB means the pool is
-wrong — go back to Task 3.4 Step 5 and check that `autoreleasepool` wraps the
-body **inside** the `loop`, once per command buffer, and that `prev` is moved
-into the closure so its release happens inside the pool too.
+milestone until RSS is flat.** A positive delta above ~8 MiB means memory is
+running away over 100,230 dispatches from *some* cause, and needs investigating
+before anything ships — it does **not** localise the cause to the autorelease
+pool. Step 3 below records why: the pool-removal mutation was performed and did
+not reproduce a signal in either magnitude or direction, so this test cannot
+attribute a runaway to the pool. Checking that `autoreleasepool` wraps the body
+**inside** the `loop`, once per command buffer, with `prev` moved into the
+closure, is still the first thing to look at (Task 3.4 Step 5) — just not the
+only thing.
 
 - [ ] **Step 3: Prove the guard bites.** Temporarily hoist the pool out of the loop
       in `run_wave` — replace:
@@ -6826,20 +6842,36 @@ with:
 and the closing `});` of that block — the line that closes the `autoreleasepool` call itself, NOT the inner `enc`/`cb` braces — with `})();`, then run:
 
 ```sh
-cargo test --release -- --ignored --nocapture gpu_no_rss_growth
+cargo test --release -- --ignored --nocapture gpu_rss_does_not_run_away
 ```
 
-Expected: a delta of roughly `+40,000` KiB and
-
-```
-RSS grew 4XXXX KiB over 100,230 dispatches — the per-command-buffer autorelease pool in run_wave is missing or was moved outside the loop
-```
+> **THIS MUTATION WAS RUN, AND IT DID NOT BITE. Do not re-run it expecting it to.**
+> The expectation originally written here was a delta of roughly `+40,000` KiB. Measured
+> on this M1, pooling the implementer's runs and the reviewer's:
+>
+> | pool | measured RSS delta (KiB) |
+> |---|---|
+> | intact | −2560, −1056, −1728, −1696 |
+> | removed | +4080, +3296, −1856 |
+>
+> The signal does not reproduce even in **direction** — one pool-removed run came back
+> negative and indistinguishable from a clean one — and no threshold separates the two
+> populations. The test therefore passes whether the pool is present or absent, and its
+> name and doc comment were corrected to say so (`gpu_rss_does_not_run_away_over_100k_dispatches`).
+>
+> Mechanism: `queue.commandBuffer()` returns a `Retained<T>` and objc2 routes it through
+> `retain_autoreleased`, which per objc2's own docs "can sometimes avoid putting the object
+> into the autorelease pool" — best-effort, so the real autorelease traffic is far below the
+> spec's 1,861 B/command-buffer figure. **The pool stays**: the elision is not guaranteed,
+> and the pool is what bounds memory whenever it does not fire. What changed is the
+> justification, not the mandate. Step 3 is kept as the record of a measurement that came
+> back negative, not as an instruction to repeat.
 
 - [ ] **Step 4: Revert the mutation** back to `let built = autoreleasepool(|_| … });` and
-      re-run to confirm the delta is back under 8 MiB.
+      re-run to confirm the delta is still under 8 MiB.
 
 ```sh
-cargo test --release -- --ignored --nocapture gpu_no_rss_growth
+cargo test --release -- --ignored --nocapture gpu_rss_does_not_run_away
 ```
 
 - [ ] **Step 5: The full milestone gate — run every leg.** Note what is *not*
@@ -6896,13 +6928,13 @@ cargo test --release gpu:: -- --nocapture 2>&1 | grep -E '^test gpu::|SKIP'
 ```
 
 Expected: every `gpu::backend::tests::gpu_*` line reads `... ok`, **except**
-`gpu_no_rss_growth_over_100k_dispatches`, which reads `... ignored` — Step 1 declares
+`gpu_rss_does_not_run_away_over_100k_dispatches`, which reads `... ignored` — Step 1 declares
 it `#[ignore]` by design and Step 2 runs it separately with `--ignored`. A run without
 `--ignored` prints `ignored` for it, and this grep captures that line.
 
 Do not treat that `ignored` as a gate failure, and do not remove the `#[ignore]` to make
 this line read `ok` — the test takes minutes and is deliberately opt-in. If you prefer a
-clean all-`ok` read, append `| grep -v gpu_no_rss_growth` to the pipeline.
+clean all-`ok` read, append `| grep -v gpu_rss_does_not_run_away` to the pipeline.
 
 And **no** `SKIP:` line appears. If you see `SKIP: no Metal device on this machine` on a
 machine that has one, stop — the differential did not run.
@@ -6921,7 +6953,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 **Milestone 3 exit criteria** (all must hold before Milestone 4 starts):
 
 - `gpu_seed_matches_bip39_canonical_vector` passes on real hardware.
-- `gpu_no_rss_growth_over_100k_dispatches` shows a delta under 8 MiB.
+- `gpu_rss_does_not_run_away_over_100k_dispatches` shows a delta under 8 MiB.
 - `cargo test`, `cargo test --no-default-features`, and `VANADDY_NO_GPU=1 cargo test`
   are all green, and `cargo clippy --all-targets` still emits exactly the 12
   pre-existing diagnostics recorded in Milestone 1 Task 1.8 Step 5 — no more, no
@@ -13826,16 +13858,16 @@ Task 8.7 adds that anything else "stops the ship". `parse_soak_count` stays in `
 - Test: `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs` (`mod soak_count_tests` — a second `mod tests` in one file is `error[E0428]`)
 
 **Interfaces:**
-- Consumes: `pub const COMPRESSIONS_PER_SEED: u32 = 4_098;`, `pub const WAVE: usize = 8_192;` (both from `src/gpu/mod.rs`, Milestone 1); the `#[ignore]`d test `gpu_no_rss_growth_over_100k_dispatches` in `src/gpu/metal.rs` (Milestone 3, Task 3.11); the test helper `gpu_for_test()` and the `use` items already in that file's `mod tests`
+- Consumes: `pub const COMPRESSIONS_PER_SEED: u32 = 4_098;`, `pub const WAVE: usize = 8_192;` (both from `src/gpu/mod.rs`, Milestone 1); the `#[ignore]`d test `gpu_rss_does_not_run_away_over_100k_dispatches` in `src/gpu/metal.rs` (Milestone 3, Task 3.11); the test helper `gpu_for_test()` and the `use` items already in that file's `mod tests`
 - Produces: `#[cfg(test)] pub(crate) fn parse_soak_count(raw: Option<&str>, default: usize) -> usize` in `src/gpu/mod.rs` (kept `pub(crate)` so `src/gpu/metal.rs` can reach it); `fn soak_count(default: usize) -> usize` inside the `#[cfg(test)] mod tests` of `src/gpu/metal.rs` (no `#[cfg(test)]` attribute of its own — the enclosing module already carries one)
 
-- [ ] **Step 0: Confirm Milestone 3 Task 3.11 has landed.** Step 8 below asserts it runs "all FOUR `#[ignore]`d tests this branch created" and Step 9's clean shape is `4 passed`; both silently depend on `gpu_no_rss_growth_over_100k_dispatches` existing, and Task 8.6 EDIT 4 documents it in `CLAUDE.md` as an existing pin.
+- [ ] **Step 0: Confirm Milestone 3 Task 3.11 has landed.** Step 8 below asserts it runs "all FOUR `#[ignore]`d tests this branch created" and Step 9's clean shape is `4 passed`; both silently depend on `gpu_rss_does_not_run_away_over_100k_dispatches` existing, and Task 8.6 EDIT 4 documents it in `CLAUDE.md` as an existing pin.
 
 ```sh
 grep -rn '#\[ignore' src/
 ```
 
-Expect the listing to include `gpu_no_rss_growth_over_100k_dispatches` in `src/gpu/metal.rs`. If it does not, **apply Milestone 3 Task 3.11 before continuing** — the same conditional-create pattern Step 5 below uses for `gpu_soak_matches_ring`. Do not proceed with three `#[ignore]`d tests and re-interpret Step 9's `4 passed`; the RSS guard is the only fast proxy for the 1,861-bytes-per-command-buffer autorelease leak, and Task 8.2 is what it stands in for. Note `grep -rn` exits 1 when it matches nothing, so read the listing, not the exit status.
+Expect the listing to include `gpu_rss_does_not_run_away_over_100k_dispatches` in `src/gpu/metal.rs`. If it does not, **apply Milestone 3 Task 3.11 before continuing** — the same conditional-create pattern Step 5 below uses for `gpu_soak_matches_ring`. Do not proceed with three `#[ignore]`d tests and re-interpret Step 9's `4 passed`. What that guard actually covers: an **unbounded RSS runaway over 100,230 dispatches, from any cause**. It is deliberately NOT a proxy for the per-command-buffer autorelease leak — Task 3.11 Step 3 removed the pool and measured deltas (+4080, +3296, −1856 KiB) indistinguishable from four pool-intact runs (−2560, −1056, −1728, −1696 KiB), so the test passes with the pool present or absent — and it is **not** a substitute for Task 8.2's twelve-hour soak, which is the only thing in this plan that exercises real multi-hour memory behaviour. Note `grep -rn` exits 1 when it matches nothing, so read the listing, not the exit status.
 
 - [ ] **Step 1: Write the failing parser test.** Append this to the end of `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs`. Task 1.3 already put a `#[cfg(test)] mod tests` block in this file, which is exactly why the module below is named `soak_count_tests` — do **not** rename it to `tests`, and do not fold the four `#[test]` functions into the Task 1.3 block. Two modules of the same name in one file is `error[E0428]: the name `tests` is defined multiple times`.
 
@@ -13933,10 +13965,10 @@ Expected: `test result: ok. 4 passed; 0 failed`.
 grep -n 'fn gpu_soak_matches_ring' /Users/shawnhopkinson/Rust/Vanaddy/src/gpu/metal.rs
 ```
 
-**If that grep prints nothing** (Milestone 3 shipped only `gpu_no_rss_growth_over_100k_dispatches`), the
+**If that grep prints nothing** (Milestone 3 shipped only `gpu_rss_does_not_run_away_over_100k_dispatches`), the
 soak this whole milestone is built on does not exist yet — create it now. Add this to the
 `#[cfg(test)] mod tests` block in `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/metal.rs`, beside
-`gpu_no_rss_growth_over_100k_dispatches`, and write it with the literal `1_000_000` exactly as shown:
+`gpu_rss_does_not_run_away_over_100k_dispatches`, and write it with the literal `1_000_000` exactly as shown:
 
 ```rust
     /// The long differential, and the gate the whole of Milestone 8 rests on.
@@ -14096,7 +14128,7 @@ git commit -m "test: parse VANADDY_GPU_SOAK_N as f64 so 1e7 means ten million
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
 
-- [ ] **Step 8: Run the full soak — the milestone's headline gate.** The command below is unscoped, so it runs all FOUR `#[ignore]`d tests this branch created: `gpu_soak_matches_ring` at ten million candidates and `gpu_no_rss_growth_over_100k_dispatches` (both in `src/gpu/metal.rs`, Tasks 8.1 and 3.11), `gpu_seed_rate_end_to_end` (`src/gpu/producer.rs`, Task 4.8) and `hybrid_evm_search_with_live_gpu_emits_only_rederivable_matches` (`src/app.rs`, Task 5.3). **Budget ~150 minutes.** That follows from Step 5's own figure: 1,000,000 candidates is ~15 minutes in a debug build, and this runs ten million in the same debug build, so 10 × 15 ≈ 150. Do not hold to a 45–90 minute expectation and conclude a healthy soak has hung — 45–90 minutes is *release* scaling, not debug.
+- [ ] **Step 8: Run the full soak — the milestone's headline gate.** The command below is unscoped, so it runs all FOUR `#[ignore]`d tests this branch created: `gpu_soak_matches_ring` at ten million candidates and `gpu_rss_does_not_run_away_over_100k_dispatches` (both in `src/gpu/metal.rs`, Tasks 8.1 and 3.11), `gpu_seed_rate_end_to_end` (`src/gpu/producer.rs`, Task 4.8) and `hybrid_evm_search_with_live_gpu_emits_only_rederivable_matches` (`src/app.rs`, Task 5.3). **Budget ~150 minutes.** That follows from Step 5's own figure: 1,000,000 candidates is ~15 minutes in a debug build, and this runs ten million in the same debug build, so 10 × 15 ≈ 150. Do not hold to a 45–90 minute expectation and conclude a healthy soak has hung — 45–90 minutes is *release* scaling, not debug.
 
 If you would rather not sit for 150 minutes, `--release` is a supported alternative and lands the same gate in ~50 minutes:
 
@@ -14106,7 +14138,7 @@ VANADDY_GPU_SOAK_N=1e7 cargo test --release -- --ignored --nocapture --test-thre
   | tee /tmp/vanaddy-soak/soak-1e7.log
 ```
 
-`--test-threads=1` is load-bearing, not tidiness: `gpu_no_rss_growth_over_100k_dispatches` measures **process-wide** RSS against an 8 MiB absolute threshold, and the concurrent ten-million-candidate soak allocates 8,192 mnemonics plus 8,192 64-byte seeds per wave into the same process. libtest defaults to `num_cpus` parallel and there is no `.cargo/config.toml` in this repo, so without the flag that guard either fails on co-scheduling — which Step 9 would report as a hard stop for the whole milestone — or passes while proving nothing, depending on when the soak happens to free its wave buffers.
+`--test-threads=1` is load-bearing, not tidiness: `gpu_rss_does_not_run_away_over_100k_dispatches` measures **process-wide** RSS against an 8 MiB absolute threshold, and the concurrent ten-million-candidate soak allocates 8,192 mnemonics plus 8,192 64-byte seeds per wave into the same process. libtest defaults to `num_cpus` parallel and there is no `.cargo/config.toml` in this repo, so without the flag that guard either fails on co-scheduling — which Step 9 would report as a hard stop for the whole milestone — or passes while proving nothing, depending on when the soak happens to free its wave buffers.
 
 Either build satisfies the gate, because what this soak proves is a **differential** — GPU seed == `ring` seed over ten million real phrases — and that equality is build-independent. Release has the further advantage that `gpu_seed_rate_end_to_end` then runs under the conditions Task 4.8 documents, so the tolerated failure described below simply does not arise. Run the debug command in the fence further down, or this release one; do not run both.
 
@@ -14169,11 +14201,16 @@ A `RingMismatch { index, phrase, got, want }` failure here is a hard stop for th
 
 ### Task 8.2: 12-hour real search with RSS sampled every 10 minutes
 
-The autorelease-pool defect this guards against leaks 1,861 bytes per command buffer — 199 KB/s,
-700 MB/hour, 16.4 GB/day. It is completely invisible in a short test and only shows up in the
-stated use case, a multi-day vanity search. The `#[ignore]`d `gpu_no_rss_growth_over_100k_dispatches`
-test from Task 8.1 Step 8 is the fast proxy; this task is the real thing, running the actual
-binary through the actual TUI with the CSV writer, the match list, and the render loop all live.
+The design spec predicted an autorelease-pool leak of 1,861 bytes per command buffer — 199 KB/s,
+700 MB/hour, 16.4 GB/day — invisible in a short test and visible only in the stated use case, a
+multi-day vanity search. That figure was never reproduced on this hardware (Task 3.11 Step 3), so
+**this task is not a confirmation of a known leak; it is the only place in the plan where
+multi-hour memory behaviour is measured at all.** The `#[ignore]`d
+`gpu_rss_does_not_run_away_over_100k_dispatches` test from Task 8.1 Step 8 is **not** a fast proxy
+for it — that test catches an unbounded runaway over ~65 seconds and cannot distinguish a
+pool-removed build from a clean one. Nothing short-running stands in for this task: it runs the
+actual binary through the actual TUI with the CSV writer, the match list, and the render loop all
+live, for twelve hours.
 
 **Files:**
 - Create: `/tmp/vanaddy-soak/sample-rss.sh` (operator harness, deliberately **not** committed — the shipped commit stays source-only)
@@ -15089,7 +15126,7 @@ WITH:
 
 ```markdown
 - **Each chain's "fixed prefix" determines where the user's vanity starts.** Bitcoin skips `bc1q` (4 chars), TON skips `UQ` (2 chars), Monero skips `4` (1 char), Solana/EVM apply from char 0. This logic is inline in each chain's `matches_raw` — be careful not to change the slice indices when refactoring.
-- **One `autorelease pool` per command buffer, never one per wave and never none.** `run_wave` wraps *each* command buffer in `objc2::rc::autoreleasepool` and calls `cb.retain()` inside that pool. Measured on this M1: without a pool, +1,861 B per command buffer = 199 KB/s = **700 MB/hour = 16.4 GB/day**, and a multi-day search is the stated use case. Throughput is identical with and without (13,829 vs 13,804 seeds/s) — the fix is free. A bare `std::thread::spawn` body has **no ambient pool**, and a single outer pool never drains and leaks identically. Pinned by `gpu::metal::gpu_no_rss_growth_over_100k_dispatches` (`#[ignore]`) and by the 12-hour RSS soak.
+- **One `autorelease pool` per command buffer, never one per wave and never none.** `run_wave` wraps *each* command buffer in `objc2::rc::autoreleasepool` and calls `cb.retain()` inside that pool. The design spec predicted +1,861 B per command buffer without it (= 199 KB/s = 700 MB/hour); **that figure is unverified on this hardware** — removing the pool measured RSS deltas of +4080, +3296 and −1856 KiB, indistinguishable from four pool-intact runs of −2560, −1056, −1728 and −1696 KiB. objc2 routes `queue.commandBuffer()` through `retain_autoreleased`, which can often avoid the pool entirely; that optimisation is best-effort, not guaranteed, so the pool is what bounds memory whenever it does not fire. Keep it: it is correct practice and real insurance, and it is free (throughput is identical with and without, 13,829 vs 13,804 seeds/s). A bare `std::thread::spawn` body has **no ambient pool**, and a single outer pool never drains. `gpu::metal::gpu_rss_does_not_run_away_over_100k_dispatches` (`#[ignore]`) guards against an unbounded RSS runaway from any cause over 100,230 dispatches — it does **not** prove this pool is load-bearing, and no test in this tree does. The 12-hour RSS soak is the only long-running memory check.
 - **Check command-buffer status at every `waitUntilCompleted`, not just the last.** `check_status` returns `Err(CommandBuffer { status, message })` unless status is `Completed` **and** `error()` is nil, and the **whole wave is discarded on any failure — there is no partial-success shape.** macOS resets a hung GPU after ~5 s and `waitUntilCompleted` then *returns* rather than hanging; without the check that silently drops 8 of 2048 U-iterations and `finalize` writes a T that is the XOR of only 2,039 values — a wrong-but-plausible 64-byte seed with nothing surfaced anywhere.
 - **No GPU-derived key material, ever.** In `src/gpu/pbkdf2_bip39.metal`, `thread_position_in_grid` may appear **only** inside slot-offset index expressions (`keyblocks + 16*tid`, `states + tid`, `seeds + 64*tid`). Deriving any part of a key from `tid` (as the discarded `k2.metal` bench scaffolding did with `ipad[i] = H0[i] ^ (ulong)tid`) would make every wallet the tool ever emits recoverable from one 64-bit value **while still passing every address test**. Entropy comes only from `Mnemonic::new(Words12, English)` on the host. `threadgroup`, `simd_`, `barrier`, and `atomic` are likewise banned — every thread is an independent PBKDF2 with zero cross-thread communication. Both rules are grep-pinned by `gpu::kernel_src::tests::kernel_source_uses_tid_only_in_index_expressions` and `gpu::kernel_src::tests::kernel_source_bans_threadgroup_simd_barrier_atomic` in `src/gpu/kernel_src.rs`, which is compiled on every target and needs no GPU to run. The `tid` allowlist in that file is exact-line: any new use of `tid`, however innocent, must come through a deliberate edit to it.
 - **Never join the GPU thread from the UI thread.** `stop_search` calls `GpuEngine::signal_stop()` (sets a **producer-only** flag — never `App::stop`, which every Rayon worker reads) and parks the engine in `App::gpu_engines`; `start_search` reaps only via the non-blocking `is_finished()` and skips the GPU for that run if an engine is still winding down. A force-join blocks the render loop for the remainder of a ~250 ms cold shader compile on an Enter/Ctrl+C/Enter sequence, and blocks **forever** if the GPU wedges inside `waitUntilCompleted` — leaving the terminal in raw mode with the alternate screen up and only `kill -9` as an exit.
