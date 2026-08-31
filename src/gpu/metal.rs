@@ -562,6 +562,28 @@ mod tests {
     const CANONICAL_PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     const CANONICAL_SEED_HEX: &str = "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4";
 
+    /// The shortest possible 12-word English BIP-39 phrase: 11 × 3 letters + 11
+    /// spaces + a 3-letter checksum word = 47 bytes.
+    const SHORTEST_PHRASE: &str = "act act act act act act act act act act act box";
+    /// The longest: 11 × 8 letters + 11 spaces + an 8-letter checksum word = 107
+    /// bytes. `pack_key_block` zero-pads to 128, so this is the last length
+    /// before the (absent) SHA-512 pre-hash path would be needed.
+    const LONGEST_PHRASE: &str = "abstract abstract abstract abstract abstract abstract abstract abstract abstract abstract abstract attitude";
+
+    /// PBKDF2-HMAC-SHA512 with an arbitrary iteration count, via `ring` — the
+    /// same primitive `src/seed.rs:12` uses, but with `iters` free.
+    fn ring_reference(phrase: &str, iters: u32) -> [u8; 64] {
+        let mut out = [0u8; 64];
+        ring::pbkdf2::derive(
+            ring::pbkdf2::PBKDF2_HMAC_SHA512,
+            std::num::NonZeroU32::new(iters).expect("iters >= 1"),
+            crate::seed::BIP39_SALT,
+            phrase.as_bytes(),
+            &mut out,
+        );
+        out
+    }
+
     /// The BIP-39 canonical vector, against the same hex constant already
     /// pinned at src/seed.rs:41. This is the anchor to external ground truth:
     /// every other GPU test in this file compares against `ring`, which would
@@ -576,6 +598,29 @@ mod tests {
             .expect("wave");
         assert_eq!(out.len(), 1);
         assert_eq!(hex::encode(*out[0]), CANONICAL_SEED_HEX);
+    }
+
+    /// `total_iters == 1` is the case the do-while exists for: PBKDF2 with
+    /// c == 1 is T == U_1, already computed by the prologue, so the wave still
+    /// needs one iterate dispatch purely to carry `finalize`.
+    #[test]
+    fn gpu_matches_ring_at_total_iters_1_2_3_16_2048() {
+        let Some(mut gpu) = gpu_for_test() else {
+            return;
+        };
+        let phrases = [CANONICAL_PHRASE, SHORTEST_PHRASE, LONGEST_PHRASE];
+        for iters in [1u32, 2, 3, 16, 2048] {
+            let out = gpu.derive(&phrases, iters).expect("wave");
+            assert_eq!(out.len(), phrases.len());
+            for (i, phrase) in phrases.iter().enumerate() {
+                assert_eq!(
+                    hex::encode(*out[i]),
+                    hex::encode(ring_reference(phrase, iters)),
+                    "iters={iters} index={i} phrase=`{phrase}` ({} bytes)",
+                    phrase.len()
+                );
+            }
+        }
     }
 
     #[test]
