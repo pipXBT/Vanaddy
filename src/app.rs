@@ -718,6 +718,150 @@ mod tests {
         );
     }
 
+    /// Milestone 5's end-to-end gate. A real EVM search with a 1-character
+    /// prefix, fed by the real Metal producer, writing through the production
+    /// CSV writer. Asserts three things at once:
+    ///   1. the GPU path actually ran (otherwise this test proves nothing),
+    ///   2. every CSV row re-derives from its phrase alone through `ring`,
+    ///   3. the counter is honest — every candidate it counted was examined,
+    ///      as whole 64-candidate GPU chunks plus whole 4-candidate CPU batches.
+    #[test]
+    #[ignore = "requires a Metal device and runs for ~5 s; run with --ignored"]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
+    fn hybrid_evm_search_with_live_gpu_emits_only_rederivable_matches() {
+        use crate::chains::{evm::Evm, search_hybrid, Bip39GpuChain, Chain};
+        use crate::gpu::{GpuEngine, GpuHealth, SeedBlock, CHANNEL_CAPACITY};
+        use bip39::{Language, Mnemonic};
+
+        let health = Arc::new(GpuHealth::default());
+        let (gtx, grx) = crossbeam_channel::bounded::<Box<SeedBlock>>(CHANNEL_CAPACITY);
+        let engine = GpuEngine::start(gtx, Arc::clone(&health));
+
+        // One hex character: ~1 match in 16 candidates, so a few seconds of
+        // searching produces thousands of rows to re-derive.
+        let matcher = Matcher::new(
+            "a".into(),
+            String::new(),
+            false,
+            crate::chains::ChainKind::Evm,
+        );
+        let stop = AtomicBool::new(false);
+        let counter = AtomicU64::new(0);
+        let (tx, rx) = mpsc::channel();
+
+        thread::scope(|s| {
+            for _ in 0..4 {
+                let grx_w = grx.clone();
+                let health_w = Arc::clone(&health);
+                let tx_w = tx.clone();
+                let matcher_w = &matcher;
+                let stop_w = &stop;
+                let counter_w = &counter;
+                s.spawn(move || {
+                    search_hybrid::<Evm>(
+                        matcher_w,
+                        stop_w,
+                        counter_w,
+                        &tx_w,
+                        Some(&grx_w),
+                        &health_w,
+                    );
+                });
+            }
+            thread::sleep(Duration::from_secs(5));
+            stop.store(true, Ordering::Relaxed);
+        });
+
+        engine.signal_stop();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !engine.is_finished() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            engine.is_finished(),
+            "GPU producer did not stop within 5 s of signal_stop()"
+        );
+        engine.reap();
+
+        // 1. The GPU path actually ran.
+        let delivered = health.seeds_delivered.load(Ordering::Relaxed);
+        assert!(
+            delivered > 0,
+            "the GPU produced no seeds in 5 s - this test proves nothing"
+        );
+        assert_eq!(
+            delivered % 64,
+            0,
+            "GPU seeds are counted one whole 64-chunk at a time, got {delivered}"
+        );
+        assert!(
+            !health.disable.load(Ordering::Relaxed),
+            "GPU disabled mid-run: {:?}",
+            health.take_reason()
+        );
+        assert_eq!(health.verify_rejections.load(Ordering::Relaxed), 0);
+
+        // 3. The counter is honest.
+        let n = counter.load(Ordering::Relaxed);
+        assert!(
+            n >= delivered,
+            "counter {n} must include every one of {delivered} GPU candidates"
+        );
+        assert_eq!(
+            (n - delivered) % Evm::BATCH as u64,
+            0,
+            "the non-GPU remainder must be whole CPU batches, got {}",
+            n - delivered
+        );
+
+        // 2. Every CSV row re-derives. Written through the production writer.
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("vanity_wallets.csv");
+        drop(tx);
+        let mut rows = 0usize;
+        while let Ok(m) = rx.try_recv() {
+            append_match_row(&csv, &m).unwrap();
+            rows += 1;
+        }
+        assert!(
+            rows > 0,
+            "a 1-character EVM prefix must produce matches in 5 s"
+        );
+
+        let text = std::fs::read_to_string(&csv).unwrap();
+        for line in text.lines() {
+            let f: Vec<&str> = line.split(',').collect();
+            assert_eq!(
+                f.len(),
+                4,
+                "row must be Chain,Address,Secret,Phrase: {line}"
+            );
+            assert_eq!(f[0], "EVM");
+            assert!(
+                f[1].starts_with("0xa"),
+                "row does not match the prefix: {line}"
+            );
+            let m = Mnemonic::from_phrase(f[3], Language::English)
+                .unwrap_or_else(|e| panic!("CSV phrase is not a valid mnemonic ({e}): {line}"));
+            let (addr, sk) = Evm::from_gpu_seed(&crate::seed::derive_seed(&m));
+            assert_eq!(
+                Evm::encode_address(&addr),
+                f[1],
+                "CSV address does not re-derive: {line}"
+            );
+            assert_eq!(
+                Evm::encode_secret(&sk),
+                f[2],
+                "CSV secret does not re-derive: {line}"
+            );
+        }
+
+        eprintln!(
+            "counter={n}  gpu_seeds={delivered}  cpu_candidates={}  csv_rows={rows}",
+            n - delivered
+        );
+    }
+
     /// One genuine CPU-path match, produced by the real `search` loop so the
     /// `Verified` token is minted at its real site rather than forged here
     /// (which is impossible — the field is private to `crate::verify`).
