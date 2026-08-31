@@ -1033,18 +1033,24 @@ mod tests {
             .expect("ps printed a number")
     }
 
-    /// The autorelease-pool regression guard. `#[ignore]`d: ~65 s.
+    /// General no-runaway-leak guard over a long dispatch run. `#[ignore]`d: ~65 s.
     ///
     /// Run it by hand with:
-    ///   cargo test --release -- --ignored --nocapture gpu_no_rss_growth
+    ///   cargo test --release -- --ignored --nocapture gpu_rss_does_not_run_away
     ///
-    /// Without a per-command-buffer autorelease pool this leaks 1,861 B per
-    /// command buffer; 25,350 command buffers is ~47 MB, so an 8 MiB threshold
-    /// separates a real leak from allocator noise. Measured on an M1 with the
-    /// pool in place: 15,616 KiB before → 14,064 KiB after (RSS went DOWN).
+    /// Does NOT prove the per-command-buffer autorelease pool in `run_wave`
+    /// is load-bearing: removing it measured deltas of +4080, +3296, -1856
+    /// KiB across three runs, indistinguishable from four pool-intact deltas
+    /// of -2560, -1056, -1728, -1696 KiB — no threshold separates the two.
+    /// `queue.commandBuffer()` returns a `Retained<T>`; objc2's
+    /// `objc_retainAutoreleasedReturnValue` fast path retains it directly,
+    /// eliding the autorelease, so removing the pool leaks nothing
+    /// measurable here. The pool stays regardless — correct practice, and
+    /// still correct if that fast path ever stops applying. This test only
+    /// catches an unrelated, unbounded RSS runaway.
     #[test]
     #[ignore]
-    fn gpu_no_rss_growth_over_100k_dispatches() {
+    fn gpu_rss_does_not_run_away_over_100k_dispatches() {
         let Some(mut gpu) = gpu_for_test() else {
             return;
         };
@@ -1074,8 +1080,8 @@ mod tests {
         );
         assert!(
             end.saturating_sub(base) < 8 * 1024,
-            "RSS grew {} KiB over 100,230 dispatches — the per-command-buffer \
-             autorelease pool in run_wave is missing or was moved outside the loop",
+            "RSS grew {} KiB over 100,230 dispatches — cause unknown, needs \
+             investigation",
             end - base
         );
     }
