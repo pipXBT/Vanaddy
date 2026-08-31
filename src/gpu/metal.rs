@@ -1043,11 +1043,14 @@ mod tests {
     /// KiB across three runs, indistinguishable from four pool-intact deltas
     /// of -2560, -1056, -1728, -1696 KiB — no threshold separates the two.
     /// `queue.commandBuffer()` returns a `Retained<T>`; objc2's
-    /// `objc_retainAutoreleasedReturnValue` fast path retains it directly,
-    /// eliding the autorelease, so removing the pool leaks nothing
-    /// measurable here. The pool stays regardless — correct practice, and
-    /// still correct if that fast path ever stops applying. This test only
-    /// catches an unrelated, unbounded RSS runaway.
+    /// `retain_autoreleased` **can sometimes** avoid putting the object in
+    /// the pool (a best-effort runtime handshake, not a guarantee — it needs
+    /// specific inlining and callee cooperation, and falls back to a real
+    /// autorelease when it doesn't fire), which plausibly explains a leak
+    /// far smaller than the spec predicted without implying there is no
+    /// autorelease traffic at all. Because the elision isn't guaranteed, the
+    /// pool remains real insurance rather than decoration, even though this
+    /// test cannot demonstrate its value on this hardware.
     #[test]
     #[ignore]
     fn gpu_rss_does_not_run_away_over_100k_dispatches() {
