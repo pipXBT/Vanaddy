@@ -1018,4 +1018,65 @@ mod tests {
             ),
         }
     }
+
+    /// Resident set size in KiB, via `ps`. No dependency, and it measures what
+    /// actually gets the process jetsammed.
+    #[cfg(test)]
+    fn rss_kib() -> u64 {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .expect("ps");
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .expect("ps printed a number")
+    }
+
+    /// The autorelease-pool regression guard. `#[ignore]`d: ~65 s.
+    ///
+    /// Run it by hand with:
+    ///   cargo test --release -- --ignored --nocapture gpu_no_rss_growth
+    ///
+    /// Without a per-command-buffer autorelease pool this leaks 1,861 B per
+    /// command buffer; 25,350 command buffers is ~47 MB, so an 8 MiB threshold
+    /// separates a real leak from allocator noise. Measured on an M1 with the
+    /// pool in place: 15,616 KiB before → 14,064 KiB after (RSS went DOWN).
+    #[test]
+    #[ignore]
+    fn gpu_no_rss_growth_over_100k_dispatches() {
+        let Some(mut gpu) = gpu_for_test() else {
+            return;
+        };
+        let phrases: Vec<&str> = vec![CANONICAL_PHRASE; 512];
+
+        // 30 warm-up waves so the baseline is taken after the allocator, the
+        // Metal driver and the shader cache have all settled.
+        for _ in 0..30 {
+            gpu.derive(&phrases, crate::seed::PBKDF2_ROUNDS)
+                .expect("wave");
+        }
+        let base = rss_kib();
+
+        // 2047 = 255*8 + 7 → 256 iterate dispatches → 64 command buffers at 4
+        // per buffer. 390 waves × (1 prologue + 64 iterate) = 25,350 command
+        // buffers, 390 × 257 = 100,230 dispatches.
+        let started = std::time::Instant::now();
+        for _ in 0..390 {
+            gpu.derive(&phrases, crate::seed::PBKDF2_ROUNDS)
+                .expect("wave");
+        }
+        let end = rss_kib();
+        eprintln!(
+            "100,230 dispatches in {:.1}s: RSS {base} KiB -> {end} KiB (delta {} KiB)",
+            started.elapsed().as_secs_f64(),
+            end as i64 - base as i64
+        );
+        assert!(
+            end.saturating_sub(base) < 8 * 1024,
+            "RSS grew {} KiB over 100,230 dispatches — the per-command-buffer \
+             autorelease pool in run_wave is missing or was moved outside the loop",
+            end - base
+        );
+    }
 }
