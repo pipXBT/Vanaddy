@@ -509,7 +509,8 @@ impl App {
             if let Ok(held_meta) = file.metadata() {
                 match std::fs::metadata(&self.csv_path) {
                     Ok(current_meta) => {
-                        if held_meta.dev() != current_meta.dev() || held_meta.ino() != current_meta.ino()
+                        if held_meta.dev() != current_meta.dev()
+                            || held_meta.ino() != current_meta.ino()
                         {
                             self.error_message = Some(format!(
                                 "The CSV file was replaced during the search; rows may have been \
