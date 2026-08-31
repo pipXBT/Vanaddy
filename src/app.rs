@@ -2026,12 +2026,18 @@ mod tests {
     fn status_refresh_leaves_the_status_alone_when_no_engine_is_parked() {
         use crate::gpu::GpuStatus;
 
-        // Step 2's whole branch is guarded by `self.gpu_rx.is_some()`, which no
-        // other test in this milestone ever makes true — omit Step 2 entirely
-        // and all three tests above still pass. Bind a live receiver so the
-        // branch is actually entered, with nothing parked to read a status
-        // from: the status must survive untouched, the empty `gpu_engines` list
-        // must not panic, and a faultless tick must not release the channel.
+        // The only test that runs a full faultless tick with a LIVE channel,
+        // which is what makes it the only one that can catch a wrong
+        // `is_unexpected_gpu_exit` call site: drop `engine_finished` from the
+        // predicate and this test fails, because the tick then treats an
+        // idle-but-alive GPU as a quiet death and releases the channel.
+        //
+        // It does NOT prove the status-refresh block is present. With nothing
+        // parked, `gpu_engines.last()` is None, so that block is a no-op
+        // whether it exists or not — deleting it outright leaves this test
+        // green (measured). Refresh behaviour that actually reads a parked
+        // engine needs a live `GpuEngine`, so it is covered by the
+        // metal-gated test in Task 6.10, not here.
         let (keep_tx, rx) = crossbeam_channel::bounded::<Box<crate::gpu::SeedBlock>>(1);
         let mut app = App::with_gpu_status(GpuStatus::Initializing);
         app.chain = crate::chains::ChainKind::Evm;
