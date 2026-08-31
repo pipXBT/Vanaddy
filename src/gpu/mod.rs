@@ -32,6 +32,7 @@ pub mod backend;
 pub(crate) mod producer;
 
 pub use backend::probe;
+pub use backend::GpuEngine;
 
 pub const WAVE: usize = 8_192; // candidates per GPU wave
 pub const BLOCK: usize = 512; // candidates per channel message (16/wave)
@@ -268,6 +269,7 @@ impl Default for GpuHealth {
 /// here rather than at the point of use.
 const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<GpuEngine>();
     assert_send_sync::<SeedBlock>();
     assert_send_sync::<GpuHealth>();
 };

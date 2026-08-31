@@ -864,4 +864,110 @@ mod gpu_tests {
             assert_eq!(b.len(), BLOCK, "block {bi} is not {BLOCK} candidates");
         }
     }
+
+    use crate::gpu::GpuEngine;
+    use std::sync::Arc;
+
+    /// Block until the engine reports finished, or fail with a bounded message.
+    fn await_finished(engine: &GpuEngine, bound: Duration, what: &str) -> Duration {
+        let started = Instant::now();
+        while !engine.is_finished() {
+            assert!(
+                started.elapsed() < bound,
+                "{what}: producer still running after {:?} (bound {bound:?})",
+                started.elapsed()
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        started.elapsed()
+    }
+
+    #[test]
+    fn signal_stop_finishes_the_producer_within_200ms() {
+        if std::env::var_os("VANADDY_NO_GPU").is_some() {
+            eprintln!("SKIP: VANADDY_NO_GPU is set");
+            return;
+        }
+        let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAPACITY);
+        let health = Arc::new(fresh_health());
+        let engine = GpuEngine::start(tx, health.clone());
+
+        // Wait for the first block: that puts the ~95 ms shader compile and the
+        // ~300 ms self-test behind us, so the 135 ms steady-state termination
+        // bound is the one under test.
+        let first = rx
+            .recv_timeout(Duration::from_secs(180))
+            .expect("no block within 180 s of start");
+        drop(first);
+
+        engine.signal_stop();
+        let took = await_finished(&engine, Duration::from_millis(200), "signal_stop");
+        engine.reap();
+
+        assert!(
+            !health.disable.load(Ordering::Relaxed),
+            "a clean stop must not disable the GPU"
+        );
+        assert_eq!(health.take_reason(), None);
+        eprintln!("signal_stop -> finished in {took:?}");
+    }
+
+    #[test]
+    fn dropping_the_receiver_exits_the_producer_cleanly() {
+        if std::env::var_os("VANADDY_NO_GPU").is_some() {
+            eprintln!("SKIP: VANADDY_NO_GPU is set");
+            return;
+        }
+        let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAPACITY);
+        let health = Arc::new(fresh_health());
+        let engine = GpuEngine::start(tx, health.clone());
+
+        let first = rx
+            .recv_timeout(Duration::from_secs(180))
+            .expect("no block within 180 s of start");
+        drop(first);
+
+        // Hang up WITHOUT ever setting the stop flag: `Disconnected` is the
+        // second, independent wake path, and losing either must not hang.
+        drop(rx);
+
+        // Up to one full wave (~600 ms) may already be in flight before the
+        // producer next touches the channel.
+        await_finished(&engine, Duration::from_secs(5), "receiver drop");
+        engine.reap();
+
+        assert!(
+            !health.disable.load(Ordering::Relaxed),
+            "a clean hang-up is not a fault: the CPU search may simply have stopped"
+        );
+        assert_eq!(health.take_reason(), None, "no panic, no fault");
+    }
+
+    #[test]
+    fn status_reports_disabled_once_health_carries_a_reason() {
+        if std::env::var_os("VANADDY_NO_GPU").is_some() {
+            eprintln!("SKIP: VANADDY_NO_GPU is set");
+            return;
+        }
+        let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAPACITY);
+        let health = Arc::new(fresh_health());
+        let engine = GpuEngine::start(tx, health.clone());
+
+        let first = rx
+            .recv_timeout(Duration::from_secs(180))
+            .expect("no block within 180 s of start");
+        drop(first);
+        assert!(matches!(engine.status(), GpuStatus::Running { .. }));
+
+        health.raise(GpuDisableReason::AuditMismatch { index: 5_183 });
+        assert_eq!(
+            engine.status(),
+            GpuStatus::Disabled(GpuDisableReason::AuditMismatch { index: 5_183 }),
+            "a raised fault must win over the last published status"
+        );
+
+        engine.signal_stop();
+        await_finished(&engine, Duration::from_secs(5), "post-fault stop");
+        engine.reap();
+    }
 }

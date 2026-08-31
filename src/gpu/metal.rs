@@ -23,6 +23,12 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use zeroize::Zeroizing;
 
+use super::producer::{producer, read_status, run_guarded, set_status};
+use super::{GpuDisableReason, GpuHealth, SeedBlock};
+use crossbeam_channel::Sender;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+
 // `MTLCreateSystemDefaultDevice` lives in CoreGraphics, which objc2-metal does
 // not link for us.
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -544,6 +550,104 @@ impl MetalPbkdf2 {
             None => Err(GpuError::BadConfig(
                 "wave abandoned without a stop request".to_string(),
             )),
+        }
+    }
+}
+
+/// The only GPU handle `App` ever holds. Deliberately contains NO Objective-C
+/// type: every Metal object lives and dies on the producer thread, and the
+/// `assert_send_sync::<GpuEngine>()` assertion in `src/gpu/mod.rs` pins that so
+/// a refactor cannot smuggle one into `App`.
+pub struct GpuEngine {
+    /// PRODUCER-ONLY stop flag, created here and shared with nothing else.
+    /// NEVER `App::stop`: that is the flag every Rayon worker reads at
+    /// src/chains/mod.rs:107, so a GPU self-disable that set it would silently
+    /// end the entire search — the exact inverse of "keep searching on CPU".
+    stop: Arc<AtomicBool>,
+    finished: Arc<AtomicBool>,
+    health: Arc<GpuHealth>,
+    status: Arc<Mutex<GpuStatus>>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl GpuEngine {
+    /// ~1 ms device probe. Called ONCE from `main()`, BEFORE `enable_raw_mode()`.
+    pub fn probe() -> GpuStatus {
+        probe()
+    }
+
+    /// Returns IMMEDIATELY with status `Initializing`. Device creation, the
+    /// ~60-95 ms cold library compile, pipeline build and the ~300 ms self-test
+    /// all run on the spawned thread, so the UI never stalls on them.
+    pub fn start(tx: Sender<Box<SeedBlock>>, health: Arc<GpuHealth>) -> GpuEngine {
+        let stop = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        let status = Arc::new(Mutex::new(GpuStatus::Initializing));
+
+        let t_stop = stop.clone();
+        let t_finished = finished.clone();
+        let t_health = health.clone();
+        let t_status = status.clone();
+
+        let join = std::thread::Builder::new()
+            .name("vanaddy-gpu".into())
+            .spawn(move || {
+                run_guarded(&t_health, t_finished, || {
+                    producer(tx, &t_stop, &t_health, &t_status)
+                });
+            })
+            .ok();
+
+        if join.is_none() {
+            // Out of threads. Degrade exactly like every other failure: sticky
+            // reason, GPU off, CPU search untouched.
+            let reason =
+                GpuDisableReason::BadConfig("could not spawn the vanaddy-gpu thread".into());
+            health.raise(reason.clone());
+            set_status(&status, GpuStatus::Disabled(reason));
+            finished.store(true, Ordering::Release);
+        }
+
+        GpuEngine {
+            stop,
+            finished,
+            health,
+            status,
+            join,
+        }
+    }
+
+    /// A raised fault wins over the last published status: a GPU that faulted
+    /// must never keep reporting `Running` at 0/s.
+    pub fn status(&self) -> GpuStatus {
+        match self.health.take_reason() {
+            Some(reason) => GpuStatus::Disabled(reason),
+            None => read_status(&self.status),
+        }
+    }
+
+    /// Sets the producer-only stop flag. NON-BLOCKING; never joins.
+    ///
+    /// `stop_search` calls this from the UI thread inside the render loop. A
+    /// join here would stall the loop for the rest of a cold shader compile on
+    /// an Enter-Ctrl+C-Enter sequence, and would block FOREVER if the GPU
+    /// wedged inside `waitUntilCompleted` — leaving the terminal in raw mode
+    /// with the alternate screen up and only `kill -9` as an exit.
+    pub fn signal_stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// Acquire: pairs with the `FinishGuard`'s Release store, so seeing `true`
+    /// guarantees the fault the producer raised just before it is also visible.
+    pub fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::Acquire)
+    }
+
+    /// Joins the thread. Only call once `is_finished()` is true, or from the
+    /// reaper at process exit where a wedged thread is accepted.
+    pub fn reap(mut self) {
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
         }
     }
 }

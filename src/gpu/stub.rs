@@ -5,11 +5,46 @@
 
 use crate::gpu::GpuStatus;
 
+use super::{GpuDisableReason, GpuHealth, SeedBlock};
+use crossbeam_channel::Sender;
+use std::sync::Arc;
+
 /// Mirror of `metal::probe`. Always unavailable; the TUI renders the reason.
 pub fn probe() -> GpuStatus {
     GpuStatus::Unavailable(
         "Metal PBKDF2 offload requires Apple Silicon macOS and the `metal` feature".to_string(),
     )
+}
+
+/// No Metal on this target. The same public surface, all no-ops.
+pub struct GpuEngine;
+
+impl GpuEngine {
+    pub fn probe() -> GpuStatus {
+        probe()
+    }
+
+    /// Hangs the channel up immediately and records why, so a caller that
+    /// ignored `probe()` degrades to CPU-only at once instead of waiting
+    /// forever for blocks that can never arrive.
+    pub fn start(tx: Sender<Box<SeedBlock>>, health: Arc<GpuHealth>) -> GpuEngine {
+        drop(tx);
+        health.raise(GpuDisableReason::NotSupported);
+        GpuEngine
+    }
+
+    pub fn status(&self) -> GpuStatus {
+        probe()
+    }
+
+    pub fn signal_stop(&self) {}
+
+    /// There is no thread, so there is nothing to wait for.
+    pub fn is_finished(&self) -> bool {
+        true
+    }
+
+    pub fn reap(self) {}
 }
 
 #[cfg(test)]
