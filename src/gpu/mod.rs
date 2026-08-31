@@ -42,14 +42,70 @@ pub const MAX_THREADS_PER_THREADGROUP: usize = 256; // 384 measured 13% SLOWER o
 pub const COMPRESSIONS_PER_SEED: u32 = 4_098; // 2 + 2 + 2*2047
 pub const AUDITS_PER_WAVE: usize = 4; // RANDOM indices, not a fixed stride
 
-/// Every fallible host-side GPU operation funnels through this. `Clone + Debug +
-/// PartialEq` so a test can assert on the exact variant and a `GpuDisableReason`
-/// carrying one can be rendered in the stats pane.
-#[derive(Clone, Debug, PartialEq)]
+/// Every way the GPU backend can fail. One shape for all of them, because
+/// there is exactly one response: raise it as a sticky `GpuDisableReason`,
+/// drop the wave, and let the CPU search continue at full CPU-only rate.
+/// There is deliberately no partial-success variant.
+#[derive(Debug, Clone, PartialEq)]
 pub enum GpuError {
+    /// `MTLCreateSystemDefaultDevice()` returned nil.
+    NoDevice,
+    /// `newLibraryWithSource:` failed; carries the Metal compiler diagnostic.
+    ShaderCompile(String),
+    /// A kernel function was missing, or pipeline creation failed.
+    PipelineCreate(String),
+    /// A queue, command buffer, encoder, or `MTLBuffer` allocation returned nil.
+    BufferAlloc,
+    /// The host asked the backend for something it will not do.
+    BadConfig(String),
     /// `salt.len() > pbkdf2_lanes::MAX_SALT_LEN`: `salt || INT(1) || 0x80 || len`
     /// would not fit the single 128-byte block the kernel is built around.
+    /// Mirrors the CPU salt assert at src/pbkdf2_lanes.rs:21-25.
     SaltTooLong { len: usize },
+    /// A command buffer finished as anything other than Completed-with-nil-error.
+    CommandBuffer { status: i64, message: String },
+}
+
+/// A command buffer is acceptable **only** when it reports Completed (status 4)
+/// AND its `error()` is nil. Anything else discards the whole wave.
+///
+/// Split out as a pure function so this rule is tested on every platform, not
+/// only on a machine with a GPU. Without it, a mid-wave GPU reset — macOS
+/// resets a hung GPU after ~5 s and `waitUntilCompleted` returns rather than
+/// hanging — silently drops 8 of 2048 U-iterations, and finalize writes a `T`
+/// that is the XOR of only 2,039 values: a wrong-but-plausible seed with
+/// nothing surfaced anywhere.
+pub fn classify_command_buffer_status(
+    status: i64,
+    message: Option<String>,
+) -> Result<(), GpuError> {
+    const COMPLETED: i64 = 4;
+    if status == COMPLETED && message.is_none() {
+        return Ok(());
+    }
+    Err(GpuError::CommandBuffer {
+        status,
+        message: message.unwrap_or_else(|| format!("command buffer finished with status {status}")),
+    })
+}
+
+impl From<GpuError> for GpuDisableReason {
+    fn from(e: GpuError) -> Self {
+        match e {
+            GpuError::NoDevice => GpuDisableReason::NoDevice,
+            GpuError::ShaderCompile(m) => GpuDisableReason::ShaderCompile(m),
+            GpuError::PipelineCreate(m) => GpuDisableReason::PipelineCreate(m),
+            GpuError::BufferAlloc => GpuDisableReason::BufferAlloc,
+            GpuError::BadConfig(m) => GpuDisableReason::BadConfig(m),
+            GpuError::SaltTooLong { len } => GpuDisableReason::BadConfig(format!(
+                "salt is {len} bytes, at most {} fit one padded block",
+                crate::pbkdf2_lanes::MAX_SALT_LEN
+            )),
+            GpuError::CommandBuffer { status, message } => {
+                GpuDisableReason::CommandBuffer { status, message }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -404,6 +460,45 @@ mod tests {
         assert_eq!(h.blocks_dropped.load(Ordering::Relaxed), 0);
         assert_eq!(h.verify_rejections.load(Ordering::Relaxed), 0);
         assert!(!h.disable.load(Ordering::Relaxed));
+    }
+}
+
+#[cfg(test)]
+mod command_buffer_status_tests {
+    use super::{classify_command_buffer_status, GpuError};
+
+    /// MTLCommandBufferStatusCompleted == 4.
+    #[test]
+    fn completed_with_no_error_is_the_only_success() {
+        assert_eq!(classify_command_buffer_status(4, None), Ok(()));
+    }
+
+    #[test]
+    fn completed_with_an_error_is_a_failure() {
+        assert_eq!(
+            classify_command_buffer_status(4, Some("IOAF code 4".to_string())),
+            Err(GpuError::CommandBuffer {
+                status: 4,
+                message: "IOAF code 4".to_string()
+            })
+        );
+    }
+
+    /// NotEnqueued(0), Enqueued(1), Committed(2), Scheduled(3), Error(5) are
+    /// all failures — a wave that is merely `Scheduled` has not written `seeds`.
+    #[test]
+    fn every_other_status_is_a_failure_even_with_no_error_object() {
+        for status in [0i64, 1, 2, 3, 5, 99] {
+            let got = classify_command_buffer_status(status, None);
+            assert_eq!(
+                got,
+                Err(GpuError::CommandBuffer {
+                    status,
+                    message: format!("command buffer finished with status {status}")
+                }),
+                "status {status}"
+            );
+        }
     }
 }
 
