@@ -349,8 +349,22 @@ impl MetalPbkdf2 {
                     self.check_status(&prev)?; // at EVERY wait, not just the last
                 }
                 let cb = self.queue.commandBuffer().ok_or(GpuError::BufferAlloc)?;
-                // A serial compute encoder auto-barriers between dispatches,
-                // which is what makes the depth-3 ring safe on one `states`.
+                // What makes the depth-3 ring safe on one shared `states` buffer
+                // is Metal's automatic resource hazard tracking, which serialises
+                // GPU-side access to it across the ring's command buffers on this
+                // queue. That tracking applies here because `states` comes from
+                // `device.newBufferWithLength_options` (device-direct allocation,
+                // always hazard-tracked) rather than an `MTLHeap` — there is no
+                // heap, fence, event, or concurrent dispatch anywhere in this
+                // module to opt out of it. The ring's actual benefit is
+                // overlapping HOST-side encode/submit latency with GPU execution,
+                // not concurrent GPU execution of dependent work.
+                //
+                // Within one encoder — the `DISPATCHES_PER_COMMAND_BUFFER` loop
+                // below, all against `enc` — a serial compute encoder additionally
+                // auto-barriers between dispatches, but that covers only ordering
+                // inside this one command buffer, not the three separate command
+                // buffers the ring keeps in flight.
                 let enc = cb.computeCommandEncoder().ok_or(GpuError::BufferAlloc)?;
                 enc.setComputePipelineState(&self.iterate);
                 unsafe {
