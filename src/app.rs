@@ -725,6 +725,17 @@ mod tests {
     ///   2. every CSV row re-derives from its phrase alone through `ring`,
     ///   3. the counter is honest — every candidate it counted was examined,
     ///      as whole 64-candidate GPU chunks plus whole 4-candidate CPU batches.
+    ///
+    /// What (2) does and does not establish. The loop parses each phrase back out
+    /// of the PERSISTED file and recomputes the address without touching the
+    /// in-memory `Match`, so it proves the CSV writer, the channel and the phrase
+    /// round-trip are faithful. It is NOT a second, independent check of the Metal
+    /// kernel: `verify_gpu` already ran that same `derive_seed` -> `from_gpu_seed`
+    /// chain before the row was built, and the row carries ITS output, never the
+    /// GPU's. The kernel's honesty is what `verify_rejections == 0` asserts — a GPU
+    /// seed that matched the prefix but failed re-derivation would have raised
+    /// `VerifyMismatch` and been counted there. The two assertions together are
+    /// what support the product claim; neither does it alone.
     #[test]
     #[ignore = "requires a Metal device and runs for ~5 s; run with --ignored"]
     #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
