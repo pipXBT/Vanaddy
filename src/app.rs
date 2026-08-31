@@ -1056,14 +1056,26 @@ mod tests {
 
     #[test]
     fn start_stop_restart_does_not_leak_threads() {
+        let dir = tempfile::tempdir().unwrap();
         let mut app = App::new();
+        // Write into a temp dir, not the repo root: `cargo test` runs tests as
+        // threads in one process, so a shared CSV path races other tests.
+        app.csv_path = dir.path().join("vanity_wallets.csv");
         app.chain = crate::chains::ChainKind::Evm;
         // Extremely unlikely prefix so search will genuinely run for the duration.
         app.vanity_prefix = "aaaaaaaa".into();
         app.thread_count = "2".into();
+        // CPU-only: this test is about lifecycle, and it must pass identically
+        // on a Linux CI box with no Metal device.
+        app.gpu_requested = false;
         app.validate().unwrap();
 
         app.start_search();
+        assert!(
+            app.gpu_engines.is_empty(),
+            "no engine spawned when the GPU is off"
+        );
+        assert!(app.gpu_rx.is_none());
         thread::sleep(Duration::from_millis(50));
         app.stop_search();
 
@@ -1075,6 +1087,119 @@ mod tests {
 
         assert!(app.thread_pool.is_none());
         assert!(app.stop.load(Ordering::Relaxed));
+        assert!(app.csv_file.is_none(), "the CSV handle is released on stop");
+        assert!(
+            app.gpu_engines.is_empty(),
+            "no engine may accumulate across start/stop cycles"
+        );
+
+        // The exit reaper is a no-op here and must return instantly.
+        let before = Instant::now();
+        app.shutdown_gpu(Duration::from_millis(600));
+        assert!(before.elapsed() < Duration::from_millis(50));
+        assert!(app.gpu_engines.is_empty());
+    }
+
+    /// The half the CPU-only test above cannot reach. That test sets
+    /// `gpu_requested = false`, so `validate()` leaves `validated_gpu` false,
+    /// `gpu_spawn_allowed` is false, and NO engine is ever created on either
+    /// cycle: `gpu_engines` is empty because it was never non-empty, and
+    /// deleting Task 6.6 Step 4's whole reap loop leaves it green. This one
+    /// runs REAL engines through two start/stop cycles, so accumulation is
+    /// actually observable. Same graceful-skip idiom as Task 6.9 Step 1.
+    #[test]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
+    fn a_live_engine_never_accumulates_across_start_stop_cycles() {
+        if std::env::var_os("VANADDY_NO_GPU").is_some() {
+            eprintln!("SKIP: VANADDY_NO_GPU is set");
+            return;
+        }
+        if let GpuStatus::Unavailable(reason) = GpuEngine::probe() {
+            eprintln!("SKIP: no Metal device on this machine ({reason})");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_gpu_status(GpuEngine::probe());
+        app.csv_path = dir.path().join("vanity_wallets.csv");
+        app.chain = crate::chains::ChainKind::Evm;
+        app.vanity_prefix = "aaaaaaaa".into();
+        app.thread_count = "2".into();
+        app.gpu_requested = true;
+        for cycle in 0..2 {
+            app.validate().unwrap();
+            app.start_search();
+            assert!(
+                app.gpu_engines.len() <= 1,
+                "at most one engine is ever live: {}",
+                app.gpu_engines.len()
+            );
+            assert_eq!(
+                app.gpu_engines.len(),
+                1,
+                "cycle {cycle}: an engine must actually be live — if this is 0, \
+                 gpu_spawn_allowed refused to spawn and the rest of this cycle \
+                 asserts nothing"
+            );
+            // The discriminator for Task 6.6's reap loop. With the reap in
+            // place, cycle 1's start_search reaps cycle 0's finished engine and
+            // spawns a fresh one, which is NOT finished. Delete the reap loop
+            // and cycle 1 still sees exactly one engine — but it is the
+            // previous cycle's corpse, already finished, and this fails.
+            assert!(
+                !app.gpu_engines[0].is_finished(),
+                "cycle {cycle}: this is the previous cycle's finished engine, not a \
+                 fresh one — start_search's reap loop did not run"
+            );
+
+            // The status-refresh coverage Task 6.8 could not provide. Its
+            // `status_refresh_leaves_the_status_alone_when_no_engine_is_parked`
+            // enters the refresh branch but parks no engine, so
+            // `gpu_engines.last()` is None and the block is a no-op whether it
+            // exists or not -- deleting it outright leaves that test green
+            // (measured). THIS is the only test with a real parked engine, so
+            // it is the only one that can prove the block actually reads it.
+            // Deleting Task 6.8's section-2 block makes the assert below fail:
+            // the app would sit on the probe's status forever while the engine
+            // reports Running.
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while Instant::now() < deadline {
+                app.drain_matches();
+                if matches!(app.gpu_status, GpuStatus::Running { .. }) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                matches!(app.gpu_status, GpuStatus::Running { .. }),
+                "cycle {cycle}: drain_matches must refresh the status from the \
+                 parked engine within 30s, got {:?}",
+                app.gpu_status
+            );
+
+            thread::sleep(Duration::from_millis(50));
+            app.stop_search();
+
+            // Wait for the engine to actually finish. Without this the test
+            // does not cycle at all: `stop_search` only SIGNALS and leaves the
+            // engine parked, a real engine needs seconds to wind down, and
+            // `start_search`'s reap loop only reaps `is_finished()` engines.
+            // So at cycle 1 the old engine would still be running,
+            // `gpu_spawn_allowed` would see `engines_parked == 1` and refuse to
+            // spawn, and cycle 1 would assert against cycle 0's leftovers.
+            // Measured: with only the 50 ms sleep, cycle 1 reached "Running" in
+            // under 2 microseconds because `gpu_rx` was None and the refresh
+            // block never re-entered.
+            let give_up = Instant::now() + Duration::from_secs(30);
+            while !app.gpu_engines.iter().all(|e| e.is_finished()) && Instant::now() < give_up {
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                app.gpu_engines.iter().all(|e| e.is_finished()),
+                "cycle {cycle}: the engine must wind down within 30s of stop_search"
+            );
+        }
+        app.shutdown_gpu(Duration::from_millis(600));
+        assert!(app.gpu_engines.is_empty());
     }
 
     #[test]
