@@ -10108,13 +10108,21 @@ pair against *this* function and adds no second implementation and no env code i
     }
 ```
 
-- [ ] **Step 8: Run both tests and watch them pass.**
+- [ ] **Step 8: Run both tests and watch them pass.** Two invocations, not one: `cargo test` takes a
+single positional filter, and a second one is rejected with
+`error: unexpected argument '...' found` **before** anything is compiled.
 
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test gpu_effective_requires_user_device_and_evm app_new_never_requests_a_gpu_it_has_not_probed
+cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test gpu_effective_requires_user_device_and_evm
 ```
 
-Expect `test result: ok. 2 passed`.
+Expect `test result: ok. 1 passed`.
+
+```sh
+cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test app_new_never_requests_a_gpu_it_has_not_probed
+```
+
+Expect `test result: ok. 1 passed`.
 
 - [ ] **Step 9: Run the whole suite and the milestone gate.**
 
@@ -10925,11 +10933,20 @@ with:
 
 - [ ] **Step 8: Run both tests and watch them pass.**
 
+Two invocations, not one: `cargo test` takes a single positional filter and rejects a
+second with `error: unexpected argument '...' found` before compiling anything.
+
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test held_open_csv_file_takes_every_row drain_falls_back_to_the_path
+cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test held_open_csv_file_takes_every_row
 ```
 
-Expect `test result: ok. 2 passed`.
+Expect `test result: ok. 1 passed`.
+
+```sh
+cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test drain_falls_back_to_the_path
+```
+
+Expect `test result: ok. 1 passed`.
 
 - [ ] **Step 9: Run the whole suite and the milestone gate, then commit.**
 
@@ -11100,11 +11117,17 @@ variable: health`, which breaks the clippy-count gate.
 with:
 
 ```rust
+        // A FRESH health cell per run, UNCONDITIONALLY — outside the branch on
+        // purpose. `reason` is a set-once OnceLock and cannot be reset; a
+        // faulted run is made sticky by drain_matches clearing
+        // `gpu_requested`/`validated_gpu`, not by reusing the cell. Resetting
+        // it only when the GPU spawns would leave a CPU-only run holding the
+        // previous run's `seeds_delivered` while `counter` and `start_time`
+        // (reset above) start from zero — the Stats pane would then divide a
+        // stale numerator by a fresh denominator.
+        self.gpu_health = Arc::new(GpuHealth::default());
+
         let gpu_rx = if spawn_gpu {
-            // A FRESH health cell per run. `reason` is a set-once OnceLock and
-            // cannot be reset; a faulted run is made sticky by drain_matches
-            // clearing `gpu_requested`/`validated_gpu`, not by reusing the cell.
-            self.gpu_health = Arc::new(GpuHealth::default());
             let (gpu_tx, rx) = crossbeam_channel::bounded(crate::gpu::CHANNEL_CAPACITY);
             let engine = GpuEngine::start(gpu_tx, self.gpu_health.clone());
             // Initializing: the device, the ~60-95 ms shader compile and the
@@ -11136,11 +11159,20 @@ with:
 
 - [ ] **Step 6: Run the tests and watch them pass.**
 
+Two invocations, not one: `cargo test` takes a single positional filter and rejects a
+second with `error: unexpected argument '...' found` before compiling anything.
+
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test gpu_spawn_is_skipped_while_a_previous_engine start_search_without_gpu_leaves_no_channel
+cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test gpu_spawn_is_skipped_while_a_previous_engine
 ```
 
-Expect `test result: ok. 2 passed`.
+Expect `test result: ok. 1 passed`.
+
+```sh
+cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test start_search_without_gpu_leaves_no_channel
+```
+
+Expect `test result: ok. 1 passed`.
 
 - [ ] **Step 7: Run the whole suite and the milestone gate, then commit.**
 
@@ -11385,8 +11417,16 @@ EOF
 
 - [ ] **Step 2: Run them and watch them fail.**
 
+`cargo test` takes a single positional filter and rejects a second with
+`error: unexpected argument '...' found` before compiling anything, so run one per name —
+each must show the same compile error:
+
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test mismatch_disables_gpu_and_leaves_app_running unexpected_gpu_exit_is_detected
+cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test mismatch_disables_gpu_and_leaves_app_running
+```
+
+```sh
+cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test unexpected_gpu_exit_is_detected
 ```
 
 Expected failure:
@@ -11485,11 +11525,22 @@ The rest of `drain_matches` (the `while let Ok(payload) = rx.try_recv()` loop fr
 
 - [ ] **Step 5: Run the tests and watch them pass.**
 
+Three invocations, not one: `cargo test` takes a single positional filter and rejects a second
+with `error: unexpected argument '...' found` before compiling anything.
+
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test mismatch_disables_gpu_and_leaves_app_running fault_promotion_is_idempotent unexpected_gpu_exit_is_detected
+cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test mismatch_disables_gpu_and_leaves_app_running
 ```
 
-Expect `test result: ok. 3 passed`.
+```sh
+cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test fault_promotion_is_idempotent
+```
+
+```sh
+cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test unexpected_gpu_exit_is_detected
+```
+
+Expect `test result: ok. 1 passed` from each.
 
 - [ ] **Step 6: Run the whole suite and the milestone gate, then commit.**
 
@@ -12566,7 +12617,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
         app.chain = ChainKind::Evm;
         app.gpu_status = GpuStatus::Unavailable("not supported on this target".to_string());
-        assert_eq!(gpu_form_value(&app).0, "[n/a — no Metal device]");
+        assert_eq!(gpu_form_value(&app).0, "[n/a — not supported on this t…]");
 
         app.gpu_status =
             GpuStatus::Disabled(GpuDisableReason::VerifyMismatch { address: "0xdead".to_string() });
@@ -12581,8 +12632,18 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
             "program_source:14:3: error: use of undeclared identifier\nnote: here".to_string(),
         ));
         let (text, _) = gpu_form_value(&app);
-        assert!(!text.contains('\n'), "a newline in a ratatui Buffer corrupts the frame: {text:?}");
         assert_eq!(text, "[disabled — ShaderCompile]");
+
+        // The Unavailable arm is the one that renders a raw reason string, so
+        // it is the arm where `sanitize_status_text` has to fire. Asserting the
+        // newline here is falsifiable: drop the helper from that arm and this
+        // test goes red. (Asserting it on the Disabled arm above would not —
+        // `gpu_reason_label` returns a &'static str that structurally cannot
+        // carry one.)
+        app.gpu_status = GpuStatus::Unavailable("no Metal device\nfound".to_string());
+        let (text, _) = gpu_form_value(&app);
+        assert!(!text.contains('\n'), "a newline in a ratatui Buffer corrupts the frame: {text:?}");
+        assert_eq!(text, "[n/a — no Metal device found]");
     }
 
     #[test]
@@ -12681,7 +12742,7 @@ fn gpu_reason_label(r: &GpuDisableReason) -> &'static str {
 fn gpu_form_value(app: &App) -> (String, Style) {
     let dimmed = Style::default().fg(Color::DarkGray);
     match &app.gpu_status {
-        GpuStatus::Unavailable(_) => ("[n/a — no Metal device]".to_string(), dimmed),
+        GpuStatus::Unavailable(r) => (format!("[n/a — {}]", sanitize_status_text(r, 24)), dimmed),
         GpuStatus::Disabled(r) => (
             format!("[disabled — {}]", gpu_reason_label(r)),
             Style::default().fg(Color::Red),
@@ -12759,9 +12820,10 @@ Expect `test result: ok.` with 0 failed, then:
 cd /Users/shawnhopkinson/Rust/Vanaddy && git add -A && git commit -m "ui: GPU row in the config form
 
 Label keeps focus styling so the field stays navigable; the value carries
-the disabled styling and the reason. sanitize_status_text flattens the
-multi-line Metal compiler diagnostics that ShaderCompile can carry —
-a raw newline in a ratatui Buffer corrupts the frame.
+the disabled styling and the reason. sanitize_status_text flattens and
+bounds the raw reason string the Unavailable arm renders — a raw newline
+in a ratatui Buffer corrupts the frame. The Disabled arm shows the bare
+variant name via gpu_reason_label; the payload goes to the Stats pane.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
@@ -12906,7 +12968,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Test: `/Users/shawnhopkinson/Rust/Vanaddy/src/ui.rs` `#[cfg(test)] mod tests`
 
 **Interfaces:**
-- Consumes: `App::gpu_measured_rate(&self) -> (u64, u8)` (Task 7.4); `sanitize_status_text(&str, usize) -> String` (Task 7.3); `format_count(u64) -> String` (`src/ui.rs:434`); `crate::gpu::GpuStatus`
+- Consumes: `App::gpu_measured_rate(&self) -> (u64, u8)` (Task 7.4); `gpu_reason_label(&GpuDisableReason) -> &'static str` (Task 7.3); `format_count(u64) -> String` (`src/ui.rs:434`); `crate::gpu::{GpuStatus, GpuRx}`; `App::gpu_rx`
 - Produces: `fn gpu_stats_line(app: &App) -> Option<(String, Color)>`; `stats_height(app: &App) -> u16` (signature unchanged)
 
 The spec's constraint on `stats_height`:
@@ -12918,11 +12980,22 @@ We do better than relying on that: **one function decides whether the row exists
 - [ ] **Step 1: Add the tests.** Append inside `mod tests` in `/Users/shawnhopkinson/Rust/Vanaddy/src/ui.rs`:
 
 ```rust
+    /// A `gpu_rx` for the Stats-pane tests. `gpu_stats_line` only asks whether
+    /// this run still owns the channel, so a disconnected receiver is enough;
+    /// what matters is that it is `Some`, exactly as `start_search` leaves it.
+    fn test_gpu_rx() -> crate::gpu::GpuRx {
+        let (_tx, rx) = crossbeam_channel::bounded::<Box<crate::gpu::SeedBlock>>(1);
+        rx
+    }
+
     fn searching_app_with_gpu(status: GpuStatus) -> App {
         let mut app = App::new();
         app.chain = ChainKind::Evm;
         app.gpu_requested = true;
         app.gpu_status = status;
+        // This run owns the GPU channel. `gpu_stats_line` refuses to draw a
+        // live row without it, so every Running/Initializing case needs one.
+        app.gpu_rx = Some(test_gpu_rx());
         app.state = AppState::Searching;
         app.start_time = Some(
             std::time::Instant::now()
@@ -12947,28 +13020,43 @@ We do better than relying on that: **one function decides whether the row exists
     }
 
     #[test]
+    fn gpu_stats_line_is_absent_once_this_run_released_the_gpu() {
+        let mut app = searching_app_with_gpu(GpuStatus::Running { device: "Apple M1".to_string() });
+        app.gpu_rx = None; // what stop_search leaves behind
+        assert!(gpu_stats_line(&app).is_none(), "a stale Running status must not draw a live row");
+    }
+
+    #[test]
     fn gpu_stats_line_reports_the_measured_rate_and_share() {
         let app = searching_app_with_gpu(GpuStatus::Running { device: "Apple M1".to_string() });
         let (text, color) = gpu_stats_line(&app).expect("a running GPU gets a stats row");
-        assert!(text.contains("Apple M1"), "must name the device: {text}");
         assert!(text.contains("13.6K/s"), "must show the measured rate: {text}");
         assert!(text.contains("(68%)"), "must show the GPU's share of candidates: {text}");
         assert_eq!(color, Color::Green);
     }
 
+    /// NOT "without control characters": via `{r:?}` the text can never carry
+    /// one, so that assertion could not fail. `sanitize_status_text_flattens_
+    /// control_characters` covers the helper directly. What is load-bearing
+    /// here is that the row shows the BARE variant label and stays short
+    /// enough to survive a pane that does not wrap.
     #[test]
-    fn gpu_stats_line_reports_a_fault_without_control_characters() {
+    fn gpu_stats_line_reports_a_fault_without_the_raw_diagnostic() {
         let app = searching_app_with_gpu(GpuStatus::Disabled(GpuDisableReason::ShaderCompile(
             "program_source:14:3: error: use of undeclared identifier\nnote: here".to_string(),
         )));
         let (text, color) = gpu_stats_line(&app).expect("a fault always gets a stats row");
-        assert!(!text.contains('\n'), "a newline in a ratatui Buffer corrupts the frame: {text:?}");
-        assert!(!text.contains('\t'), "a tab in a ratatui Buffer corrupts the frame: {text:?}");
         assert!(text.contains("OFF"), "must say the GPU is off: {text}");
         assert!(text.contains("ShaderCompile"), "must carry the reason: {text}");
+        assert!(text.contains("CPU cont."), "the user must know the search did not die: {text}");
         assert!(
-            text.contains("CPU search continues"),
-            "the user must know the search did not die: {text}"
+            !text.contains("program_source"),
+            "the raw compiler diagnostic must never reach the pane: {text}"
+        );
+        assert!(
+            text.chars().count() <= 48,
+            "the fault row must stay bounded, got {}: {text}",
+            text.chars().count()
         );
         assert_eq!(color, Color::Red);
     }
@@ -12984,6 +13072,7 @@ We do better than relying on that: **one function decides whether the row exists
     fn stats_height_counts_the_gpu_row_exactly_once() {
         let mut app = App::new();
         app.chain = ChainKind::Evm;
+        app.gpu_rx = Some(test_gpu_rx()); // the live-row arms require it
         app.gpu_status = GpuStatus::Ready { device: "Apple M1".to_string() };
         let base = stats_height(&app);
 
@@ -13001,7 +13090,12 @@ We do better than relying on that: **one function decides whether the row exists
     #[test]
     fn stats_pane_renders_the_gpu_row_while_searching() {
         let app = searching_app_with_gpu(GpuStatus::Running { device: "Apple M1".to_string() });
-        let frame = render_to_string(&app, 100, 40);
+        // 120, not 100. The left panel is 25% of the width minus two border
+        // columns and `render_stats` sets no `.wrap()`, so 100 leaves only 23
+        // usable columns and clips the 24-column row by one character — which
+        // would take the `)` off `(68%)`. At 120 the panel is 28 wide and the
+        // payload survives, which is what the second assertion below pins.
+        let frame = render_to_string(&app, 120, 40);
         let rows: Vec<&str> = frame.lines().collect();
         let rate = rows.iter().position(|r| r.contains("Rate:")).expect("Rate row");
         // `GPU rate:` — the Stats row's label. The config form's ` GPU:      `
@@ -13012,6 +13106,10 @@ We do better than relying on that: **one function decides whether the row exists
             .position(|r| r.contains("GPU rate:"))
             .expect("GPU row in the Stats pane");
         assert_eq!(gpu, rate + 1, "the GPU row belongs directly under Rate:\n{frame}");
+        assert!(
+            rows[gpu].contains("13.6K/s") && rows[gpu].contains("(68%)"),
+            "the measured rate must survive the pane width:\n{frame}"
+        );
     }
 ```
 
@@ -13039,28 +13137,31 @@ error[E0425]: cannot find function `gpu_stats_line` in this scope
 /// labelled ` GPU:      ` and renders in the same left-hand panel, above this
 /// one; a test that greps the rendered frame for `GPU:` would find the config
 /// row first. Both labels are 11 columns, so the value columns still line up.
+///
+/// Every row here is kept short on purpose. `render_stats` builds a
+/// `Paragraph` with NO `.wrap()`, and the left panel is 25% of the terminal
+/// minus two border columns — 23 usable columns at 100 chars wide. A row that
+/// spells out the device name and the reason payload is 34 and 80 columns
+/// long, so the measured rate and the share — the entire point of this row —
+/// get clipped off the pane. The device name already appears on the config
+/// form's ` GPU:      ` row above.
 fn gpu_stats_line(app: &App) -> Option<(String, Color)> {
     match &app.gpu_status {
+        // This run must actually own the GPU. `stop_search` clears `gpu_rx` but
+        // deliberately leaves `gpu_status` alone, so a Running status outlives
+        // the run that produced it; without this arm a following CPU-only run
+        // renders the previous run's seeds_delivered against a fresh counter.
+        GpuStatus::Initializing | GpuStatus::Running { .. } if app.gpu_rx.is_none() => None,
         GpuStatus::Disabled(r) => Some((
-            format!(
-                " GPU rate: OFF — {} (CPU search continues)",
-                sanitize_status_text(&format!("{r:?}"), 40)
-            ),
+            format!(" GPU rate: OFF — {} (CPU cont.)", gpu_reason_label(r)),
             Color::Red,
         )),
-        GpuStatus::Initializing => Some((
-            " GPU rate: initialising (compiling shader, self-testing)".to_string(),
-            Color::Yellow,
-        )),
-        GpuStatus::Running { device } => {
+        GpuStatus::Initializing => Some((" GPU rate: initialising…".to_string(), Color::Yellow)),
+        GpuStatus::Running { .. } => {
             // MEASURED per delivery, never modelled — see App::gpu_measured_rate.
             let (rate, share) = app.gpu_measured_rate();
             Some((
-                format!(
-                    " GPU rate: {}  {}/s ({share}%)",
-                    sanitize_status_text(device, 24),
-                    format_count(rate)
-                ),
+                format!(" GPU rate: {}/s ({share}%)", format_count(rate)),
                 Color::Green,
             ))
         }
@@ -13118,7 +13219,7 @@ fn stats_height(app: &App) -> u16 {
 cd /Users/shawnhopkinson/Rust/Vanaddy && cargo test --bin vanaddy ui::tests:: 2>&1 | tail -20
 ```
 
-Expect `test result: ok.` with 19 passed.
+Expect `test result: ok.` with 20 passed.
 
 - [ ] **Step 7: Run the whole suite and commit.**
 
@@ -13377,7 +13478,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `App::gpu_effective(&self) -> bool`; `App::single_thread_rate(&self) -> f64` (`src/app.rs:149`); `App::thread_count: String`; `pub const crate::gpu::EVM_GPU_SEEDS_PER_SEC: f64` (Task 4.8 — the SINGLE definition; do **not** redeclare it in `src/app.rs`, or Task 4.8 Step 5's live measurement never reaches the ETA)
-- Produces: `const EVM_GPU_TAIL_SECS: f64 = 50.5e-6;`, `fn estimated_rate(&self) -> f64`
+- Produces: `const EVM_GPU_TAIL_SECS: f64 = 50.5e-6;`, `fn estimated_rate(&self) -> f64`, `fn App::gpu_tail_cores(gpu_rate: f64, threads: f64) -> f64`
 
 The spec's arithmetic, reproduced because the *why* matters:
 
@@ -13418,6 +13519,15 @@ Note one deliberate correction to the spec's code sketch: it guards the GPU bran
             "every GPU seed still costs the CPU its BIP-32 + Keccak tail; that must be \
              charged, not free: {hybrid}"
         );
+        // MAGNITUDE, not just direction. The band above is ~24,920..38,520 wide,
+        // so a typo of 50.5e-9 for 50.5e-6 in EVM_GPU_TAIL_SECS passes it — and
+        // passes every other test in this task. Expressed in cores so it still
+        // holds after Task 4.8 Step 5 re-measures EVM_GPU_SEEDS_PER_SEC.
+        let displaced_cores = (cpu_only - (hybrid - crate::gpu::EVM_GPU_SEEDS_PER_SEC)) / 3_115.0;
+        assert!(
+            (0.55..0.85).contains(&displaced_cores),
+            "the GPU's CPU tail must cost ~0.69 of a core at 13.6k seeds/s, got {displaced_cores}"
+        );
     }
 
     #[test]
@@ -13431,18 +13541,14 @@ Note one deliberate correction to the spec's code sketch: it guards the GPU bran
         assert_eq!(app.estimated_rate(), 3_470.0 * 8.0, "GPU offload is EVM-only");
     }
 
+    /// Tests the clamp DIRECTLY. Going through `estimated_rate` cannot: at
+    /// `threads = 1` the tail is 13,600 x 50.5e-6 = 0.687 < 1, so the clamp
+    /// never binds, and with the clamp in place `r >= EVM_GPU_SEEDS_PER_SEC`
+    /// is true by construction for every input.
     #[test]
-    fn estimated_rate_never_goes_backwards_on_one_thread() {
-        let mut app = App::new();
-        app.chain = ChainKind::Evm;
-        app.thread_count = "1".to_string();
-        app.gpu_status = GpuStatus::Ready { device: "Apple M1".to_string() };
-        app.gpu_requested = true;
-        let r = app.estimated_rate();
-        assert!(
-            r >= crate::gpu::EVM_GPU_SEEDS_PER_SEC,
-            "the tail clamp must not let the tail eat the GPU's own throughput: {r}"
-        );
+    fn gpu_tail_cores_is_clamped_to_the_machine() {
+        assert!((App::gpu_tail_cores(13_600.0, 8.0) - 0.687).abs() < 0.01);
+        assert_eq!(App::gpu_tail_cores(1.0e6, 1.0), 1.0, "unclamped this would be 50.5 cores");
     }
 
     #[test]
@@ -13523,8 +13629,17 @@ const EVM_GPU_TAIL_SECS: f64 = 50.5e-6;
         }
         // Single source of truth — Task 4.8 measures and owns this number.
         let gpu_rate = crate::gpu::EVM_GPU_SEEDS_PER_SEC;
-        let tail = (gpu_rate * EVM_GPU_TAIL_SECS).min(threads);
+        let tail = Self::gpu_tail_cores(gpu_rate, threads);
         gpu_rate + (threads - tail) * per_thread
+    }
+
+    /// The GPU's CPU tail, in cores. Clamped: at a hypothetical GPU rate above
+    /// 1/EVM_GPU_TAIL_SECS ≈ 19,800 seeds/s the tail would exceed the machine,
+    /// and an unclamped `threads - tail` would go negative. Extracted so the
+    /// clamp can be tested directly — through `estimated_rate` it is unreachable
+    /// at the defaults.
+    fn gpu_tail_cores(gpu_rate: f64, threads: f64) -> f64 {
+        (gpu_rate * EVM_GPU_TAIL_SECS).min(threads)
     }
 
     /// Projected seconds until a match. Uses live rate if searching,
@@ -13595,13 +13710,41 @@ cd /Users/shawnhopkinson/Rust/Vanaddy && cargo clippy --all-targets 2>&1 | grep 
 
 Expect exactly 12 lines, naming only those five files — the same set Milestone 1 Task 1.8 Step 5 recorded. The `src/app.rs` and `src/ui.rs` line numbers shift as this milestone edits those files; the COUNT of 12 must not change, and no new file may appear. The 12 pre-existing lints are out of scope here.
 
-Then confirm none of them points at code this milestone wrote:
+Then confirm none of them points at code this milestone wrote. Clippy never prints the enclosing function name — only `--> file:line:col` and the offending snippet — so grepping its output for function NAMES can never match, no matter which function the lint fired in. Resolve each diagnostic's line back to the function that contains it instead:
 
 ```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && cargo clippy --all-targets 2>&1 | grep -E "gpu_form_value|gpu_form_line|gpu_stats_line|sanitize_status_text|gpu_reason_label|help_lines|gpu_measured_rate|estimated_rate|field_count"
+cd /Users/shawnhopkinson/Rust/Vanaddy && cargo clippy --all-targets 2>&1 \
+  | grep -oE 'src/[a-z0-9_/]+\.rs:[0-9]+' | sort -u \
+  | while IFS=: read -r f l; do
+      awk -v n="$l" '/^ *(pub )?fn /{name=$0} NR==n{print FILENAME":"n" in"name}' "$f"
+    done
 ```
 
-Expect **no output**. Any hit names a function this milestone added; fix it in that function's task.
+Expect 12 lines, and expect the enclosing functions to be pre-existing ones only — none of `gpu_form_value`, `gpu_form_line`, `gpu_stats_line`, `sanitize_status_text`, `gpu_reason_label`, `help_lines`, `gpu_measured_rate`, `estimated_rate`, `gpu_tail_cores`, or `field_count`. The count gate above already catches a NEW lint; this one catches the count-neutral case, where an edit removed a pre-existing lint in `src/ui.rs`/`src/app.rs` and added one of its own inside this milestone's code. Any hit here names a function this milestone added; fix it in that function's task.
+
+> **If you are an agent executing this task, you cannot complete it, and you must not
+> report that you did.** Steps 3–9 require a human at an interactive Ratatui TUI:
+> `src/main.rs:26` calls `enable_raw_mode()` and there is no non-tty path — with stdin
+> not a terminal the binary exits 1 with `Error: Os { code: 6, kind: Uncategorized,
+> message: "Device not configured" }` — and Steps 4–9 ask for colour judgements, a
+> sub-second timing observation and a live-rate plausibility call on top of that.
+>
+> Do this instead:
+> 1. Run Steps 1 and 2 for real. Both are fully scriptable, and Step 2 is this
+>    milestone's only mechanical lint gate.
+> 2. Report **DONE_WITH_CONCERNS**, naming Steps 3–9 as unrun and stating what Steps 1
+>    and 2 showed — the `test result:` line, whether the release build finished, and the
+>    12-line clippy census with the enclosing-function names it resolved.
+>
+> Reporting DONE here is a false pass on the milestone's acceptance gate. Do NOT invent a
+> pty-driving harness to get around this; that is not the job. Note that Task 7.5's
+> headless `ui::tests` already cover everything here that can be automated:
+> `gpu_stats_line_reports_a_fault_without_the_raw_diagnostic` pins the fault row's content
+> and its bound, `stats_pane_renders_the_gpu_row_while_searching` pins its position under
+> `Rate:` and that the measured rate and share survive the pane width, and
+> `stats_height_counts_the_gpu_row_exactly_once` pins the height agreeing with the render.
+> What genuinely needs a human — colour, sub-second timing, live-rate plausibility — is
+> exactly what is being handed back.
 
 - [ ] **Step 3: Launch the TUI.**
 
@@ -13621,28 +13764,15 @@ Resize the terminal to at least 160 columns first — the config panel is 25% of
 
 - [ ] **Step 8: Confirm `q` and `h` still work from the GPU field.** `Tab` to the GPU field and press `h` — the help popup must open, and it must show `y/n          Case sensitivity, GPU offload`, `GPU offload  Metal PBKDF2, EVM only (Apple Silicon)`, **and** the final line `Monero generation is slower (crypto intrinsic)` (that last one proves nothing is clipped off the bottom). Press any key to dismiss. Press `q` — the app must quit.
 
-- [ ] **Step 9: Watch the live GPU stats row.** Re-launch, set Chain = EVM, Prefix = `ab`, GPU = `[On]`, press Enter. Within the first second the Stats pane must show a yellow ` GPU rate: initialising (compiling shader, self-testing)` row directly under `Rate:`; within ~1 s that must become a green ` GPU rate: Apple M1  <rate>/s (<n>%)`. The Stats label is `GPU rate:`; the `GPU:` row further up is the config form's. Confirm:
-  - the Stats block's border does not jump or overlap the Config block above it as the row appears and changes (that is `stats_height` agreeing with `render_stats`);
+- [ ] **Step 9: Watch the live GPU stats row.** Re-launch, set Chain = EVM, Prefix = `ab`, GPU = `[On]`, press Enter. Within the first second the Stats pane must show a yellow ` GPU rate: initialising…` row directly under `Rate:`; within ~1 s that must become a green ` GPU rate: <rate>/s (<n>%)`. The Stats label is `GPU rate:`; the `GPU:` row further up is the config form's, and that is where the device name lives — the Stats row deliberately omits it so the rate and share survive a narrow pane. Confirm:
   - the percentage is between 1 and 100;
   - the rate is in the thousands, not zero, and not a suspiciously round modelled number.
 
-  Press Ctrl+C to stop, then Enter to start again, and confirm the row comes back without the pane's height glitching.
+  Press Ctrl+C to stop, then Enter to start again, and confirm the row comes back. (The border not jumping as the row appears is `stats_height` agreeing with `render_stats`, which `ui::tests::stats_height_counts_the_gpu_row_exactly_once` already pins headlessly; do not re-verify it by eye.)
 
-- [ ] **Step 10: Confirm a fault renders cleanly.** Faults cannot be provoked from the UI, so verify the rendering path by temporarily forcing a status. In `src/ui.rs`, at the very top of `gpu_stats_line`, insert this line, run the TUI, start an EVM search, and read the row:
+The fault row is NOT verified by hand. A step that asks for a temporary `return Some(...)` at the top of `gpu_stats_line`, a look, and a delete has only one machine-checkable artifact — an empty `git diff --stat` — and that is satisfied identically by never having made the edit. `ui::tests::gpu_stats_line_reports_a_fault_without_the_raw_diagnostic` covers the same ground headlessly and can actually fail: it pins that the row says `OFF`, names the reason, says the CPU search continues, never carries the raw `program_source:` diagnostic, and stays within 48 columns.
 
-```rust
-    return Some((format!(" GPU rate: OFF — {} (CPU search continues)", sanitize_status_text("program_source:14:3: error: use of undeclared identifier 'sha512h'\nnote: expanded from macro", 40)), Color::Red));
-```
-
-  The row must be a single red line with no line break, no stray glyphs, and the `Rate:` and `Checked:` counters must keep climbing above it (the CPU search is still running). Then **remove that line again** and confirm:
-
-```sh
-cd /Users/shawnhopkinson/Rust/Vanaddy && git diff --stat
-```
-
-Expect **no output** — the temporary line is gone and the tree matches the last commit.
-
-- [ ] **Step 11: Confirm nothing was left uncommitted, then tag the milestone in the log.**
+- [ ] **Step 10: Confirm nothing was left uncommitted, then tag the milestone in the log.**
 
 ```sh
 cd /Users/shawnhopkinson/Rust/Vanaddy && git status --porcelain && git log --oneline -7
@@ -13698,6 +13828,14 @@ Task 8.7 adds that anything else "stops the ship". `parse_soak_count` stays in `
 **Interfaces:**
 - Consumes: `pub const COMPRESSIONS_PER_SEED: u32 = 4_098;`, `pub const WAVE: usize = 8_192;` (both from `src/gpu/mod.rs`, Milestone 1); the `#[ignore]`d test `gpu_no_rss_growth_over_100k_dispatches` in `src/gpu/metal.rs` (Milestone 3, Task 3.11); the test helper `gpu_for_test()` and the `use` items already in that file's `mod tests`
 - Produces: `#[cfg(test)] pub(crate) fn parse_soak_count(raw: Option<&str>, default: usize) -> usize` in `src/gpu/mod.rs` (kept `pub(crate)` so `src/gpu/metal.rs` can reach it); `fn soak_count(default: usize) -> usize` inside the `#[cfg(test)] mod tests` of `src/gpu/metal.rs` (no `#[cfg(test)]` attribute of its own — the enclosing module already carries one)
+
+- [ ] **Step 0: Confirm Milestone 3 Task 3.11 has landed.** Step 8 below asserts it runs "all FOUR `#[ignore]`d tests this branch created" and Step 9's clean shape is `4 passed`; both silently depend on `gpu_no_rss_growth_over_100k_dispatches` existing, and Task 8.6 EDIT 4 documents it in `CLAUDE.md` as an existing pin.
+
+```sh
+grep -rn '#\[ignore' src/
+```
+
+Expect the listing to include `gpu_no_rss_growth_over_100k_dispatches` in `src/gpu/metal.rs`. If it does not, **apply Milestone 3 Task 3.11 before continuing** — the same conditional-create pattern Step 5 below uses for `gpu_soak_matches_ring`. Do not proceed with three `#[ignore]`d tests and re-interpret Step 9's `4 passed`; the RSS guard is the only fast proxy for the 1,861-bytes-per-command-buffer autorelease leak, and Task 8.2 is what it stands in for. Note `grep -rn` exits 1 when it matches nothing, so read the listing, not the exit status.
 
 - [ ] **Step 1: Write the failing parser test.** Append this to the end of `/Users/shawnhopkinson/Rust/Vanaddy/src/gpu/mod.rs`. Task 1.3 already put a `#[cfg(test)] mod tests` block in this file, which is exactly why the module below is named `soak_count_tests` — do **not** rename it to `tests`, and do not fold the four `#[test]` functions into the Task 1.3 block. Two modules of the same name in one file is `error[E0428]: the name `tests` is defined multiple times`.
 
@@ -13964,9 +14102,11 @@ If you would rather not sit for 150 minutes, `--release` is a supported alternat
 
 ```sh
 mkdir -p /tmp/vanaddy-soak
-VANADDY_GPU_SOAK_N=1e7 cargo test --release -- --ignored --nocapture 2>&1 \
+VANADDY_GPU_SOAK_N=1e7 cargo test --release -- --ignored --nocapture --test-threads=1 2>&1 \
   | tee /tmp/vanaddy-soak/soak-1e7.log
 ```
+
+`--test-threads=1` is load-bearing, not tidiness: `gpu_no_rss_growth_over_100k_dispatches` measures **process-wide** RSS against an 8 MiB absolute threshold, and the concurrent ten-million-candidate soak allocates 8,192 mnemonics plus 8,192 64-byte seeds per wave into the same process. libtest defaults to `num_cpus` parallel and there is no `.cargo/config.toml` in this repo, so without the flag that guard either fails on co-scheduling — which Step 9 would report as a hard stop for the whole milestone — or passes while proving nothing, depending on when the soak happens to free its wave buffers.
 
 Either build satisfies the gate, because what this soak proves is a **differential** — GPU seed == `ring` seed over ten million real phrases — and that equality is build-independent. Release has the further advantage that `gpu_seed_rate_end_to_end` then runs under the conditions Task 4.8 documents, so the tolerated failure described below simply does not arise. Run the debug command in the fence further down, or this release one; do not run both.
 
@@ -13974,7 +14114,7 @@ Two of the four are debug-hostile. `gpu_seed_rate_end_to_end` is the ~30 s rate 
 
 ```sh
 mkdir -p /tmp/vanaddy-soak
-VANADDY_GPU_SOAK_N=1e7 cargo test -- --ignored --nocapture 2>&1 \
+VANADDY_GPU_SOAK_N=1e7 cargo test -- --ignored --nocapture --test-threads=1 2>&1 \
   | tee /tmp/vanaddy-soak/soak-1e7.log
 ```
 
@@ -13996,7 +14136,21 @@ grep -E '^test .* \.\.\. FAILED$' /tmp/vanaddy-soak/soak-1e7.log \
   | grep -vc 'gpu_seed_rate_end_to_end'
 ```
 
-Expected: the last command prints `0`. Two shapes satisfy that, and only two:
+Then two more checks, each on its own line — `grep -c` exits non-zero when it counts zero, so
+these must never be joined into an `&&` chain. Neither of the three commands above looks at the
+soak's own total, and `gpu_soak_matches_ring` opens
+`let Some(mut gpu) = gpu_for_test() else { return };` — a skip is a green pass that compared
+nothing, which is the exact failure mode this task was written to close:
+
+```sh
+# The soak actually ran the full ten million:
+grep -c 'soak: 10000000/10000000' /tmp/vanaddy-soak/soak-1e7.log   # expect: 1
+
+# And it did not skip:
+grep -c '^SKIP:' /tmp/vanaddy-soak/soak-1e7.log                     # expect: 0
+```
+
+Expected: the last of the first three commands prints `0`. Two shapes satisfy that, and only two:
 
 - **Clean run.** The middle command prints nothing and the tail ends
   `test result: ok. 4 passed; 0 failed; 0 ignored`. This is what a `--release` Step 8 should produce.
@@ -14006,7 +14160,8 @@ Expected: the last command prints `0`. Two shapes satisfy that, and only two:
   `EVM_GPU_SEEDS_PER_SEC` from the release run, and treat the debug result as inconclusive.
 
 Anything else — the last command printing `1` or more, or any name in the middle command's output
-that is not `gpu_seed_rate_end_to_end` — is a hard stop.
+that is not `gpu_seed_rate_end_to_end` — is a hard stop. And a `0` from the first of the two count
+commands, or a non-zero from the second, is a hard stop too: the soak compared nothing.
 
 A `RingMismatch { index, phrase, got, want }` failure here is a hard stop for the whole milestone: the kernel disagrees with `ring` on a real phrase. Replay that single case with the printed index before doing anything else — do not proceed to Task 8.2, and do not ship.
 
@@ -14039,7 +14194,12 @@ set -uo pipefail
 OUT=/tmp/vanaddy-soak
 mkdir -p "$OUT"
 printf 'epoch\trss_kib\n' > "$OUT/rss.tsv"
-for _ in $(seq 0 72); do
+# SLEEP-then-sample, and no trailing sleep: sampling first would put the 73rd
+# sample at exactly t=43200 s and then sleep a 73rd time, so the sampler would
+# outlive a healthy 12-hour app by ten minutes and abort on its own last
+# iteration. This way the run spans 43200 s and ends on a sample.
+for i in $(seq 0 72); do
+  [ "$i" -gt 0 ] && sleep 600
   pid=$(pgrep -x vanaddy | head -1)
   if [ -z "$pid" ]; then
     echo "sample-rss: vanaddy is not running; aborting sampler" >&2
@@ -14051,7 +14211,6 @@ for _ in $(seq 0 72); do
     exit 1
   fi
   printf '%s\t%s\n' "$(date +%s)" "$rss" >> "$OUT/rss.tsv"
-  sleep 600
 done
 echo "sample-rss: 73 samples written to $OUT/rss.tsv"
 ```
@@ -14073,6 +14232,35 @@ sample-rss: vanaddy is not running; aborting sampler
 exit=1
 ```
 
+> **OPERATOR-ONLY — and if you are an agent, you cannot complete this task and you must
+> not report that you did.** Steps 4–7 require a human at an interactive Ratatui TUI for
+> twelve hours: `src/main.rs:26` calls `enable_raw_mode()` before the event loop, and with
+> stdin not a terminal the binary exits 1 with
+> `Error: Os { code: 6, kind: Uncategorized, message: "Device not configured" }`. The
+> sampler in Step 5 then finds no `vanaddy` process on its first iteration and aborts,
+> leaving `rss.tsv` with a header row and nothing else. The same applies to Task 8.3
+> Steps 6–7.
+>
+> **Scriptable here, and you must run them for real:** Step 1 (write the harness),
+> Step 2 (the red phase — the sampler must be seen exiting 1 against a stopped app),
+> Step 3 (the release build). Those three are the whole of this task that does not need
+> a terminal, and Step 2 is the only thing that proves the harness cannot silently
+> record nothing.
+>
+> **Needs a human, and must NOT be reported as passed:** Steps 4, 5, 6 and 7 — starting
+> the search from the config form, the twelve-hour run, the exit-summary capture, and the
+> RSS gate. Do not fabricate `/tmp/vanaddy-soak/summary.txt` or `rss.tsv`; every number in
+> them would otherwise be an `awk BEGIN` block over literals you typed, byte-identical to
+> a real measurement, in a directory that is deliberately never committed. Do not invent a
+> pty-driving harness to fake the TUI either.
+>
+> Then report **DONE_WITH_CONCERNS**, stating: that Steps 1–3 ran and what they showed
+> (the exact red-phase output and whether the release build finished); that the twelve-hour
+> soak and its RSS gate did not run; and that `/tmp/vanaddy-soak/summary.txt` therefore
+> carries no `hybrid_rate`, `hybrid_us_per_cand`, `samples`, `span_secs`, `rss_start_kib`,
+> `rss_end_kib` or `growth_pct`. Task 8.6 Step 2 and Task 8.7 Step 5 must then take their
+> "not yet measured" path — do **NOT** substitute the example numbers in Step 6 below.
+
 - [ ] **Step 3: Build the binary the soak will run.**
 
 ```sh
@@ -14080,10 +14268,12 @@ cargo build --release
 ls -la target/release/vanaddy
 ```
 
-- [ ] **Step 4: Start the search.** In terminal A:
+- [ ] **Step 4: Start the search.** In terminal A. Run it under `script` so the exit summary
+Step 6 needs lands in a file the binary itself wrote, rather than in numbers typed back in by
+hand:
 
 ```sh
-caffeinate -dimsu ./target/release/vanaddy
+script -q /tmp/vanaddy-soak/tui.log caffeinate -dimsu ./target/release/vanaddy
 ```
 
 Then, from the fresh config form, type this exact key sequence:
@@ -14100,9 +14290,13 @@ Then, from the fresh config form, type this exact key sequence:
 | `Tab` | → Threads (leave the detected default) |
 | `Enter` | validate + start |
 
-Confirm the stats pane shows a line of the form `GPU       : Apple M1   13.6k/s (54%)`. If it
-shows `GPU       : initialising` for more than ~2 seconds, or any `GPU       : OFF —` line, stop
-here and diagnose — the soak measures nothing useful without the GPU actually running.
+Confirm the Stats pane shows a line of the form ` GPU rate: 13.6K/s (54%)`. If it shows
+` GPU rate: initialising…` for more than ~2 seconds, or any ` GPU rate: OFF —` line, stop here and
+diagnose — the soak measures nothing useful without the GPU actually running. The label is
+`GPU rate:` (Milestone 7 Task 7.5); the ` GPU:      ` row further up is the config form's, and the
+Stats row carries no device name. Step 7 re-checks the OFF case mechanically against
+`/tmp/vanaddy-soak/tui.log`, because a fault that fires in minute three and scrolls away is exactly
+what a human watching for twelve hours will miss.
 
 - [ ] **Step 5: Start the sampler.** In terminal B, immediately after Step 4:
 
@@ -14119,13 +14313,22 @@ binary leaves the alternate screen and prints its exit summary. Record the two n
   Elapsed time    : 43200.XXs
 ```
 
-Compute and record the rate — substitute the two numbers you actually saw:
+Do **not** retype those numbers into an `awk BEGIN` block: a summary computed from typed
+literals is byte-identical whether or not the soak ran, and `/tmp/vanaddy-soak` is never
+committed, so no later reviewer can tell. Read them out of the log the binary wrote in Step 4
+instead — the exit summary is printed after the alternate screen is left, so it lands in
+`tui.log` as plain text:
 
 ```sh
-awk 'BEGIN{ total=1011234567; elapsed=43201.7;
-            printf "hybrid_rate=%.0f\nhybrid_us_per_cand=%.1f\n", total/elapsed, 1e6*elapsed/total }' \
-  | tee -a /tmp/vanaddy-soak/summary.txt
+awk '/Wallets checked/{t=$NF} /Elapsed time/{gsub(/s$/,"",$NF); e=$NF}
+     END{ if (t=="" || e=="") { print "MISSING exit summary — soak did not complete" > "/dev/stderr"; exit 1 }
+          printf "hybrid_rate=%.0f\nhybrid_us_per_cand=%.1f\n", t/e, 1e6*e/t }' \
+  /tmp/vanaddy-soak/tui.log | tee -a /tmp/vanaddy-soak/summary.txt
 ```
+
+A non-zero exit with `MISSING exit summary` means the run did not reach its own summary — the app
+was killed, or it never started. That is a hard stop, not something to paper over with the example
+numbers above.
 
 - [ ] **Step 7: Analyse RSS and read the gate.**
 
@@ -14136,11 +14339,31 @@ awk -F'\t' 'NR>1 { if (n==0) first=$2; last=$2; n++ }
   /tmp/vanaddy-soak/rss.tsv | tee -a /tmp/vanaddy-soak/summary.txt
 ```
 
-Gate — all three must hold:
+Then two mechanical gates the numbers above cannot give you. The first fails a short or
+fabricated `rss.tsv`; the second replaces "the operator does not remember seeing an OFF line"
+with a check against the log the binary wrote:
 
-- `samples=73` (the sampler never aborted, so the app lived the full 12 hours)
+```sh
+awk -F'\t' 'NR==2{f=$1} END{ printf "span_secs=%d\n", $1-f }' /tmp/vanaddy-soak/rss.tsv \
+  | tee -a /tmp/vanaddy-soak/summary.txt
+```
+
+```sh
+grep -ac ' GPU rate: OFF' /tmp/vanaddy-soak/tui.log    # expect: 0
+```
+
+(`grep -c` exits 1 when it counts zero, so keep that on its own line — never in an `&&` chain.
+`-a` because `tui.log` is full of terminal escapes.)
+
+Gate — all four must hold:
+
+- `samples` ≥ `72` (the sampler never aborted, so the app lived the full 12 hours). 72 rather than
+  73 because the sampler and the app are started seconds apart and `q` may land between the last
+  two samples; the `span_secs` bound below is what actually pins the duration.
+- `span_secs` ≥ `43000`
 - `growth_pct` < `5.00`
-- terminal A never printed a `GPU       : OFF —` line
+- the ` GPU rate: OFF` grep prints `0`. A non-zero here invalidates `hybrid_rate` outright — it is
+  then a CPU-only number wearing a hybrid label, and it must not reach `CLAUDE.md`.
 
 For scale: the un-pooled leak is 700 MB/hour against an ~80 MB baseline, which would read as a
 `growth_pct` in the thousands. A 5% bound catches even a leak one thousandth that size.
@@ -14160,8 +14383,9 @@ ls vanity_wallets.csv 2>&1     # expect: No such file or directory
 cat /tmp/vanaddy-soak/summary.txt
 ```
 
-Expected keys present: `hybrid_rate`, `hybrid_us_per_cand`, `samples`, `rss_start_kib`,
-`rss_end_kib`, `growth_pct`. Task 8.6 reads `hybrid_rate` and `hybrid_us_per_cand` from here.
+Expected keys present: `hybrid_rate`, `hybrid_us_per_cand`, `samples`, `span_secs`,
+`rss_start_kib`, `rss_end_kib`, `growth_pct`. Task 8.6 reads `hybrid_rate` and
+`hybrid_us_per_cand` from here — and takes its "not yet measured" path if they are absent.
 
 ---
 
@@ -14225,9 +14449,7 @@ hook. There is no env read in `main.rs` to replace.
         // Exactly what App::with_gpu_status applies when the env lever is pulled.
         if gpu_env_off(Some("0"), None) {
             app.gpu_requested = false;
-            app.gpu_status = crate::gpu::GpuStatus::Disabled(
-                crate::gpu::GpuDisableReason::UserOff,
-            );
+            app.gpu_status = crate::gpu::GpuStatus::Disabled(crate::gpu::GpuDisableReason::UserOff);
         }
 
         assert!(!app.gpu_effective());
@@ -14263,7 +14485,7 @@ so the only thing to check is that Milestone 6 left exactly one reader and one s
 cd /Users/shawnhopkinson/Rust/Vanaddy
 grep -c 'pub fn gpu_env_off' src/app.rs
 grep -rn 'std::env::var("VANADDY_GPU")\|std::env::var("VANADDY_NO_GPU")' src/ --include=*.rs
-grep -n 'GpuDisableReason::UserOff' src/app.rs
+sed -n '/fn with_gpu_status/,/^    }/p' src/app.rs | grep -c 'GpuDisableReason::UserOff'   # expect: 1
 ```
 
 Expected:
@@ -14273,8 +14495,13 @@ Expected:
 2. the second shows both `std::env::var` calls **only** inside `App::with_gpu_status` in
    `src/app.rs`, and nothing at all in `src/main.rs` — one variable read from two places with two
    different accepted spellings is the defect Task 6.1 Step 5 exists to prevent;
-3. the third shows the `Disabled(UserOff)` rewrite Task 6.1 Step 6 inserted, which is what makes the
-   config row say *why* the `y` key will not turn the GPU on.
+3. the third prints `1` — the `Disabled(UserOff)` rewrite inside `App::with_gpu_status` itself,
+   which is what makes the config row say *why* the `y` key will not turn the GPU on. It is scoped
+   to that function on purpose: a bare `grep -n 'GpuDisableReason::UserOff' src/app.rs`, run after
+   Step 1, matches the two occurrences inside Step 1's own test body and so is satisfied even with
+   the production rewrite deleted. A `0` here means Task 6.1 Step 6 was never applied or was
+   reverted; the two tests added in Step 1 do not exercise it — they hand-copy the rewrite rather
+   than calling `App::with_gpu_status`.
 
 If any of the three is missing, stop and finish Task 6.1 — do **not** add it here.
 
@@ -14307,11 +14534,34 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 print `11`. A higher number means your insertion is not rustfmt-shaped — fix it by hand rather than
 running `cargo fmt`, which would reformat 14 unrelated files.
 
-- [ ] **Step 6: Exercise the lever for real, and measure the CPU-only rate.**
+> **OPERATOR-ONLY from here — and if you are an agent, you cannot complete Steps 6 and 7 and
+> you must not report that you did.** Both require a human at an interactive Ratatui TUI:
+> `src/main.rs:26` calls `enable_raw_mode()` before the event loop, and with stdin not a
+> terminal the binary exits 1 with `Error: Os { code: 6, kind: Uncategorized, message:
+> "Device not configured" }`. Step 6 also asks for a visual read of the config row and for
+> `y` to be pressed on it.
+>
+> **Scriptable here, and you must run them for real:** Steps 1–5 — the two regression tests,
+> the single-env-reader greps, the full suite, and the commit with its rustfmt count. Those
+> are the whole of this task's rollback-lever pin; Step 3's scoped `grep -c` is what actually
+> proves lever #2 exists in production code rather than only in the tests just added.
+>
+> **Needs a human, and must NOT be reported as passed:** Steps 6 and 7 — the five-minute
+> `VANADDY_GPU=0` run and the CPU-only rate it produces. Do not fabricate `cpu_only_rate`
+> into `/tmp/vanaddy-soak/summary.txt`; do not invent a pty-driving harness.
+>
+> Then report **DONE_WITH_CONCERNS**, stating that Steps 1–5 ran and what they printed (the
+> `test result:` lines, the three grep results, the rustfmt count), and that Steps 6–7 did
+> not run so `cpu_only_rate` is absent from `/tmp/vanaddy-soak/summary.txt`. Task 8.6 Step 2
+> must then take its "not yet measured" path.
+
+- [ ] **Step 6: Exercise the lever for real, and measure the CPU-only rate.** As in Task 8.2
+Step 4, run it under `script` so Step 7 can read the exit summary out of a file the binary
+wrote rather than out of numbers typed back in:
 
 ```sh
 cargo build --release
-VANADDY_GPU=0 ./target/release/vanaddy
+VANADDY_GPU=0 script -q /tmp/vanaddy-soak/cpu-tui.log ./target/release/vanaddy
 ```
 
 Key sequence: `2`, `Tab`, `Tab`, `d` `e` `a` `d` `b` `e` (6 hex chars — 1 in 16.7M, so effectively no
@@ -14329,12 +14579,15 @@ themselves. Confirm too
 that pressing `y` on that field prints an error rather than turning it on. Let it run for
 5 minutes, then press `q`.
 
-- [ ] **Step 7: Record the CPU-only rate.** From the exit summary, substituting your numbers:
+- [ ] **Step 7: Record the CPU-only rate.** Read it out of the log Step 6 wrote, not out of
+retyped literals — an `awk BEGIN` block over numbers you typed is byte-identical whether or not
+the run happened, and `/tmp/vanaddy-soak` is never committed:
 
 ```sh
-awk 'BEGIN{ total=3812445; elapsed=300.4;
-            printf "cpu_only_rate=%.0f\n", total/elapsed }' \
-  | tee -a /tmp/vanaddy-soak/summary.txt
+awk '/Wallets checked/{t=$NF} /Elapsed time/{gsub(/s$/,"",$NF); e=$NF}
+     END{ if (t=="" || e=="") { print "MISSING exit summary — CPU-only run did not complete" > "/dev/stderr"; exit 1 }
+          printf "cpu_only_rate=%.0f\n", t/e }' \
+  /tmp/vanaddy-soak/cpu-tui.log | tee -a /tmp/vanaddy-soak/summary.txt
 ```
 
 Expected magnitude on an M1 with 8 threads: 11,500–14,900. A number near the Task 8.2
@@ -14674,28 +14927,38 @@ by its text.
 - Consumes: `/tmp/vanaddy-soak/summary.txt` keys `hybrid_rate`, `hybrid_us_per_cand` (Task 8.2 Step 6) and `cpu_only_rate` (Task 8.3 Step 10)
 - Produces: no code signatures
 
-- [ ] **Step 1: Run the doc gate and see it fail.** These six greps are the acceptance test for this
-task. Run them before editing.
+- [ ] **Step 1: Run the doc gate and see it fail.** These thirteen greps are the acceptance test for
+this task. Run them before editing. Seven of them are produced by EDIT 4 and EDIT 3 alone; the last
+six exist so that a missing EDIT 1, EDIT 2, EDIT 5 or EDIT 6 — the measured row that is this task's
+own headline — cannot leave the gate green.
 
 ```sh
 cd /Users/shawnhopkinson/Rust/Vanaddy
 for pat in 'autorelease pool' 'waitUntilCompleted' 'thread_position_in_grid' \
            'Never join the GPU thread' 'gpu_chunk_schedule_invariance' 'src/gpu/metal.rs' \
-           'gpu::kernel_src'; do
-  printf '%-34s %s\n' "$pat" "$(grep -c "$pat" CLAUDE.md)"
+           'gpu::kernel_src' 'EVM + Metal GPU' 'whole-machine' 'src/verify.rs' \
+           'gpu_seed_matches_bip39_canonical_vector' 'cargo test --no-default-features' \
+           '`gpu`, `matcher`'; do
+  printf '%-42s %s\n' "$pat" "$(grep -c "$pat" CLAUDE.md)"
 done
 ```
 
-Expected — the red phase, all seven zero:
+Expected — the red phase, all thirteen zero:
 
 ```
-autorelease pool                   0
-waitUntilCompleted                 0
-thread_position_in_grid            0
-Never join the GPU thread          0
-gpu_chunk_schedule_invariance      0
-src/gpu/metal.rs                   0
-gpu::kernel_src                    0
+autorelease pool                           0
+waitUntilCompleted                         0
+thread_position_in_grid                    0
+Never join the GPU thread                  0
+gpu_chunk_schedule_invariance              0
+src/gpu/metal.rs                           0
+gpu::kernel_src                            0
+EVM + Metal GPU                            0
+whole-machine                              0
+src/verify.rs                              0
+gpu_seed_matches_bip39_canonical_vector    0
+cargo test --no-default-features           0
+`gpu`, `matcher`                           0
 ```
 
 - [ ] **Step 2: Read your two measured numbers.**
@@ -14707,6 +14970,26 @@ grep -E '^(hybrid_rate|hybrid_us_per_cand|cpu_only_rate)=' /tmp/vanaddy-soak/sum
 The edits below are written with `23,400 cand/s`, `~43 µs`, and `~12,700 cand/s CPU-only`. Substitute
 your three values verbatim wherever those appear. Do not round them into a range and do not carry
 the spec's estimates forward — the whole point of the row is that it is measured on this machine.
+
+If that command prints **fewer than three lines**, the soaks did not run on this machine — which is
+the expected outcome whenever Task 8.2 or Task 8.3 reported DONE_WITH_CONCERNS, because both of
+those measurements need a human at an interactive TUI. Do **NOT** substitute the example numbers.
+Instead:
+
+- write EDIT 6's new row as
+  `| **EVM + Metal GPU** (whole machine, 8 threads) | *estimated, not yet measured on this machine* | — |`;
+- replace EDIT 6's trailing sentence
+  *"The GPU row is a **whole-machine** figure, not a per-core one: `total candidates / elapsed` over
+  a 12-hour EVM search with the offload on (2026-08-26), against the same measurement taken with
+  `VANADDY_GPU=0`."* with
+  *"The GPU row is a **whole-machine** figure, not a per-core one — and on this tree it is still an
+  estimate: the 12-hour soak and the `VANADDY_GPU=0` comparison have not been run here."* (keep the
+  words `whole-machine`; Step 9's gate greps for them);
+- delete the *"Measured on an M1 … 12-hour soak … 0 mismatches"* paragraph from Task 8.7 Step 5's
+  commit message;
+- report **DONE_WITH_CONCERNS**, naming which of the two soaks did not run.
+
+Plan line 8806's rule applies here verbatim: **do not commit the placeholder labelled as measured.**
 
 - [ ] **Step 3: EDIT 1 — the module list (line 7).**
 
@@ -14789,9 +15072,9 @@ WITH:
 
 ```markdown
   - `monero::keccak256_empty_vector` (original Keccak, **not** FIPS-202 SHA3)
-  - `gpu::metal::gpu_seed_matches_bip39_canonical_vector` (GPU seed == the same BIP-39 canonical vector pinned at `src/seed.rs:41`, checked at index 0 **and** index 511 so per-thread indexing is covered)
+  - `gpu::metal::gpu_seed_matches_bip39_canonical_vector` (a single phrase at index 0 against the same BIP-39 canonical vector pinned at `src/seed.rs:41` — the anchor to external ground truth, since every other GPU test compares against `ring`)
   - `gpu::metal::gpu_chunk_schedule_invariance` (index 0's seed is bit-identical under `iters = 2047`, the production `R = 8` schedule, and the irregular `[1, 1000, 46, 1000]` — the resumable-wave `Pbkdf2State` is only correct if this holds)
-  - `gpu::metal::gpu_ring_and_4lane_agree_over_512_deterministic_phrases` (GPU == `ring` == the 4-lane NEON path over one corpus; `ring`-only would miss the case where GPU and `ring` agree while the accelerated CPU path has drifted, i.e. CPU-found and GPU-found rows in the same CSV disagreeing with each other)
+  - `gpu::metal::gpu_ring_and_4lane_agree_over_512_deterministic_phrases` (GPU == `ring` == the 4-lane NEON path over one corpus; `ring`-only would miss the case where GPU and `ring` agree while the accelerated CPU path has drifted, i.e. CPU-found and GPU-found rows in the same CSV disagreeing with each other; this is the only test that spans indices 0..511, so it is what pins per-thread indexing)
 ```
 
 - [ ] **Step 6: EDIT 4 — four new Conventions rules (after the fixed-prefix bullet, line 52).**
@@ -14874,13 +15157,15 @@ The GPU row is a **whole-machine** figure, not a per-core one: `total candidates
 ```sh
 for pat in 'autorelease pool' 'waitUntilCompleted' 'thread_position_in_grid' \
            'Never join the GPU thread' 'gpu_chunk_schedule_invariance' 'src/gpu/metal.rs' \
-           'gpu::kernel_src'; do
-  printf '%-34s %s\n' "$pat" "$(grep -c "$pat" CLAUDE.md)"
+           'gpu::kernel_src' 'EVM + Metal GPU' 'whole-machine' 'src/verify.rs' \
+           'gpu_seed_matches_bip39_canonical_vector' 'cargo test --no-default-features' \
+           '`gpu`, `matcher`'; do
+  printf '%-42s %s\n' "$pat" "$(grep -c "$pat" CLAUDE.md)"
 done
 grep -c '^- \*\*' CLAUDE.md
 ```
 
-Expected: all seven patterns report `1` or more, and the bullet count is `13`. Verified on
+Expected: all thirteen patterns report `1` or more, and the bullet count is `13`. Verified on
 `ba07199`: `grep -c '^- \*\*' CLAUDE.md` prints `9` today (two of those nine are outside the
 Conventions list), and EDIT 4 adds exactly four, so `9 + 4 = 13`.
 
@@ -14932,12 +15217,18 @@ stays revertable on its own.
 git status --short
 ```
 
-Expected: no output. If `vanity_wallets.csv` appears, it is gitignored but must still be removed —
-it holds plaintext seed phrases:
+Expected: no output. Then remove the plaintext-seed CSV **unconditionally** — `git status --short`
+never lists ignored files, and `vanity_wallets.csv` is matched by `.gitignore:2:*.csv`, so it can
+never appear above no matter what Tasks 8.2 and 8.3 left behind. Task 8.2 Step 8 shreds it after the
+soak, but Task 8.3 Step 6's five-minute run happens afterwards, and this is the branch's last chance
+to catch it:
 
 ```sh
-/bin/rm -P vanity_wallets.csv 2>/dev/null || rm -f vanity_wallets.csv
+test -e vanity_wallets.csv && { /bin/rm -P vanity_wallets.csv || rm -f vanity_wallets.csv; }
+git status --short --ignored | grep -c vanity_wallets.csv    # expect: 0
 ```
+
+(`grep -c` exits 1 when it counts zero, so keep that on its own line, never in an `&&` chain.)
 
 - [ ] **Step 2: Locate the squash base and check the range.**
 
@@ -14949,10 +15240,18 @@ git diff --stat "$BASE"..HEAD
 ```
 
 Expected: `BASE` resolves to `beced09...`, the log lists every Milestone 1–8 WIP commit and nothing
-else, and the diffstat touches `Cargo.toml`, `Cargo.lock`, `CLAUDE.md`, `codemaps/`, `src/app.rs`,
-`src/chains/*.rs`, `src/gpu/*`, `src/main.rs`, `src/pbkdf2_lanes.rs`, `src/seed.rs`, `src/ui.rs`,
-`src/verify.rs`. If it lists `ui: move key hints to a full-width bottom row`, the grep matched the
-wrong commit — that one is on `main` and must stay out of the range.
+else, and the diffstat touches `Cargo.toml`, `Cargo.lock`, `CLAUDE.md`, `codemaps/`,
+`docs/superpowers/plans/2026-08-26-metal-gpu-pbkdf2.md`, `src/app.rs`, `src/chains/*.rs`,
+`src/gpu/*`, `src/main.rs`, `src/pbkdf2_lanes.rs`, `src/seed.rs`, `src/ui.rs`, `src/verify.rs`. If
+it lists `ui: move key hints to a full-width bottom row`, the grep matched the wrong commit — that
+one is on `main` and must stay out of the range.
+
+Note the plan document: it is by far the largest entry in the range (~15,000 lines) and it was
+created inside it, not before it. Step 6 therefore lands it as its **own** commit rather than
+folding it into the feature commit. Folding it in would defeat the stated intent — the spec and the
+plan stay legible in history — and, worse, Step 9's `git revert --no-commit HEAD` would then delete
+the plan document out from under the agent executing this task before the `cargo build` on the next
+line runs.
 
 - [ ] **Step 3: Save the pre-squash history.** The WIP commits are the only record of the milestone
 sequence; keep a branch pointing at them until the squash is verified.
@@ -15033,11 +15332,15 @@ line.
 ```sh
 BASE=$(git log --format='%H %s' | grep -m1 'docs: design spec for Metal GPU PBKDF2 offload (EVM)' | cut -d' ' -f1)
 git reset --soft "$BASE"
+git restore --staged docs/ && git commit -m "docs: TDD implementation plan for Metal GPU PBKDF2" -- docs/
 git status --short | head -30
 ```
 
-Expected: the status lists every added and modified file as staged (`A ` / `M `), and nothing is
-unstaged. `--soft` keeps the index and working tree exactly as they were.
+Expected: the plan document lands as its own commit, and the status then lists every remaining added
+and modified file as staged (`A ` / `M `) with nothing unstaged. `--soft` keeps the index and working
+tree exactly as they were; the `git restore --staged docs/` + pathspec commit moves only `docs/` out
+of the pending feature commit, so the feature commit stays source-only and stays revertable without
+taking this plan with it.
 
 - [ ] **Step 7: Commit.**
 
@@ -15046,8 +15349,9 @@ git commit -F /tmp/vanaddy-soak/commit-msg.txt
 git log --oneline -3
 ```
 
-Expected: exactly three lines — the new `feat:` commit, `beced09 docs: design spec for Metal GPU
-PBKDF2 offload (EVM)`, and `4854a59 ui: move key hints to a full-width bottom row`.
+Expected: exactly three lines — the new `feat:` commit, `docs: TDD implementation plan for Metal GPU
+PBKDF2` (Step 6), and `beced09 docs: design spec for Metal GPU PBKDF2 offload (EVM)`. `4854a59 ui:
+move key hints to a full-width bottom row` is now the fourth.
 
 - [ ] **Step 8: Verify the squashed commit is identical to what you tested.**
 
@@ -15058,8 +15362,8 @@ cargo test 2>&1 | tail -3
 ```
 
 Expected: `git diff` against the pre-squash branch prints **nothing** (the tree is identical, only
-the history changed), the commit count is `2` (the spec commit plus the feature commit), and the
-test run ends `test result: ok.` with zero failures.
+the history changed), the commit count is `3` (the spec commit, the plan-document commit from
+Step 6, and the feature commit), and the test run ends `test result: ok.` with zero failures.
 
 - [ ] **Step 9: Confirm the revert lever works, then undo the check.** This proves lever #5 in one
 command rather than asserting it in a doc.
@@ -15081,7 +15385,7 @@ git branch -D feat/metal-gpu-pbkdf2-presquash
 git log --oneline -1
 ```
 
-The branch is now one revertable feature commit on top of the design spec, with both feature legs
+The branch is now one revertable feature commit on top of the design spec and the plan document, with both feature legs
 green, no NEW clippy diagnostic on either leg (the 12 pre-existing ones are untouched), no NEW
 rustfmt drift (`cargo fmt --check` still reports the pre-existing 84 diffs across 14 files), a
 10-million-candidate `ring` differential at zero mismatches, and a 12-hour flat-RSS soak. Use the
