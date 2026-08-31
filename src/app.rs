@@ -469,14 +469,23 @@ impl App {
     }
 
     pub fn stop_search(&mut self) {
-        // FIRST, before anything is released. Everything still in the mpsc
-        // queue is a match a worker already found and verified; dropping the
-        // receiver below would discard it silently — never written to the CSV,
-        // never counted in total_matches. `drain_matches` is a `try_recv` loop,
-        // so it is bounded and non-blocking, and the CSV handle is still open
-        // at this point (it is closed at the bottom of this function).
-        self.drain_matches();
+        // Signal FIRST, then drain. Everything still in the mpsc queue is a
+        // match a worker already found and verified; dropping the receiver
+        // below would discard it silently — never written to the CSV, never
+        // counted in total_matches. `drain_matches` is a `try_recv` loop, so it
+        // is bounded and non-blocking, and the CSV handle is still open here
+        // (it closes at the bottom of this function).
+        //
+        // Setting `stop` before the drain rather than after narrows, but does
+        // not close, a race: a worker between its last stop check and its
+        // `send` can still enqueue a match after the final `try_recv` returns
+        // Empty, and `Receiver::drop` discards it while the sender saw Ok.
+        // The window is one worker batch wide and cannot be closed without
+        // blocking the UI thread on the producers, which this function exists
+        // to avoid. Draining after the signal at least catches the final flush
+        // instead of racing ongoing production.
         self.stop.store(true, Ordering::Relaxed);
+        self.drain_matches();
         self.rx = None;
         // Dropping App's Receiver clone is producer wake-path #2: once App and
         // every Rayon worker have dropped theirs, the channel disconnects and a
