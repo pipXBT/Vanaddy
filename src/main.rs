@@ -22,13 +22,49 @@ use std::{
     time::Duration,
 };
 
+/// Restore the terminal on ANY panic, then chain to whatever hook was already
+/// installed so the message and backtrace still print.
+///
+/// The GPU path adds panic sites — `pack_key_block`'s hard assert, every Metal
+/// `Result` unwrap — to a binary that previously had none inside the alternate
+/// screen. Without this, a panic leaves the user in raw mode on the alternate
+/// screen with a shell that echoes nothing.
+fn install_terminal_restoring_panic_hook() {
+    install_panic_hook_with(|| {
+        let _ = disable_raw_mode();
+        let _ = stdout().execute(LeaveAlternateScreen);
+    });
+}
+
+/// Split out so the test can observe that the restore ran, and that it ran
+/// BEFORE the previous hook. Asserting only "the previous hook ran" passes for
+/// an empty installer — measured; see the Step 1 test's doc comment.
+fn install_panic_hook_with(restore: impl Fn() + Send + Sync + 'static) {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore();
+        prev(info);
+    }));
+}
+
 fn main() -> io::Result<()> {
+    // Probe BEFORE enable_raw_mode(). Device creation is the one Metal call that
+    // can print to stderr or panic on a machine we have not seen, and neither
+    // must land inside the alternate screen. catch_unwind because a Rust unwind
+    // here would otherwise take the process down before the hook below exists.
+    // (An Objective-C exception is NOT catchable — that is why the backend never
+    // calls setMathMode and always clamps the threadgroup size.)
+    let gpu_status = std::panic::catch_unwind(gpu::GpuEngine::probe)
+        .unwrap_or_else(|_| gpu::GpuStatus::Unavailable("Metal probe panicked".to_string()));
+
+    install_terminal_restoring_panic_hook();
+
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new();
+    let mut app = App::with_gpu_status(gpu_status);
     let tick_rate = Duration::from_millis(100);
 
     loop {
@@ -70,4 +106,82 @@ fn main() -> io::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::install_panic_hook_with;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// NOTE: this test manipulates the PROCESS-WIDE panic hook, and `cargo test`
+    /// runs tests as threads in one process. It installs, exercises, and then
+    /// restores the default hook. Keep it short.
+    ///
+    /// It records an ORDER, not merely "the previous hook ran". Measured: with
+    /// an EMPTY `fn install_terminal_restoring_panic_hook() {}` body this test's
+    /// earlier form still printed `test result: ok. 1 passed`, because the
+    /// stand-in hook below is then the installed one and latches anyway. So the
+    /// restore action is injected here and its ORDER asserted: it must run
+    /// BEFORE the previous hook, which prints the message and backtrace that are
+    /// unreadable in raw mode on the alternate screen.
+    #[test]
+    fn panic_hook_restores_terminal_and_still_calls_the_previous_hook() {
+        static SEQ: AtomicUsize = AtomicUsize::new(1);
+        static RESTORE_AT: AtomicUsize = AtomicUsize::new(0);
+        static PREV_AT: AtomicUsize = AtomicUsize::new(0);
+
+        // Stand in a hook of our own so we can prove the chain is intact. The
+        // classic bug is forgetting `prev(info)`, which silently deletes every
+        // panic message and backtrace in the binary.
+        std::panic::set_hook(Box::new(|_| {
+            PREV_AT.store(SEQ.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
+        }));
+
+        // The SAME wiring main() installs, with a restore action this test can
+        // observe.
+        install_panic_hook_with(|| {
+            RESTORE_AT.store(SEQ.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
+        });
+
+        let result = std::panic::catch_unwind(|| panic!("deliberate test panic"));
+        assert!(result.is_err(), "the panic must still unwind");
+
+        let restore_at = RESTORE_AT.load(Ordering::SeqCst);
+        let prev_at = PREV_AT.load(Ordering::SeqCst);
+        assert_ne!(restore_at, 0, "the terminal restore never ran");
+        assert_ne!(
+            prev_at, 0,
+            "the installed hook must call the previous hook, or all panic output is lost"
+        );
+        assert!(
+            restore_at < prev_at,
+            "the terminal must be restored BEFORE the previous hook prints: {restore_at} vs {prev_at}"
+        );
+
+        // Restore the default hook so unrelated tests print normally.
+        let _ = std::panic::take_hook();
+    }
+
+    #[test]
+    fn probe_result_reaches_the_app() {
+        // Whatever the machine reports, App must carry it verbatim — main() is
+        // the only place a probe happens, and a dropped result would silently
+        // mean "no GPU, forever". The single licensed exception is the env veto,
+        // which deliberately rewrites a `Ready` probe into `Disabled(UserOff)` so
+        // the config row can show the reason.
+        let status = crate::gpu::GpuEngine::probe();
+        let app = crate::app::App::with_gpu_status(status.clone());
+        let vetoed = crate::app::gpu_env_off(
+            std::env::var("VANADDY_GPU").ok().as_deref(),
+            std::env::var("VANADDY_NO_GPU").ok().as_deref(),
+        ) && matches!(status, crate::gpu::GpuStatus::Ready { .. });
+        if vetoed {
+            assert_eq!(
+                app.gpu_status,
+                crate::gpu::GpuStatus::Disabled(crate::gpu::GpuDisableReason::UserOff)
+            );
+        } else {
+            assert_eq!(app.gpu_status, status);
+        }
+    }
 }
