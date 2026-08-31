@@ -9406,10 +9406,18 @@ EOF
   Every test passes, including `search_counts_whole_batches_and_honours_stop`, this milestone's `chain_kind_search_with_no_gpu_source_is_unchanged` and `gpu_drain_stop_granularity_is_one_chunk`, and Milestone 2's four — `gpu_block_is_consumed_counted_and_cpu_verified`, `corrupted_gpu_seed_raises_fault_and_emits_nothing`, `gpu_drain_honours_stop_mid_block` and `search_with_no_gpu_source_is_unchanged` — which all still exist alongside the two new ones. Then:
 
   ```sh
-  cd /Users/shawnhopkinson/Rust/Vanaddy && git diff src/chains/mod.rs | grep -c "search_counts_whole_batches\|n % LANES as u64"
+  cd /Users/shawnhopkinson/Rust/Vanaddy
+  # The pinned test must be byte-identical to this task's base commit.
+  git show HEAD:src/chains/mod.rs \
+    | sed -n '/fn search_counts_whole_batches_and_honours_stop/,/^    }$/p' > /tmp/pinned_before.txt
+  sed -n '/fn search_counts_whole_batches_and_honours_stop/,/^    }$/p' \
+    src/chains/mod.rs > /tmp/pinned_after.txt
+  diff /tmp/pinned_before.txt /tmp/pinned_after.txt && echo "PINNED TEST UNTOUCHED"
   ```
 
-  Must print `0`.
+  Expected: no `diff` output at all, followed by `PINNED TEST UNTOUCHED`.
+
+  Do **not** substitute `cd /Users/shawnhopkinson/Rust/Vanaddy && git diff src/chains/mod.rs | grep -c "search_counts_whole_batches\|n % LANES as u64"` expecting `0`. This milestone says so twice more, in Task 5.1 Step 9 and in Task 5.3, and an earlier draft of this step contradicted both. That count turns on whether this task's edits happen to land within `git diff`'s three lines of leading context, so it passes or fails on incidental line proximity; and even when it does print `0` it has only shown that a string is absent from a diff, never that the pinned test is byte-identical. The `diff` above is the gate.
 
 - [ ] **Step 10: Lint and format.**
 
@@ -9687,7 +9695,7 @@ This is the milestone's real verification: a 1-character-prefix EVM search fed b
 
   Expected: no `diff` output at all, followed by `PINNED TEST UNTOUCHED` — across all of Milestone 5, `search_counts_whole_batches_and_honours_stop` and its `n % LANES == 0` assertion were never edited. Each `sed` range captures exactly the 16 lines of the test.
 
-  Do **not** replace this with `git diff HEAD~2 -- src/chains/mod.rs | grep -c "search_counts_whole_batches\|n % LANES as u64"` expecting `0`. Task 5.1 Step 2 and Task 5.2 Step 3 both added tests that legitimately contain `n % LANES as u64`, so across this range that count is non-zero by design and tells you nothing about the pinned test. The `diff` above is the gate.
+  Do **not** replace this with `git diff HEAD~2 -- src/chains/mod.rs | grep -c "search_counts_whole_batches\|n % LANES as u64"` expecting `0`. Task 5.1 Step 2 added a test that legitimately contains `n % LANES as u64` on two of its own lines (Task 5.2's added test does not, despite an earlier draft of this note claiming it did), so across this range that count is non-zero by design and tells you nothing about the pinned test. The `diff` above is the gate.
 
 - [ ] **Step 7: Lint and format.**
 
@@ -11903,6 +11911,24 @@ EOF
 
 This is the check the unit tests cannot make: that the UI thread never stalls, threads
 never accumulate, and at most one engine is ever live.
+
+> **If you are an agent executing this task, you cannot complete it, and you must not
+> report that you did.** Steps 2 and 4 require a human at an interactive Ratatui TUI —
+> selecting fields, typing, and then hammering Enter/Ctrl+C for 30 seconds. There is no
+> scriptable substitute, and inventing one is not the job.
+>
+> Do this instead:
+> 1. Run Steps 1 and 3 for real. The build is scriptable, and so is the sampler — point it
+>    at a **CPU-only** search you start non-interactively (`VANADDY_NO_GPU=1`) and let it
+>    sample for 30 s. That alone catches a thread leak or unbounded RSS growth, which is
+>    most of what this task is watching for.
+> 2. Report **DONE_WITH_CONCERNS**, stating plainly which steps you ran, which you could
+>    not, and what the sampler showed.
+>
+> Reporting DONE here is a false pass on the milestone's acceptance gate. Note also that
+> Task 6.10's `start_stop_restart_does_not_leak_threads` already covers thread accumulation
+> and single-engine-liveness automatically; what genuinely needs a human is UI
+> responsiveness under key-mashing, and that is the part being handed back.
 
 - [ ] **Step 1: Build the release binary.**
 

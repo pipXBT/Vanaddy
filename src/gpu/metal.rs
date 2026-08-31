@@ -217,9 +217,12 @@ impl MetalPbkdf2 {
         (self.tew, self.maxt)
     }
 
-    /// Make the `nth` command-buffer status check of the NEXT wave report a
-    /// synthetic `MTLCommandBufferStatusError` (5). The counter resets at the
-    /// start of every `run_wave`, so `nth` is always relative to one wave.
+    /// Make the `nth` command-buffer status check of every subsequent wave
+    /// report a synthetic `MTLCommandBufferStatusError` (5). The counter resets
+    /// at the start of every `run_wave`, so `nth` is always relative to one
+    /// wave — but the arming itself is sticky and is never cleared. That is the
+    /// faithful model: a removed or wedged device does not heal between waves.
+    /// A test wanting a single fault must clear the cell itself.
     #[cfg(test)]
     pub fn inject_command_buffer_fault(&self, nth: u32) {
         self.fault_at_command_buffer.set(Some(nth));
