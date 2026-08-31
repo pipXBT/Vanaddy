@@ -153,6 +153,33 @@ pub(crate) fn carve_and_send(
     true
 }
 
+/// Raise the calling thread to `QOS_CLASS_USER_INITIATED`.
+///
+/// Without this macOS may schedule the producer on an E-core, where the ~4.1 ms
+/// of per-wave phrase generation and packing stretches proportionally and the
+/// GPU starves waiting for its next wave of keys. Returns 0 on success, else an
+/// errno — the caller ignores it, because a demoted producer is slow, not wrong.
+///
+/// `QOS_CLASS_USER_INITIATED = 0x19` and the signature
+/// `int pthread_set_qos_class_self_np(qos_class_t, int)` are from
+/// `<sys/qos.h>` and `<pthread/qos.h>`; `qos_class_t` is an `unsigned int` enum.
+#[cfg(target_os = "macos")]
+pub(crate) fn set_thread_qos_user_initiated() -> i32 {
+    const QOS_CLASS_USER_INITIATED: u32 = 0x19;
+    extern "C" {
+        fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+    }
+    // SAFETY: a libSystem call taking two scalars, valid on any thread, with no
+    // pointer arguments and no ownership transfer.
+    unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0) }
+}
+
+/// No QoS classes off macOS; the producer runs at the default priority.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn set_thread_qos_user_initiated() -> i32 {
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,5 +472,47 @@ mod tests {
             "a disabled GPU must deliver nothing"
         );
         assert!(started.elapsed() < std::time::Duration::from_millis(500));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn qos_call_promotes_the_calling_thread_to_user_initiated() {
+        // On a fresh thread so the harness thread's QoS is not mutated under
+        // the other tests running in parallel.
+        let class = std::thread::spawn(|| {
+            assert_eq!(
+                set_thread_qos_user_initiated(),
+                0,
+                "pthread_set_qos_class_self_np returned a non-zero errno"
+            );
+            extern "C" {
+                fn pthread_self() -> *mut core::ffi::c_void;
+                fn pthread_get_qos_class_np(
+                    thread: *mut core::ffi::c_void,
+                    qos_class: *mut u32,
+                    relative_priority: *mut i32,
+                ) -> i32;
+            }
+            let mut class: u32 = 0;
+            let mut rel: i32 = 0;
+            // SAFETY: both pointers are valid, non-null, and correctly typed
+            // (`qos_class_t` is an `unsigned int` enum, `pthread_t` a pointer).
+            let rc = unsafe { pthread_get_qos_class_np(pthread_self(), &mut class, &mut rel) };
+            assert_eq!(rc, 0, "pthread_get_qos_class_np returned {rc}");
+            class
+        })
+        .join()
+        .expect("probe thread panicked");
+
+        assert_eq!(
+            class, 0x19,
+            "expected QOS_CLASS_USER_INITIATED (0x19), got {class:#x}"
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn qos_call_is_an_infallible_no_op_off_macos() {
+        assert_eq!(set_thread_qos_user_initiated(), 0);
     }
 }
