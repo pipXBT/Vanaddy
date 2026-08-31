@@ -164,16 +164,7 @@ where
     }
 
     for (i, seed) in full.iter().enumerate() {
-        let want = hex::encode(crate::seed::derive_seed(&mnemonics[i]));
-        let got = hex::encode(**seed);
-        if got != want {
-            return Err(SelfTestError::RingMismatch {
-                index: i,
-                phrase: phrases[i].to_string(),
-                got,
-                want,
-            });
-        }
+        check_ring_match(i, seed, &mnemonics[i], phrases[i])?;
     }
 
     if stop.load(Ordering::Relaxed) {
@@ -195,16 +186,7 @@ where
         if seed.iter().all(|&b| b == POISON) {
             return Err(SelfTestError::Poisoned { index: i });
         }
-        let want = hex::encode(crate::seed::derive_seed(&mnemonics[i]));
-        let got = hex::encode(**seed);
-        if got != want {
-            return Err(SelfTestError::RingMismatch {
-                index: i,
-                phrase: phrases[i].to_string(),
-                got,
-                want,
-            });
-        }
+        check_ring_match(i, seed, &mnemonics[i], phrases[i])?;
     }
 
     if stop.load(Ordering::Relaxed) {
@@ -234,6 +216,29 @@ where
         }
     }
 
+    Ok(())
+}
+
+/// Compare one derived seed against `crate::seed::derive_seed` (`ring`) for
+/// the mnemonic at the same index. Shared by the full-wave and ragged-wave
+/// loops above so the `RingMismatch` payload (index, phrase, got, want) is
+/// assembled in exactly one place.
+fn check_ring_match(
+    index: usize,
+    seed: &Zeroizing<[u8; 64]>,
+    mnemonic: &Mnemonic,
+    phrase: &str,
+) -> Result<(), SelfTestError> {
+    let want = hex::encode(crate::seed::derive_seed(mnemonic));
+    let got = hex::encode(**seed);
+    if got != want {
+        return Err(SelfTestError::RingMismatch {
+            index,
+            phrase: phrase.to_string(),
+            got,
+            want,
+        });
+    }
     Ok(())
 }
 
@@ -349,7 +354,13 @@ mod tests {
             }
         })
         .unwrap_err();
-        assert!(matches!(e, SelfTestError::RingMismatch { .. }), "{e:?}");
+        assert!(
+            matches!(
+                &e,
+                SelfTestError::RingMismatch { index: 0, want, .. } if want == CANONICAL_SEED_HEX
+            ),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -395,6 +406,55 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(e, SelfTestError::Backend("BufferAlloc".to_string()));
+    }
+
+    /// Corrupts only the canonical slot (index 0), before any ring cross-check
+    /// runs. This is the self-test's only non-circular anchor to an external
+    /// BIP-39 fact — `reference()` and `derive_seed` both call
+    /// `ring::pbkdf2::derive` identically, so everywhere else a fault that
+    /// disagrees with `ring` also disagrees with `ring`, which proves nothing
+    /// about `ring` itself being right. If the `CanonicalVectorMismatch` check
+    /// were ever deleted, execution would fall through to the ring
+    /// cross-check, which would (correctly, but for the wrong reason) also
+    /// catch this corruption and report `RingMismatch` instead — so this test
+    /// would fail its exact-variant assertion and catch the regression.
+    #[test]
+    fn detects_canonical_vector_mismatch() {
+        let e = self_test(&AtomicBool::new(false), |p, i, s| {
+            let mut o = reference(p, i, s)?;
+            o[0][0] ^= 0x01;
+            Ok(o)
+        })
+        .unwrap_err();
+        let want_got = {
+            let mut bytes = hex::decode(CANONICAL_SEED_HEX).expect("valid hex constant");
+            bytes[0] ^= 0x01;
+            hex::encode(bytes)
+        };
+        assert_eq!(e, SelfTestError::CanonicalVectorMismatch { got: want_got });
+    }
+
+    /// Corrupts index 250 ONLY on the count=512 wave (`p.len() ==
+    /// SELF_TEST_COUNT`), leaving the count=511 ragged wave and the
+    /// single-phrase schedule calls untouched. The ragged wave redundantly
+    /// re-checks indices 0-510 and would mask a fault there, so this is the
+    /// only test whose failure is unique to the full-wave ring loop: if that
+    /// loop were deleted, the (uncorrupted) ragged wave would find nothing
+    /// wrong and `self_test` would incorrectly return `Ok(())`.
+    #[test]
+    fn detects_full_wave_ring_mismatch_at_an_index_the_ragged_wave_never_sees() {
+        let e = self_test(&AtomicBool::new(false), |p, i, s| {
+            let mut o = reference(p, i, s)?;
+            if p.len() == SELF_TEST_COUNT {
+                o[250][0] ^= 0x01;
+            }
+            Ok(o)
+        })
+        .unwrap_err();
+        assert!(
+            matches!(e, SelfTestError::RingMismatch { index: 250, .. }),
+            "{e:?}"
+        );
     }
 
     /// The spec requires `stop` to be observed between self-test phases. A flag
