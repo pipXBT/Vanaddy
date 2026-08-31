@@ -11,7 +11,7 @@ use super::{
 };
 use crossbeam_channel::{SendTimeoutError, Sender};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Funnel every backend failure into the one sticky reason the UI reports.
@@ -178,6 +178,49 @@ pub(crate) fn set_thread_qos_user_initiated() -> i32 {
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn set_thread_qos_user_initiated() -> i32 {
     0
+}
+
+/// Sets `finished` on every exit path — clean return, `?` bail, or unwind.
+///
+/// `stop_search` must never join the GPU thread (a wedged `waitUntilCompleted`
+/// would hang the UI thread forever with the terminal in raw mode), so the app
+/// reaps by polling `is_finished()`. A flag set only at the end of a function
+/// would strand a panicked engine as un-reapable forever.
+struct FinishGuard(Arc<AtomicBool>);
+
+impl Drop for FinishGuard {
+    fn drop(&mut self) {
+        // Release: pairs with the Acquire in `GpuEngine::is_finished`, so a UI
+        // thread that observes `finished` is guaranteed to observe the fault
+        // `run_guarded` raised into `health` just before this store.
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+/// The GPU thread body wrapper.
+///
+/// A Rust unwind becomes `GpuDisableReason::Panicked` in `health` rather than a
+/// backtrace printed across the Ratatui frame in raw mode. `catch_unwind`
+/// catches Rust unwinds ONLY — an Objective-C exception is uncatchable and
+/// aborts the process, which is exactly why the backend never calls
+/// `setMathMode` and clamps the threadgroup size to the pipeline's own
+/// `maxTotalThreadsPerThreadgroup`.
+///
+/// `AssertUnwindSafe` is correct here rather than lazy: nothing the body
+/// touches is read again after it unwinds. `health` is atomics plus a set-once
+/// `OnceLock`, the channel `Sender` is dropped with the body, and the Metal
+/// objects are created inside the body and die with it.
+pub(crate) fn run_guarded<F>(health: &GpuHealth, finished: Arc<AtomicBool>, body: F)
+where
+    F: FnOnce() -> Result<(), GpuDisableReason>,
+{
+    let _guard = FinishGuard(finished);
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(Ok(())) => {}
+        Ok(Err(reason)) => health.raise(reason),
+        Err(_) => health.raise(GpuDisableReason::Panicked),
+    }
+    // `_guard` drops HERE, after `raise`. Do not reorder.
 }
 
 #[cfg(test)]
@@ -514,5 +557,89 @@ mod tests {
     #[test]
     fn qos_call_is_an_infallible_no_op_off_macos() {
         assert_eq!(set_thread_qos_user_initiated(), 0);
+    }
+
+    #[test]
+    fn a_clean_body_finishes_without_disabling_the_gpu() {
+        let health = fresh_health();
+        let finished = Arc::new(AtomicBool::new(false));
+        run_guarded(&health, finished.clone(), || Ok(()));
+
+        assert!(
+            finished.load(Ordering::Acquire),
+            "finished must be set on a clean return"
+        );
+        assert!(!health.disable.load(Ordering::Relaxed));
+        assert_eq!(health.take_reason(), None);
+    }
+
+    #[test]
+    fn an_injected_audit_mismatch_disables_the_gpu_with_that_reason() {
+        let health = fresh_health();
+        let finished = Arc::new(AtomicBool::new(false));
+        run_guarded(&health, finished.clone(), || {
+            Err(GpuDisableReason::AuditMismatch { index: 5_183 })
+        });
+
+        assert!(
+            health.disable.load(Ordering::Relaxed),
+            "a fault must disable the GPU"
+        );
+        assert_eq!(
+            health.take_reason(),
+            Some(GpuDisableReason::AuditMismatch { index: 5_183 }),
+            "the exact reason must survive to the UI"
+        );
+        assert!(
+            finished.load(Ordering::Acquire),
+            "finished must be set on a fault return"
+        );
+    }
+
+    #[test]
+    fn a_panicking_body_becomes_panicked_and_still_finishes() {
+        let health = fresh_health();
+        let finished = Arc::new(AtomicBool::new(false));
+
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        run_guarded(&health, finished.clone(), || {
+            panic!("simulated kernel-side unwrap")
+        });
+        std::panic::set_hook(prev_hook);
+
+        assert!(health.disable.load(Ordering::Relaxed));
+        assert_eq!(health.take_reason(), Some(GpuDisableReason::Panicked));
+        assert!(
+            finished.load(Ordering::Acquire),
+            "finished must be set even when the body unwinds, or the UI can never reap"
+        );
+    }
+
+    #[test]
+    fn the_fault_is_visible_to_anyone_who_sees_finished() {
+        // The ordering Milestone 6's drain_matches depends on: seeing
+        // `finished` implies seeing `disable`, so a fault never looks like an
+        // unexplained quiet death. This test polls `finished` directly rather
+        // than `.join()`-ing first: `join()` is itself a full synchronisation
+        // edge, so it would pass even if `FinishGuard::drop` used `Relaxed` or
+        // the store ran before `health.raise` -- moving the store above the
+        // `match` in `run_guarded` must turn this test red.
+        let health = Arc::new(fresh_health());
+        let finished = Arc::new(AtomicBool::new(false));
+        let h = health.clone();
+        let f = finished.clone();
+        let handle = std::thread::spawn(move || {
+            run_guarded(&h, f, || Err(GpuDisableReason::BufferAlloc));
+        });
+
+        while !finished.load(Ordering::Acquire) {
+            std::hint::spin_loop();
+        }
+        assert!(health.disable.load(Ordering::Relaxed));
+        assert_eq!(health.take_reason(), Some(GpuDisableReason::BufferAlloc));
+        handle
+            .join()
+            .expect("guarded thread must not propagate a panic");
     }
 }
