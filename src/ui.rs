@@ -759,8 +759,11 @@ mod tests {
         let mut found: Option<String> = None;
         for row in 0..buf.area.height as usize {
             let cells = &buf.content[row * w..(row + 1) * w];
-            // `Color::Yellow` appears exactly once in this file — in
-            // `render_config_form`'s `highlight` — so this cannot collide.
+            // Yellow AND bold together occur only in `render_config_form`'s
+            // `highlight`. Task 7.5 added a second Yellow (the Stats pane's
+            // "initialising…" row), which is why this tests the conjunction
+            // and not the colour alone. A future Yellow+bold span would trip
+            // the "two rows highlighted" panic below — loudly, by design.
             if !cells
                 .iter()
                 .any(|c| c.fg == Color::Yellow && c.modifier.contains(Modifier::BOLD))

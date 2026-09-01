@@ -2815,22 +2815,44 @@ mod tests {
                 .checked_sub(Duration::from_secs(10))
                 .expect("the monotonic clock is at least 10 s past boot"),
         );
-        app.counter.store(200_000, Ordering::Relaxed);
+        app.counter.store(1_000_000, Ordering::Relaxed);
         app.gpu_health
             .seeds_delivered
-            .store(136_000, Ordering::Relaxed);
+            .store(500_000, Ordering::Relaxed);
 
         let (rate, share) = app.gpu_measured_rate();
         assert!(
-            (13_400..=13_600).contains(&rate),
-            "136,000 delivered seeds over 10 s of wall time is ~13,600/s, got {rate}"
+            (49_900..=50_000).contains(&rate),
+            "500,000 delivered seeds over 10 s of wall time is ~50,000/s, got {rate}"
         );
-        assert_eq!(share, 68, "136,000 of 200,000 candidates came from the GPU");
+        assert_eq!(
+            share, 50,
+            "500,000 of 1,000,000 candidates came from the GPU"
+        );
+        // The figures above are chosen to sit FAR from the modelled constant,
+        // and that is the whole test. The plan's original numbers were 136,000
+        // seeds over 10 s = 13,600/s — exactly `EVM_GPU_SEEDS_PER_SEC` — so
+        // replacing the entire rate expression with the modelled constant
+        // passed this test and the whole suite. Measured, not modelled.
+        assert_ne!(
+            rate,
+            crate::gpu::EVM_GPU_SEEDS_PER_SEC as u64,
+            "a measured rate that equals the modelled constant proves nothing"
+        );
     }
 
     #[test]
     fn gpu_measured_rate_is_zero_before_a_search_starts() {
         let app = App::new();
+        // Load both counters first. A fresh `App` has zeroes everywhere, which
+        // makes `(0, 0)` true for a second reason and hides the early return:
+        // swapping `let Some(start) = .. else { return (0, 0) }` for a fallback
+        // clock still yields (0, 0) when there is nothing to divide. With real
+        // numbers here, only the early return can produce (0, 0).
+        app.gpu_health
+            .seeds_delivered
+            .store(500_000, Ordering::Relaxed);
+        app.counter.store(1_000_000, Ordering::Relaxed);
         assert_eq!(
             app.gpu_measured_rate(),
             (0, 0),
