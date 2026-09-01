@@ -303,6 +303,29 @@ impl App {
         Some(expected / rate)
     }
 
+    /// Measured GPU throughput: `(seeds per second, percent of all candidates
+    /// checked)`. Derived only from `GpuHealth::seeds_delivered` — which the
+    /// workers increment as they actually consume GPU blocks — over observed
+    /// wall time. NEVER modelled: mid-run throughput collapse to 3,000-7,000
+    /// seeds/s was reproducibly observed while the desktop compositor was
+    /// busy, and a modelled rate would lie by up to 4x.
+    pub fn gpu_measured_rate(&self) -> (u64, u8) {
+        let Some(start) = self.start_time else {
+            return (0, 0);
+        };
+        let secs = start.elapsed().as_secs_f64().max(0.5);
+        let gpu = self.gpu_health.seeds_delivered.load(Ordering::Relaxed);
+        let total = self.counter.load(Ordering::Relaxed);
+        // `counter` and `seeds_delivered` are two separate stores, so a UI tick
+        // can observe them out of step; clamp instead of printing 400%.
+        let share = if total == 0 {
+            0
+        } else {
+            ((gpu.min(total) as f64 / total as f64) * 100.0).round() as u8
+        };
+        ((gpu as f64 / secs) as u64, share)
+    }
+
     pub fn validate(&mut self) -> Result<(), String> {
         let charset = self.valid_charset();
         let max_len = self.max_vanity_len();
@@ -2781,6 +2804,56 @@ mod tests {
         assert!(
             app.gpu_effective(),
             "and must be effective again once the chain is EVM"
+        );
+    }
+
+    #[test]
+    fn gpu_measured_rate_is_derived_from_seeds_delivered_not_modelled() {
+        let mut app = App::new();
+        app.start_time = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(10))
+                .expect("the monotonic clock is at least 10 s past boot"),
+        );
+        app.counter.store(200_000, Ordering::Relaxed);
+        app.gpu_health
+            .seeds_delivered
+            .store(136_000, Ordering::Relaxed);
+
+        let (rate, share) = app.gpu_measured_rate();
+        assert!(
+            (13_400..=13_600).contains(&rate),
+            "136,000 delivered seeds over 10 s of wall time is ~13,600/s, got {rate}"
+        );
+        assert_eq!(share, 68, "136,000 of 200,000 candidates came from the GPU");
+    }
+
+    #[test]
+    fn gpu_measured_rate_is_zero_before_a_search_starts() {
+        let app = App::new();
+        assert_eq!(
+            app.gpu_measured_rate(),
+            (0, 0),
+            "no elapsed time means no measurement — never a modelled guess"
+        );
+    }
+
+    #[test]
+    fn gpu_measured_rate_share_cannot_exceed_100_percent() {
+        let mut app = App::new();
+        app.start_time = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("the monotonic clock is at least 1 s past boot"),
+        );
+        // The worker increments `counter` and `seeds_delivered` separately, so
+        // a UI tick can land between the two stores.
+        app.counter.store(100, Ordering::Relaxed);
+        app.gpu_health.seeds_delivered.store(400, Ordering::Relaxed);
+        assert_eq!(
+            app.gpu_measured_rate().1,
+            100,
+            "share is clamped, never 400%"
         );
     }
 }
