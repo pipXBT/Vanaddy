@@ -184,11 +184,16 @@ impl App {
         app
     }
 
+    /// Chain, match position, vanity (+ suffix when StartsAndEndsWith), case,
+    /// GPU, threads. GPU sits at `field_count() - 2` — between Case and
+    /// Threads — so the Case arm's hard-coded `if both { 4 } else { 3 }` and
+    /// the Threads arm's `field_count() - 1` both stay correct, and
+    /// `is_text_field` needs no change at all.
     pub fn field_count(&self) -> usize {
         if matches!(self.match_position, MatchPosition::StartsAndEndsWith) {
-            6
+            7
         } else {
-            5
+            6
         }
     }
 
@@ -1098,6 +1103,175 @@ mod tests {
         app.shutdown_gpu(Duration::from_millis(600));
         assert!(before.elapsed() < Duration::from_millis(50));
         assert!(app.gpu_engines.is_empty());
+    }
+
+    /// Field identity in this form is a bare integer, and three places do
+    /// arithmetic on it: `is_text_field` (src/app.rs:84-91), the Case arm
+    /// (src/app.rs:512, `if both { 4 } else { 3 }`) and the Threads arm
+    /// (src/app.rs:520, `field_count() - 1`). The literals below ARE the
+    /// contract — do not rewrite them in terms of `field_count()`, that is
+    /// exactly the tautology this test exists to avoid.
+    #[test]
+    fn gpu_field_index_is_stable_across_match_positions() {
+        let mut app = App::new();
+
+        app.match_position = MatchPosition::StartsWith;
+        assert_eq!(
+            app.field_count(),
+            6,
+            "StartsWith fields: chain, match, vanity, case, gpu, threads"
+        );
+        assert_eq!(app.field_count() - 2, 4, "GPU is field 4 for StartsWith");
+        assert_eq!(
+            app.field_count() - 1,
+            5,
+            "Threads is field 5 for StartsWith"
+        );
+
+        app.match_position = MatchPosition::EndsWith;
+        assert_eq!(app.field_count(), 6, "EndsWith has the same six fields");
+        assert_eq!(app.field_count() - 2, 4, "GPU is field 4 for EndsWith");
+
+        app.match_position = MatchPosition::StartsAndEndsWith;
+        assert_eq!(
+            app.field_count(),
+            7,
+            "StartsAndEndsWith adds the suffix field"
+        );
+        assert_eq!(
+            app.field_count() - 2,
+            5,
+            "GPU is field 5 for StartsAndEndsWith"
+        );
+        assert_eq!(
+            app.field_count() - 1,
+            6,
+            "Threads is field 6 for StartsAndEndsWith"
+        );
+
+        // The GPU index must never land on the Case field, whose arm is
+        // hard-coded to `if both { 4 } else { 3 }`.
+        for (pos, case_ix) in [
+            (MatchPosition::StartsWith, 3usize),
+            (MatchPosition::EndsWith, 3),
+            (MatchPosition::StartsAndEndsWith, 4),
+        ] {
+            app.match_position = pos;
+            assert_ne!(
+                app.field_count() - 2,
+                case_ix,
+                "the GPU field must not collide with the Case field"
+            );
+        }
+
+        // GPU is a toggle, so `q` must still quit from it; Threads is text.
+        for pos in [
+            MatchPosition::StartsWith,
+            MatchPosition::EndsWith,
+            MatchPosition::StartsAndEndsWith,
+        ] {
+            app.match_position = pos;
+            app.active_field = app.field_count() - 2;
+            assert!(!app.is_text_field(), "the GPU field is a toggle, not text");
+            app.active_field = app.field_count() - 1;
+            assert!(
+                app.is_text_field(),
+                "the Threads field must stay a text field"
+            );
+        }
+    }
+
+    /// Navigation is modulo `field_count()`; if the count is wrong the new
+    /// field is simply unreachable and nothing else complains.
+    #[test]
+    fn tab_visits_every_field_and_wraps_including_the_new_gpu_field() {
+        let mut app = App::new();
+        app.match_position = MatchPosition::StartsWith;
+
+        let mut seen = vec![app.active_field];
+        for _ in 0..5 {
+            handle_key_event(
+                &mut app,
+                event::KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            );
+            seen.push(app.active_field);
+        }
+        assert_eq!(
+            seen,
+            vec![0, 1, 2, 3, 4, 5],
+            "Tab must reach all six fields"
+        );
+
+        handle_key_event(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        );
+        assert_eq!(app.active_field, 0, "Tab wraps from Threads back to Chain");
+
+        handle_key_event(
+            &mut app,
+            event::KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE),
+        );
+        assert_eq!(app.active_field, 5, "BackTab from Chain lands on Threads");
+    }
+
+    /// The Threads field moved from index 4/5 to 5/6. Literal indices, so a
+    /// wrong `field_count()` makes this fail instead of silently agreeing.
+    #[test]
+    fn threads_field_still_edits_at_its_new_index() {
+        let mut app = App::new();
+
+        app.match_position = MatchPosition::StartsWith;
+        app.active_field = 5;
+        app.thread_count.clear();
+        handle_key_event(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            app.thread_count, "4",
+            "Threads is field 5 once the GPU field exists"
+        );
+
+        app.match_position = MatchPosition::StartsAndEndsWith;
+        app.active_field = 6;
+        app.thread_count.clear();
+        handle_key_event(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Char('8'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            app.thread_count, "8",
+            "Threads is field 6 with both prefix and suffix"
+        );
+    }
+
+    /// `q` and `h` are gated on `is_text_field()`. Before the GPU field
+    /// existed, index 4 WAS the Threads text field, so both keys were inert
+    /// there — proof that this guard is index-sensitive.
+    #[test]
+    fn q_quits_and_h_opens_help_from_the_gpu_field() {
+        let mut app = App::new();
+        app.match_position = MatchPosition::StartsWith;
+        app.active_field = 4; // GPU
+
+        handle_key_event(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+        );
+        assert!(app.show_help, "h must still open help from the GPU field");
+
+        handle_key_event(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+        assert!(!app.show_help, "any key dismisses the help popup");
+
+        handle_key_event(
+            &mut app,
+            event::KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+        );
+        assert!(app.should_quit, "q must still quit from the GPU field");
     }
 
     /// The half the CPU-only test above cannot reach. That test sets
