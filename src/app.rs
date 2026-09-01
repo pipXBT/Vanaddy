@@ -28,6 +28,11 @@ use std::path::PathBuf;
 /// carries the honest count and the CSV carries every row, so nothing is lost.
 pub const MATCH_CAP: usize = 500;
 
+/// Measured CPU cost of turning ONE GPU-supplied seed into an EVM candidate:
+/// BIP-32 + kG + Keccak, everything PBKDF2 does not cover. This is the tail the
+/// GPU cannot offload, and at 13,600 seeds/s it displaces ~0.69 of a core.
+const EVM_GPU_TAIL_SECS: f64 = 50.5e-6;
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum AppState {
     Configuring,
@@ -288,8 +293,46 @@ impl App {
         }
     }
 
+    /// Pre-search throughput estimate, attempts/sec. `projected_seconds` uses
+    /// this ONLY until a search has actually started; after that it uses the
+    /// live measured rate, which is automatically correct because GPU
+    /// candidates increment the same `counter`.
+    ///
+    /// The GPU does not add its seeds/s for free: every GPU seed still costs
+    /// the CPU `EVM_GPU_TAIL_SECS`, so the CPU workers lose that fraction of a
+    /// core. Gate on `gpu_effective()` alone — the status here is always
+    /// `Ready` (the pre-search resting state), never `Running`, so also
+    /// requiring `Running` would make this branch dead code.
+    ///
+    /// Honest hybrid on the M1 defaults: ~23,000-26,000 cand/s, about 2x.
+    /// The number this returns is higher than that, because
+    /// `single_thread_rate() * threads` is ALREADY ~1.6x optimistic on a
+    /// 4P+4E machine. That pre-existing optimism is not fixed here — it would
+    /// change ETA behaviour for all five chains — but do not attribute the
+    /// post-Enter ETA jump to the GPU.
+    fn estimated_rate(&self) -> f64 {
+        let threads = self.thread_count.parse::<f64>().unwrap_or(1.0).max(1.0);
+        let per_thread = self.single_thread_rate();
+        if !self.gpu_effective() {
+            return per_thread * threads;
+        }
+        // Single source of truth — Task 4.8 measures and owns this number.
+        let gpu_rate = crate::gpu::EVM_GPU_SEEDS_PER_SEC;
+        let tail = Self::gpu_tail_cores(gpu_rate, threads);
+        gpu_rate + (threads - tail) * per_thread
+    }
+
+    /// The GPU's CPU tail, in cores. Clamped: at a hypothetical GPU rate above
+    /// 1/EVM_GPU_TAIL_SECS ≈ 19,800 seeds/s the tail would exceed the machine,
+    /// and an unclamped `threads - tail` would go negative. Extracted so the
+    /// clamp can be tested directly — through `estimated_rate` it is unreachable
+    /// at the defaults.
+    fn gpu_tail_cores(gpu_rate: f64, threads: f64) -> f64 {
+        (gpu_rate * EVM_GPU_TAIL_SECS).min(threads)
+    }
+
     /// Projected seconds until a match. Uses live rate if searching,
-    /// otherwise estimates from chain throughput × thread count.
+    /// otherwise estimates from chain throughput × thread count (× GPU).
     pub fn projected_seconds(&self) -> Option<f64> {
         let expected = self.expected_attempts()? as f64;
         let rate = if let Some(start) = self.start_time {
@@ -297,8 +340,7 @@ impl App {
             let count = self.counter.load(Ordering::Relaxed) as f64;
             (count / secs).max(1.0)
         } else {
-            let threads = self.thread_count.parse::<u64>().unwrap_or(1).max(1) as f64;
-            self.single_thread_rate() * threads
+            self.estimated_rate()
         };
         Some(expected / rate)
     }
@@ -2876,6 +2918,121 @@ mod tests {
             app.gpu_measured_rate().1,
             100,
             "share is clamped, never 400%"
+        );
+    }
+
+    #[test]
+    fn estimated_rate_without_gpu_is_unchanged() {
+        let mut app = App::new();
+        app.chain = ChainKind::Evm;
+        app.thread_count = "8".to_string();
+        app.gpu_requested = false;
+        // src/app.rs:152 — EVM measures ~321 us/gen on an M1 P-core.
+        assert_eq!(
+            app.estimated_rate(),
+            3_115.0 * 8.0,
+            "with no GPU this must stay exactly threads x per-thread"
+        );
+    }
+
+    #[test]
+    fn estimated_rate_with_gpu_adds_the_gpu_and_charges_for_its_cpu_tail() {
+        let mut app = App::new();
+        app.chain = ChainKind::Evm;
+        app.thread_count = "8".to_string();
+        app.gpu_status = GpuStatus::Ready {
+            device: "Apple M1".to_string(),
+        };
+        app.gpu_requested = true;
+
+        let cpu_only = 3_115.0 * 8.0;
+        let hybrid = app.estimated_rate();
+        assert!(
+            hybrid > cpu_only,
+            "the GPU must raise the estimate: {hybrid} vs {cpu_only}"
+        );
+        assert!(
+            hybrid < crate::gpu::EVM_GPU_SEEDS_PER_SEC + cpu_only,
+            "every GPU seed still costs the CPU its BIP-32 + Keccak tail; that must be \
+             charged, not free: {hybrid}"
+        );
+        // MAGNITUDE, not just direction. The band above is ~24,920..38,520 wide,
+        // so a typo of 50.5e-9 for 50.5e-6 in EVM_GPU_TAIL_SECS passes it — and
+        // passes every other test in this task. Expressed in cores so it still
+        // holds after Task 4.8 Step 5 re-measures EVM_GPU_SEEDS_PER_SEC.
+        let displaced_cores = (cpu_only - (hybrid - crate::gpu::EVM_GPU_SEEDS_PER_SEC)) / 3_115.0;
+        assert!(
+            (0.55..0.85).contains(&displaced_cores),
+            "the GPU's CPU tail must cost ~0.69 of a core at 13.6k seeds/s, got {displaced_cores}"
+        );
+    }
+
+    #[test]
+    fn estimated_rate_ignores_the_gpu_for_a_non_evm_chain() {
+        let mut app = App::new();
+        app.chain = ChainKind::Solana;
+        app.thread_count = "8".to_string();
+        app.gpu_status = GpuStatus::Ready {
+            device: "Apple M1".to_string(),
+        };
+        app.gpu_requested = true;
+        // src/app.rs:151 — Solana measures ~288 us/gen.
+        assert_eq!(
+            app.estimated_rate(),
+            3_470.0 * 8.0,
+            "GPU offload is EVM-only"
+        );
+    }
+
+    /// Tests the clamp DIRECTLY. Going through `estimated_rate` cannot: at
+    /// `threads = 1` the tail is 13,600 x 50.5e-6 = 0.687 < 1, so the clamp
+    /// never binds, and with the clamp in place `r >= EVM_GPU_SEEDS_PER_SEC`
+    /// is true by construction for every input.
+    #[test]
+    fn gpu_tail_cores_is_clamped_to_the_machine() {
+        assert!((App::gpu_tail_cores(13_600.0, 8.0) - 0.687).abs() < 0.01);
+        assert_eq!(
+            App::gpu_tail_cores(1.0e6, 1.0),
+            1.0,
+            "unclamped this would be 50.5 cores"
+        );
+    }
+
+    #[test]
+    fn estimated_rate_survives_an_unparseable_thread_count() {
+        let mut app = App::new();
+        app.chain = ChainKind::Evm;
+        app.thread_count = String::new();
+        app.gpu_requested = false;
+        let r = app.estimated_rate();
+        assert!(
+            r.is_finite() && r > 0.0,
+            "a half-typed thread count must not poison the ETA: {r}"
+        );
+    }
+
+    #[test]
+    fn projected_seconds_uses_the_hybrid_estimate_before_a_search_starts() {
+        let mut app = App::new();
+        app.chain = ChainKind::Evm;
+        app.thread_count = "8".to_string();
+        app.vanity_prefix = "abc".to_string();
+        app.gpu_status = GpuStatus::Ready {
+            device: "Apple M1".to_string(),
+        };
+
+        app.gpu_requested = false;
+        let cpu = app
+            .projected_seconds()
+            .expect("3 hex chars is a finite ETA");
+        app.gpu_requested = true;
+        let hybrid = app
+            .projected_seconds()
+            .expect("3 hex chars is a finite ETA");
+
+        assert!(
+            hybrid < cpu,
+            "the GPU must shorten the pre-search ETA: {hybrid} vs {cpu}"
         );
     }
 }
