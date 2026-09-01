@@ -1015,6 +1015,48 @@ fn handle_field_input(app: &mut App, key: event::KeyEvent) {
             _ => {}
         },
 
+        // GPU offload (toggle with Left/Right or y/n) — always second-to-last,
+        // between Case and Threads. Turning it OFF always works. Turning it ON
+        // is refused LOUDLY — visibly disabled, never silently ignored — when
+        // there is no device, when a fault disabled it for this process, or
+        // when the selected chain is not EVM. `gpu_requested` is deliberately
+        // NOT cleared when the chain changes: the preference survives a
+        // round-trip through Solana and back to EVM.
+        f if f == app.field_count() - 2 => {
+            let want = match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => Some(true),
+                KeyCode::Char('n') | KeyCode::Char('N') => Some(false),
+                KeyCode::Left | KeyCode::Right => Some(!app.gpu_requested),
+                _ => None,
+            };
+            match want {
+                None => {}
+                Some(false) => {
+                    app.gpu_requested = false;
+                    app.error_message = None;
+                }
+                Some(true) => {
+                    // Precedence: no device beats disabled beats wrong chain.
+                    let refusal = match &app.gpu_status {
+                        GpuStatus::Unavailable(r) => Some(format!("GPU unavailable: {r}")),
+                        GpuStatus::Disabled(r) => Some(format!("GPU disabled this session: {r:?}")),
+                        _ if app.chain != ChainKind::Evm => Some(format!(
+                            "GPU offload is EVM-only — {} runs on CPU",
+                            app.chain.label()
+                        )),
+                        _ => None,
+                    };
+                    match refusal {
+                        Some(msg) => app.error_message = Some(msg),
+                        None => {
+                            app.gpu_requested = true;
+                            app.error_message = None;
+                        }
+                    }
+                }
+            }
+        }
+
         // Thread count (always last field)
         f if f == app.field_count() - 1 => match key.code {
             KeyCode::Char(c) if c.is_ascii_digit() => {
@@ -2611,5 +2653,127 @@ mod tests {
             "an abandoned engine must still have been signalled to stop"
         );
         drop(rx);
+    }
+
+    use crate::gpu::{GpuDisableReason, GpuStatus};
+
+    fn press(app: &mut App, code: KeyCode) {
+        handle_key_event(app, event::KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    fn app_on_gpu_field() -> App {
+        let mut app = App::new();
+        app.chain = ChainKind::Evm;
+        app.match_position = MatchPosition::StartsWith;
+        app.gpu_status = GpuStatus::Ready {
+            device: "Apple M1".to_string(),
+        };
+        app.gpu_requested = false;
+        app.error_message = None;
+        app.active_field = app.field_count() - 2;
+        app
+    }
+
+    #[test]
+    fn gpu_field_toggles_with_y_n_and_arrows() {
+        let mut app = app_on_gpu_field();
+
+        press(&mut app, KeyCode::Char('y'));
+        assert!(app.gpu_requested, "y turns GPU offload on");
+        press(&mut app, KeyCode::Char('n'));
+        assert!(!app.gpu_requested, "n turns GPU offload off");
+        press(&mut app, KeyCode::Right);
+        assert!(app.gpu_requested, "Right toggles GPU offload on");
+        press(&mut app, KeyCode::Left);
+        assert!(!app.gpu_requested, "Left toggles GPU offload off");
+        press(&mut app, KeyCode::Char('Y'));
+        assert!(app.gpu_requested, "uppercase Y works too");
+    }
+
+    #[test]
+    fn gpu_field_refuses_to_turn_on_for_a_non_evm_chain() {
+        let mut app = app_on_gpu_field();
+        app.chain = ChainKind::Solana;
+
+        press(&mut app, KeyCode::Char('y'));
+
+        assert!(!app.gpu_requested, "GPU offload is EVM-only");
+        let msg = app
+            .error_message
+            .clone()
+            .expect("refusal must be visible, not silent");
+        assert!(msg.contains("EVM-only"), "unhelpful refusal: {msg}");
+        assert!(msg.contains("Solana"), "refusal must name the chain: {msg}");
+    }
+
+    #[test]
+    fn gpu_field_refuses_to_turn_on_when_there_is_no_device() {
+        let mut app = app_on_gpu_field();
+        app.gpu_status = GpuStatus::Unavailable("no Metal device".to_string());
+
+        press(&mut app, KeyCode::Char('y'));
+
+        assert!(
+            !app.gpu_requested,
+            "cannot request a GPU that does not exist"
+        );
+        let msg = app.error_message.clone().expect("refusal must be visible");
+        assert!(
+            msg.contains("no Metal device"),
+            "refusal must carry the reason: {msg}"
+        );
+    }
+
+    #[test]
+    fn gpu_field_refuses_to_turn_on_after_a_fault_disabled_it() {
+        let mut app = app_on_gpu_field();
+        app.gpu_status = GpuStatus::Disabled(GpuDisableReason::AuditMismatch { index: 5183 });
+
+        press(&mut app, KeyCode::Char('y'));
+
+        assert!(
+            !app.gpu_requested,
+            "a disabled GPU is sticky for the process"
+        );
+        let msg = app.error_message.clone().expect("refusal must be visible");
+        assert!(
+            msg.contains("AuditMismatch"),
+            "refusal must carry the reason: {msg}"
+        );
+    }
+
+    #[test]
+    fn turning_the_gpu_off_always_works_and_clears_the_error() {
+        let mut app = app_on_gpu_field();
+        app.chain = ChainKind::Monero;
+        app.error_message = Some("stale complaint".to_string());
+
+        press(&mut app, KeyCode::Char('n'));
+
+        assert!(!app.gpu_requested);
+        assert!(
+            app.error_message.is_none(),
+            "off is never refused, and clears the error"
+        );
+    }
+
+    #[test]
+    fn gpu_preference_survives_a_round_trip_through_another_chain() {
+        let mut app = app_on_gpu_field();
+        press(&mut app, KeyCode::Char('y'));
+        assert!(app.gpu_requested);
+
+        app.active_field = 0; // Chain
+        press(&mut app, KeyCode::Char('1')); // Solana
+        press(&mut app, KeyCode::Char('2')); // back to EVM
+
+        assert!(
+            app.gpu_requested,
+            "the preference must survive a trip through Solana"
+        );
+        assert!(
+            app.gpu_effective(),
+            "and must be effective again once the chain is EVM"
+        );
     }
 }
