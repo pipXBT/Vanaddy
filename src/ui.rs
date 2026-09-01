@@ -823,6 +823,87 @@ mod tests {
         }
     }
 
+    /// Small-terminal rendering, which nothing else covers. `render_help_popup`
+    /// and the Stats block both size themselves against the terminal area, and
+    /// ratatui clips rather than erroring — so a layout that underflows on a
+    /// short terminal is silent until a user hits it. 80x24 is the classic
+    /// floor. Task 7.8 hands the colour and timing judgements to a human; this
+    /// is the part of that walkthrough a machine can hold.
+    #[test]
+    fn every_pane_survives_an_80_by_24_terminal() {
+        let mut app = App::new();
+        app.chain = ChainKind::Evm;
+        app.gpu_status = GpuStatus::Ready {
+            device: "Apple M1".to_string(),
+        };
+        app.gpu_requested = true;
+
+        // The last two are absurd as terminals and deliberate as inputs: they
+        // are what makes the saturating arithmetic in the pane sizing
+        // load-bearing. Swap any `saturating_sub` in `render_help_popup` for a
+        // plain `-` and this test panics on them.
+        for (w, h) in [
+            (80u16, 24u16),
+            (100, 30),
+            (120, 40),
+            (60, 20),
+            (30, 6),
+            (20, 3),
+        ] {
+            for help in [false, true] {
+                app.show_help = help;
+                for state in [AppState::Configuring, AppState::Searching] {
+                    app.state = state;
+                    // The assertion is that this returns at all: a wrapping
+                    // subtraction in any pane's size arithmetic panics here.
+                    let frame = render_to_string(&app, w, h);
+                    assert_eq!(
+                        frame.lines().count(),
+                        h as usize,
+                        "a {w}x{h} frame must have {h} rows"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The acceptance criterion deferred from Task 6.11, which could not be
+    /// checked at Milestone 6 because `src/ui.rs` had no GPU surface at all.
+    /// Two GPU rows in one frame would mean two engines were being reported.
+    /// Note `"GPU rate:"` does not contain `"GPU:"`, so the two labels count
+    /// separately and neither can mask the other.
+    #[test]
+    fn one_gpu_row_per_frame_never_two() {
+        let mut app = App::new();
+        app.chain = ChainKind::Evm;
+        app.gpu_status = GpuStatus::Ready {
+            device: "Apple M1".to_string(),
+        };
+        app.gpu_requested = true;
+
+        for state in [AppState::Configuring, AppState::Searching] {
+            app.state = state;
+            for pos in [
+                MatchPosition::StartsWith,
+                MatchPosition::EndsWith,
+                MatchPosition::StartsAndEndsWith,
+            ] {
+                app.match_position = pos;
+                let frame = render_to_string(&app, 120, 40);
+                let config_rows = frame.lines().filter(|r| r.contains("GPU:")).count();
+                let stats_rows = frame.lines().filter(|r| r.contains("GPU rate:")).count();
+                assert_eq!(
+                    config_rows, 1,
+                    "exactly one config GPU row per frame, got {config_rows}\n{frame}"
+                );
+                assert!(
+                    stats_rows <= 1,
+                    "never two GPU rate rows in one frame, got {stats_rows}\n{frame}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn format_count_small() {
         assert_eq!(format_count(0), "0");
