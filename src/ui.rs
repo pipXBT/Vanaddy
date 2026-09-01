@@ -686,6 +686,74 @@ mod tests {
         }
     }
 
+    /// The row whose cells carry the highlight style (yellow + bold).
+    ///
+    /// `render_to_string` reads only `cell.symbol()`, so it is blind to WHICH
+    /// row is highlighted. The off-by-one this milestone repaired — Threads
+    /// drawn with the GPU field's index, so the wrong label lights up while
+    /// keystrokes go elsewhere — survives every symbol-only test in this file.
+    /// Reading the style back is the only thing that pins it.
+    fn highlighted_row(app: &App, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("TestBackend never fails");
+        terminal
+            .draw(|f| ui(f, app))
+            .expect("TestBackend never fails");
+        let buf = terminal.backend().buffer();
+        let w = buf.area.width as usize;
+        let mut found: Option<String> = None;
+        for row in 0..buf.area.height as usize {
+            let cells = &buf.content[row * w..(row + 1) * w];
+            // `Color::Yellow` appears exactly once in this file — in
+            // `render_config_form`'s `highlight` — so this cannot collide.
+            if !cells
+                .iter()
+                .any(|c| c.fg == Color::Yellow && c.modifier.contains(Modifier::BOLD))
+            {
+                continue;
+            }
+            let text: String = cells.iter().map(|c| c.symbol()).collect();
+            if let Some(prev) = &found {
+                panic!("two rows highlighted at once:\n{prev}\n{text}");
+            }
+            found = Some(text);
+        }
+        found.expect("no row carries the highlight style")
+    }
+
+    /// Pins the config form's `style_for` arguments to `App`'s field indices,
+    /// for both layouts, by reading the rendered highlight back. Without it,
+    /// swapping any `style_for` argument in `render_config_form` passes the
+    /// entire suite — verified by mutation, not assumed.
+    #[test]
+    fn the_highlighted_row_tracks_the_active_field() {
+        let mut app = App::new();
+        app.chain = ChainKind::Evm;
+
+        for pos in [
+            MatchPosition::StartsWith,
+            MatchPosition::EndsWith,
+            MatchPosition::StartsAndEndsWith,
+        ] {
+            app.match_position = pos;
+            let n = app.field_count();
+
+            app.active_field = n - 2;
+            let row = highlighted_row(&app, 100, 40);
+            assert!(
+                row.contains("GPU:"),
+                "field_count()-2 must light the GPU row (field_count()={n}), got {row:?}"
+            );
+
+            app.active_field = n - 1;
+            let row = highlighted_row(&app, 100, 40);
+            assert!(
+                row.contains("Threads:"),
+                "field_count()-1 must light the Threads row (field_count()={n}), got {row:?}"
+            );
+        }
+    }
+
     #[test]
     fn format_count_small() {
         assert_eq!(format_count(0), "0");
