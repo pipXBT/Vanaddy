@@ -269,10 +269,57 @@ fn gpu_form_line(app: &App, label_style: Style) -> Line<'static> {
     ])
 }
 
-/// Rows the stats block needs: 4 fixed lines, the optional Expected/ETA lines, plus borders.
+/// The single source of truth for the Stats pane's GPU row: `render_stats`
+/// draws it and `stats_height` counts it, so the two can never disagree about
+/// whether the row is there. Exactly one row — a fault REPLACES the live rate,
+/// it never adds a second `GPU rate:` line. `None` means no row at all.
+///
+/// The label is `GPU rate:`, NOT `GPU:`. The config form's row (Task 7.3) is
+/// labelled ` GPU:      ` and renders in the same left-hand panel, above this
+/// one; a test that greps the rendered frame for `GPU:` would find the config
+/// row first. Both labels are 11 columns, so the value columns still line up.
+///
+/// Every row here is kept short on purpose. `render_stats` builds a
+/// `Paragraph` with NO `.wrap()`, and the left panel is 25% of the terminal
+/// minus two border columns — 23 usable columns at 100 chars wide. A row that
+/// spells out the device name and the reason payload is 34 and 80 columns
+/// long, so the measured rate and the share — the entire point of this row —
+/// get clipped off the pane. The device name already appears on the config
+/// form's ` GPU:      ` row above.
+fn gpu_stats_line(app: &App) -> Option<(String, Color)> {
+    match &app.gpu_status {
+        // This run must actually own the GPU. `stop_search` clears `gpu_rx` but
+        // deliberately leaves `gpu_status` alone, so a Running status outlives
+        // the run that produced it; without this arm a following CPU-only run
+        // renders the previous run's seeds_delivered against a fresh counter.
+        GpuStatus::Initializing | GpuStatus::Running { .. } if app.gpu_rx.is_none() => None,
+        GpuStatus::Disabled(r) => Some((
+            format!(" GPU rate: OFF — {} (CPU cont.)", gpu_reason_label(r)),
+            Color::Red,
+        )),
+        GpuStatus::Initializing => Some((" GPU rate: initialising…".to_string(), Color::Yellow)),
+        GpuStatus::Running { .. } => {
+            // MEASURED per delivery, never modelled — see App::gpu_measured_rate.
+            let (rate, share) = app.gpu_measured_rate();
+            Some((
+                format!(" GPU rate: {}/s ({share}%)", format_count(rate)),
+                Color::Green,
+            ))
+        }
+        // Probed but not started, or no device: the config form says so, the
+        // Stats pane stays quiet.
+        GpuStatus::Ready { .. } | GpuStatus::Unavailable(_) => None,
+    }
+}
+
+/// Rows the stats block needs: 4 fixed lines, the optional GPU row, the
+/// optional Expected/ETA lines, plus borders. The GPU row is counted through
+/// `gpu_stats_line` — the same function `render_stats` draws from — so the
+/// height can never disagree with what is rendered.
 fn stats_height(app: &App) -> u16 {
-    let optional =
-        u16::from(app.expected_attempts().is_some()) + u16::from(app.projected_seconds().is_some());
+    let optional = u16::from(app.expected_attempts().is_some())
+        + u16::from(app.projected_seconds().is_some())
+        + u16::from(gpu_stats_line(app).is_some());
     4 + optional + 2
 }
 
@@ -307,6 +354,14 @@ fn render_stats(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::White),
         )),
     ];
+
+    // Directly under Rate: the GPU's contribution to the rate above it.
+    if let Some((text, color)) = gpu_stats_line(app) {
+        lines.insert(
+            2,
+            Line::from(Span::styled(text, Style::default().fg(color))),
+        );
+    }
 
     if let Some(attempts) = expected {
         lines.push(Line::from(Span::styled(
@@ -790,5 +845,185 @@ mod tests {
     #[test]
     fn format_duration_days() {
         assert_eq!(format_duration(90_000.0), "1d 1h");
+    }
+
+    /// A `gpu_rx` for the Stats-pane tests. `gpu_stats_line` only asks whether
+    /// this run still owns the channel, so a disconnected receiver is enough;
+    /// what matters is that it is `Some`, exactly as `start_search` leaves it.
+    fn test_gpu_rx() -> crate::gpu::GpuRx {
+        let (_tx, rx) = crossbeam_channel::bounded::<Box<crate::gpu::SeedBlock>>(1);
+        rx
+    }
+
+    fn searching_app_with_gpu(status: GpuStatus) -> App {
+        let mut app = App::new();
+        app.chain = ChainKind::Evm;
+        app.gpu_requested = true;
+        app.gpu_status = status;
+        // This run owns the GPU channel. `gpu_stats_line` refuses to draw a
+        // live row without it, so every Running/Initializing case needs one.
+        app.gpu_rx = Some(test_gpu_rx());
+        app.state = AppState::Searching;
+        app.start_time = Some(
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(10))
+                .expect("the monotonic clock is at least 10 s past boot"),
+        );
+        app.counter
+            .store(200_000, std::sync::atomic::Ordering::Relaxed);
+        app.gpu_health
+            .seeds_delivered
+            .store(136_000, std::sync::atomic::Ordering::Relaxed);
+        app
+    }
+
+    #[test]
+    fn gpu_stats_line_is_absent_when_there_is_nothing_to_report() {
+        let mut app = App::new();
+        app.gpu_status = GpuStatus::Ready {
+            device: "Apple M1".to_string(),
+        };
+        assert!(
+            gpu_stats_line(&app).is_none(),
+            "a probed-but-idle GPU gets no stats row"
+        );
+
+        app.gpu_status = GpuStatus::Unavailable("not supported on this target".to_string());
+        assert!(
+            gpu_stats_line(&app).is_none(),
+            "an absent GPU gets no stats row"
+        );
+    }
+
+    #[test]
+    fn gpu_stats_line_is_absent_once_this_run_released_the_gpu() {
+        let mut app = searching_app_with_gpu(GpuStatus::Running {
+            device: "Apple M1".to_string(),
+        });
+        app.gpu_rx = None; // what stop_search leaves behind
+        assert!(
+            gpu_stats_line(&app).is_none(),
+            "a stale Running status must not draw a live row"
+        );
+    }
+
+    #[test]
+    fn gpu_stats_line_reports_the_measured_rate_and_share() {
+        let app = searching_app_with_gpu(GpuStatus::Running {
+            device: "Apple M1".to_string(),
+        });
+        let (text, color) = gpu_stats_line(&app).expect("a running GPU gets a stats row");
+        assert!(
+            text.contains("13.6K/s"),
+            "must show the measured rate: {text}"
+        );
+        assert!(
+            text.contains("(68%)"),
+            "must show the GPU's share of candidates: {text}"
+        );
+        assert_eq!(color, Color::Green);
+    }
+
+    /// NOT "without control characters": via `{r:?}` the text can never carry
+    /// one, so that assertion could not fail. `sanitize_status_text_flattens_
+    /// control_characters` covers the helper directly. What is load-bearing
+    /// here is that the row shows the BARE variant label and stays short
+    /// enough to survive a pane that does not wrap.
+    #[test]
+    fn gpu_stats_line_reports_a_fault_without_the_raw_diagnostic() {
+        let app = searching_app_with_gpu(GpuStatus::Disabled(GpuDisableReason::ShaderCompile(
+            "program_source:14:3: error: use of undeclared identifier\nnote: here".to_string(),
+        )));
+        let (text, color) = gpu_stats_line(&app).expect("a fault always gets a stats row");
+        assert!(text.contains("OFF"), "must say the GPU is off: {text}");
+        assert!(
+            text.contains("ShaderCompile"),
+            "must carry the reason: {text}"
+        );
+        assert!(
+            text.contains("CPU cont."),
+            "the user must know the search did not die: {text}"
+        );
+        assert!(
+            !text.contains("program_source"),
+            "the raw compiler diagnostic must never reach the pane: {text}"
+        );
+        assert!(
+            text.chars().count() <= 48,
+            "the fault row must stay bounded, got {}: {text}",
+            text.chars().count()
+        );
+        assert_eq!(color, Color::Red);
+    }
+
+    #[test]
+    fn gpu_stats_line_announces_initialisation() {
+        let app = searching_app_with_gpu(GpuStatus::Initializing);
+        let (text, _) = gpu_stats_line(&app).expect("initialising gets a stats row");
+        assert!(
+            text.contains("initialising"),
+            "the ~300 ms self-test must be visible: {text}"
+        );
+    }
+
+    #[test]
+    fn stats_height_counts_the_gpu_row_exactly_once() {
+        let mut app = App::new();
+        app.chain = ChainKind::Evm;
+        app.gpu_rx = Some(test_gpu_rx()); // the live-row arms require it
+        app.gpu_status = GpuStatus::Ready {
+            device: "Apple M1".to_string(),
+        };
+        let base = stats_height(&app);
+
+        app.gpu_status = GpuStatus::Running {
+            device: "Apple M1".to_string(),
+        };
+        assert_eq!(
+            stats_height(&app),
+            base + 1,
+            "the live row needs exactly one line"
+        );
+
+        app.gpu_status = GpuStatus::Disabled(GpuDisableReason::AuditMismatch { index: 5183 });
+        assert_eq!(
+            stats_height(&app),
+            base + 1,
+            "a fault row REPLACES the live row; it never adds a second GPU line"
+        );
+    }
+
+    #[test]
+    fn stats_pane_renders_the_gpu_row_while_searching() {
+        let app = searching_app_with_gpu(GpuStatus::Running {
+            device: "Apple M1".to_string(),
+        });
+        // 120, not 100. The left panel is 25% of the width minus two border
+        // columns and `render_stats` sets no `.wrap()`, so 100 leaves only 23
+        // usable columns and clips the 24-column row by one character — which
+        // would take the `)` off `(68%)`. At 120 the panel is 28 wide and the
+        // payload survives, which is what the second assertion below pins.
+        let frame = render_to_string(&app, 120, 40);
+        let rows: Vec<&str> = frame.lines().collect();
+        let rate = rows
+            .iter()
+            .position(|r| r.contains("Rate:"))
+            .expect("Rate row");
+        // `GPU rate:` — the Stats row's label. The config form's ` GPU:      `
+        // row renders in the same panel ABOVE this one, so grepping for `GPU:`
+        // here would find the wrong row.
+        let gpu = rows
+            .iter()
+            .position(|r| r.contains("GPU rate:"))
+            .expect("GPU row in the Stats pane");
+        assert_eq!(
+            gpu,
+            rate + 1,
+            "the GPU row belongs directly under Rate:\n{frame}"
+        );
+        assert!(
+            rows[gpu].contains("13.6K/s") && rows[gpu].contains("(68%)"),
+            "the measured rate must survive the pane width:\n{frame}"
+        );
     }
 }
