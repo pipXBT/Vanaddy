@@ -396,19 +396,17 @@ fn render_key_hints(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(paragraph, area);
 }
 
-fn render_help_popup(f: &mut Frame, area: Rect) {
-    // Center a popup ~60x18
-    let popup_width = 56.min(area.width.saturating_sub(4));
-    let popup_height = 26.min(area.height.saturating_sub(4));
-    let x = (area.width.saturating_sub(popup_width)) / 2;
-    let y = (area.height.saturating_sub(popup_height)) / 2;
-    let popup_area = Rect::new(x, y, popup_width, popup_height);
+/// The popup is a fixed rectangle, so its content list has a hard budget:
+/// `HELP_POPUP_HEIGHT - 2` lines of at most `HELP_POPUP_WIDTH - 2` columns.
+/// Overrun either and Paragraph clips silently — the entry simply is not there.
+const HELP_POPUP_WIDTH: u16 = 56;
+const HELP_POPUP_HEIGHT: u16 = 29;
 
-    // Clear background
-    let clear = Block::default().style(Style::default().bg(Color::Black));
-    f.render_widget(clear, popup_area);
-
-    let lines = vec![
+/// Extracted from `render_help_popup` so a test can measure it against the
+/// popup it has to fit inside. Adding an entry without raising
+/// `HELP_POPUP_HEIGHT` clips the LAST entries, not the new one.
+fn help_lines() -> Vec<Line<'static>> {
+    vec![
         Line::from(Span::styled(" Navigation", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
         Line::from(""),
         Line::from("  Up/Down      Move between fields"),
@@ -419,7 +417,8 @@ fn render_help_popup(f: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from("  Left/Right   Toggle options (chain, match, case)"),
         Line::from("  1/2/3        Select option directly"),
-        Line::from("  y/n          Case sensitivity"),
+        Line::from("  y/n          Case sensitivity, GPU offload"),
+        Line::from("  GPU offload  Metal PBKDF2, EVM only (Apple Silicon)"),
         Line::from("  Type         Text input (prefix, suffix, threads)"),
         Line::from("  Backspace    Delete character"),
         Line::from(""),
@@ -435,14 +434,26 @@ fn render_help_popup(f: &mut Frame, area: Rect) {
         Line::from("  1=Solana  2=EVM  3=Bitcoin"),
         Line::from("  4=TON     5=Monero"),
         Line::from("  Monero generation is slower (crypto intrinsic)"),
-    ];
+    ]
+}
+
+fn render_help_popup(f: &mut Frame, area: Rect) {
+    let popup_width = HELP_POPUP_WIDTH.min(area.width.saturating_sub(4));
+    let popup_height = HELP_POPUP_HEIGHT.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    // Clear background
+    let clear = Block::default().style(Style::default().bg(Color::Black));
+    f.render_widget(clear, popup_area);
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
         .title(" Help ")
         .style(Style::default().bg(Color::Black));
-    let paragraph = Paragraph::new(lines).block(block);
+    let paragraph = Paragraph::new(help_lines()).block(block);
     f.render_widget(paragraph, popup_area);
 }
 
@@ -1027,6 +1038,51 @@ mod tests {
         assert!(
             rows[gpu].contains("13.6K/s") && rows[gpu].contains("(68%)"),
             "the measured rate must survive the pane width:\n{frame}"
+        );
+    }
+
+    #[test]
+    fn help_popup_documents_gpu_offload_and_nothing_is_clipped() {
+        let lines = help_lines();
+
+        assert!(
+            lines.len() + 2 <= HELP_POPUP_HEIGHT as usize,
+            "the help popup is {HELP_POPUP_HEIGHT} rows tall (2 of them border) but the list has \
+             {} lines — the last entries would be silently clipped",
+            lines.len()
+        );
+        for (i, line) in lines.iter().enumerate() {
+            assert!(
+                line.width() + 2 <= HELP_POPUP_WIDTH as usize,
+                "help line {i} is {} columns wide, the popup's inner width is {}: {line}",
+                line.width(),
+                HELP_POPUP_WIDTH - 2
+            );
+        }
+
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        assert!(
+            text.contains("Case sensitivity, GPU offload"),
+            "the y/n hint must mention the GPU field:\n{text}"
+        );
+        assert!(
+            text.contains("Metal PBKDF2, EVM only (Apple Silicon)"),
+            "help must explain what GPU offload actually is:\n{text}"
+        );
+    }
+
+    #[test]
+    fn help_popup_renders_the_gpu_entry() {
+        let mut app = App::new();
+        app.show_help = true;
+        let frame = render_to_string(&app, 100, 40);
+        assert!(
+            frame.contains("Metal PBKDF2, EVM only (Apple Silicon)"),
+            "the GPU entry must survive the render, not fall off the popup:\n{frame}"
+        );
+        assert!(
+            frame.contains("Monero generation is slower"),
+            "the last pre-existing entry must still be visible:\n{frame}"
         );
     }
 }
