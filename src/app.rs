@@ -2746,11 +2746,18 @@ mod tests {
     fn turning_the_gpu_off_always_works_and_clears_the_error() {
         let mut app = app_on_gpu_field();
         app.chain = ChainKind::Monero;
+        // ON first. `app_on_gpu_field` leaves the toggle off, so without this
+        // the assertion below passes against an already-off flag and would
+        // survive deleting the `gpu_requested = false` line it exists to pin.
+        app.gpu_requested = true;
         app.error_message = Some("stale complaint".to_string());
 
         press(&mut app, KeyCode::Char('n'));
 
-        assert!(!app.gpu_requested);
+        assert!(
+            !app.gpu_requested,
+            "'n' must turn a live preference off, on a chain where 'y' is refused"
+        );
         assert!(
             app.error_message.is_none(),
             "off is never refused, and clears the error"
