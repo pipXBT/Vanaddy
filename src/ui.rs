@@ -1,6 +1,7 @@
 use super::app::{App, AppState};
 use super::chains::ChainKind;
 use super::matcher::MatchPosition;
+use crate::gpu::{GpuDisableReason, GpuStatus};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -131,11 +132,12 @@ fn render_config_form(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(" Case:     ", style_for(4)),
             Span::styled(format!("[{}]", case_str), style_for(4)),
         ]));
+        lines.push(gpu_form_line(app, style_for(5)));
         lines.push(Line::from(vec![
-            Span::styled(" Threads:  ", style_for(5)),
+            Span::styled(" Threads:  ", style_for(6)),
             Span::styled(
                 if app.thread_count.is_empty() { "_".to_string() } else { app.thread_count.clone() },
-                style_for(5),
+                style_for(6),
             ),
         ]));
     } else {
@@ -159,11 +161,12 @@ fn render_config_form(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(" Case:     ", style_for(3)),
             Span::styled(format!("[{}]", case_str), style_for(3)),
         ]));
+        lines.push(gpu_form_line(app, style_for(4)));
         lines.push(Line::from(vec![
-            Span::styled(" Threads:  ", style_for(4)),
+            Span::styled(" Threads:  ", style_for(5)),
             Span::styled(
                 if app.thread_count.is_empty() { "_".to_string() } else { app.thread_count.clone() },
-                style_for(4),
+                style_for(5),
             ),
         ]));
     }
@@ -196,6 +199,74 @@ fn render_config_form(f: &mut Frame, area: Rect, app: &App) {
         .title(" Config ");
     let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, area);
+}
+
+/// Flatten a status string for display in a ratatui Buffer.
+/// `GpuDisableReason::ShaderCompile(String)` carries multi-line Metal compiler
+/// diagnostics; a raw newline or tab written into a cell corrupts the frame.
+/// Every control character becomes a space, and the result is truncated on a
+/// CHAR boundary (byte slicing would panic on the '—' this UI is full of).
+fn sanitize_status_text(s: &str, max: usize) -> String {
+    let cleaned: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if cleaned.chars().count() <= max {
+        return cleaned;
+    }
+    let mut out: String = cleaned.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// Bare variant name, for the config form's narrow value column. The payload —
+/// a compiler diagnostic, a wave index, an address — goes to the Stats pane's
+/// fault line instead, which is where the user looks once a fault has fired.
+fn gpu_reason_label(r: &GpuDisableReason) -> &'static str {
+    match r {
+        GpuDisableReason::NotSupported => "NotSupported",
+        GpuDisableReason::NoDevice => "NoDevice",
+        GpuDisableReason::UserOff => "UserOff",
+        GpuDisableReason::ShaderCompile(_) => "ShaderCompile",
+        GpuDisableReason::PipelineCreate(_) => "PipelineCreate",
+        GpuDisableReason::BufferAlloc => "BufferAlloc",
+        GpuDisableReason::BadConfig(_) => "BadConfig",
+        GpuDisableReason::SelfTest(_) => "SelfTest",
+        GpuDisableReason::CommandBuffer { .. } => "CommandBuffer",
+        GpuDisableReason::AuditMismatch { .. } => "AuditMismatch",
+        GpuDisableReason::VerifyMismatch { .. } => "VerifyMismatch",
+        GpuDisableReason::Panicked => "Panicked",
+    }
+}
+
+/// The GPU field's value text and its style.
+/// Precedence: no device beats disabled beats wrong-chain beats the toggle —
+/// the same order as the input arm's refusal, so what the form shows and what
+/// pressing `y` does can never disagree.
+fn gpu_form_value(app: &App) -> (String, Style) {
+    let dimmed = Style::default().fg(Color::DarkGray);
+    match &app.gpu_status {
+        GpuStatus::Unavailable(r) => (format!("[n/a — {}]", sanitize_status_text(r, 24)), dimmed),
+        GpuStatus::Disabled(r) => (
+            format!("[disabled — {}]", gpu_reason_label(r)),
+            Style::default().fg(Color::Red),
+        ),
+        _ if app.chain != ChainKind::Evm => ("[n/a — EVM only]".to_string(), dimmed),
+        _ if app.gpu_requested => ("[On]".to_string(), Style::default().fg(Color::Green)),
+        _ => ("[Off]".to_string(), Style::default().fg(Color::White)),
+    }
+}
+
+/// The GPU config-form row. The LABEL keeps the normal focus styling so the
+/// field stays discoverable and navigable even when the GPU cannot run; the
+/// VALUE carries the disabled styling and the reason — visibly disabled, never
+/// silently ignored.
+fn gpu_form_line(app: &App, label_style: Style) -> Line<'static> {
+    let (value, value_style) = gpu_form_value(app);
+    Line::from(vec![
+        Span::styled(" GPU:      ", label_style),
+        Span::styled(value, value_style),
+    ])
 }
 
 /// Rows the stats block needs: 4 fixed lines, the optional Expected/ETA lines, plus borders.
@@ -479,6 +550,141 @@ fn format_duration(secs: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gpu::{GpuDisableReason, GpuStatus};
+
+    /// Render the whole TUI into an in-memory buffer and return it as one
+    /// newline-separated String, so a test can assert on what the user sees.
+    fn render_to_string(app: &App, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("TestBackend never fails");
+        terminal
+            .draw(|f| ui(f, app))
+            .expect("TestBackend never fails");
+        let buf = terminal.backend().buffer();
+        let w = buf.area.width as usize;
+        let mut out = String::new();
+        for (i, cell) in buf.content.iter().enumerate() {
+            if i > 0 && i % w == 0 {
+                out.push('\n');
+            }
+            out.push_str(cell.symbol());
+        }
+        out
+    }
+
+    #[test]
+    fn sanitize_status_text_flattens_control_characters() {
+        assert_eq!(
+            sanitize_status_text("line 1\nline 2\ttab", 64),
+            "line 1 line 2 tab"
+        );
+        assert_eq!(sanitize_status_text("\u{7}bell", 64), " bell");
+        assert_eq!(sanitize_status_text("plain", 64), "plain");
+    }
+
+    #[test]
+    fn sanitize_status_text_truncates_with_an_ellipsis() {
+        assert_eq!(sanitize_status_text("abcdefgh", 4), "abc…");
+        assert_eq!(sanitize_status_text("abcd", 4), "abcd");
+    }
+
+    #[test]
+    fn sanitize_status_text_never_splits_a_multi_byte_char() {
+        // 'é' is two bytes; byte-wise truncation would panic here.
+        assert_eq!(sanitize_status_text("ééééé", 3), "éé…");
+    }
+
+    #[test]
+    fn gpu_form_value_says_which_state_the_gpu_is_in() {
+        let mut app = App::new();
+        app.chain = ChainKind::Evm;
+
+        app.gpu_status = GpuStatus::Ready {
+            device: "Apple M1".to_string(),
+        };
+        app.gpu_requested = true;
+        assert_eq!(gpu_form_value(&app).0, "[On]");
+
+        app.gpu_requested = false;
+        assert_eq!(gpu_form_value(&app).0, "[Off]");
+
+        app.gpu_requested = true;
+        app.chain = ChainKind::Solana;
+        assert_eq!(gpu_form_value(&app).0, "[n/a — EVM only]");
+
+        app.chain = ChainKind::Evm;
+        app.gpu_status = GpuStatus::Unavailable("not supported on this target".to_string());
+        assert_eq!(gpu_form_value(&app).0, "[n/a — not supported on this t…]");
+
+        app.gpu_status = GpuStatus::Disabled(GpuDisableReason::VerifyMismatch {
+            address: "0xdead".to_string(),
+        });
+        assert_eq!(gpu_form_value(&app).0, "[disabled — VerifyMismatch]");
+    }
+
+    #[test]
+    fn gpu_form_value_never_leaks_a_multi_line_compiler_diagnostic() {
+        let mut app = App::new();
+        app.chain = ChainKind::Evm;
+        app.gpu_status = GpuStatus::Disabled(GpuDisableReason::ShaderCompile(
+            "program_source:14:3: error: use of undeclared identifier\nnote: here".to_string(),
+        ));
+        let (text, _) = gpu_form_value(&app);
+        assert_eq!(text, "[disabled — ShaderCompile]");
+
+        // The Unavailable arm is the one that renders a raw reason string, so
+        // it is the arm where `sanitize_status_text` has to fire. Asserting the
+        // newline here is falsifiable: drop the helper from that arm and this
+        // test goes red. (Asserting it on the Disabled arm above would not —
+        // `gpu_reason_label` returns a &'static str that structurally cannot
+        // carry one.)
+        app.gpu_status = GpuStatus::Unavailable("no Metal device\nfound".to_string());
+        let (text, _) = gpu_form_value(&app);
+        assert!(
+            !text.contains('\n'),
+            "a newline in a ratatui Buffer corrupts the frame: {text:?}"
+        );
+        assert_eq!(text, "[n/a — no Metal device found]");
+    }
+
+    #[test]
+    fn config_form_puts_the_gpu_row_between_case_and_threads() {
+        let mut app = App::new();
+        app.chain = ChainKind::Evm;
+        app.gpu_status = GpuStatus::Ready {
+            device: "Apple M1".to_string(),
+        };
+        app.gpu_requested = true;
+
+        for pos in [
+            MatchPosition::StartsWith,
+            MatchPosition::EndsWith,
+            MatchPosition::StartsAndEndsWith,
+        ] {
+            app.match_position = pos;
+            let frame = render_to_string(&app, 100, 40);
+            let rows: Vec<&str> = frame.lines().collect();
+            let case = rows
+                .iter()
+                .position(|r| r.contains("Case:"))
+                .expect("Case row");
+            // `GPU:` is the CONFIG row's label. The Stats pane's row is
+            // labelled `GPU rate:` (Task 7.5) precisely so this substring
+            // stays unambiguous — do not rename either one to match.
+            let gpu = rows
+                .iter()
+                .position(|r| r.contains("GPU:"))
+                .expect("GPU row");
+            let threads = rows
+                .iter()
+                .position(|r| r.contains("Threads:"))
+                .expect("Threads row");
+            assert!(
+                case < gpu && gpu < threads,
+                "row order must be Case, GPU, Threads; got {case}, {gpu}, {threads}\n{frame}"
+            );
+        }
+    }
 
     #[test]
     fn format_count_small() {
