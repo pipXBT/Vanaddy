@@ -322,11 +322,14 @@ impl App {
         gpu_rate + (threads - tail) * per_thread
     }
 
-    /// The GPU's CPU tail, in cores. Clamped: at a hypothetical GPU rate above
-    /// 1/EVM_GPU_TAIL_SECS ≈ 19,800 seeds/s the tail would exceed the machine,
-    /// and an unclamped `threads - tail` would go negative. Extracted so the
-    /// clamp can be tested directly — through `estimated_rate` it is unreachable
-    /// at the defaults.
+    /// The GPU's CPU tail, in cores. Clamped, and the threshold SCALES WITH
+    /// `threads`: the clamp binds at `threads / EVM_GPU_TAIL_SECS`, which is
+    /// ~19,800 seeds/s at one thread but ~158,400 at the default eight. It is
+    /// not a fixed 19,800 — an earlier version of this comment said so, which
+    /// understated the real threshold by a factor of `threads`. Above it an
+    /// unclamped `threads - tail` would go negative. Extracted so the clamp can
+    /// be tested directly — through `estimated_rate` it is unreachable at the
+    /// defaults.
     fn gpu_tail_cores(gpu_rate: f64, threads: f64) -> f64 {
         (gpu_rate * EVM_GPU_TAIL_SECS).min(threads)
     }
@@ -2958,8 +2961,16 @@ mod tests {
         );
         // MAGNITUDE, not just direction. The band above is ~24,920..38,520 wide,
         // so a typo of 50.5e-9 for 50.5e-6 in EVM_GPU_TAIL_SECS passes it — and
-        // passes every other test in this task. Expressed in cores so it still
-        // holds after Task 4.8 Step 5 re-measures EVM_GPU_SEEDS_PER_SEC.
+        // passes every other test in this task.
+        //
+        // Expressing this in cores does NOT decouple it from
+        // EVM_GPU_SEEDS_PER_SEC, and an earlier version of this comment claimed
+        // it did. The tail IS `EVM_GPU_SEEDS_PER_SEC * EVM_GPU_TAIL_SECS`, so
+        // the band below pins that constant to [10,891, 16,832) seeds/s. The
+        // on-record 14,276 seeds/s measurement sits inside it. A re-measure
+        // outside the band fails this test loudly, which is the right outcome:
+        // a GPU that much faster changes the tail's premise, so the number here
+        // should be re-derived rather than quietly widened.
         let displaced_cores = (cpu_only - (hybrid - crate::gpu::EVM_GPU_SEEDS_PER_SEC)) / 3_115.0;
         assert!(
             (0.55..0.85).contains(&displaced_cores),
