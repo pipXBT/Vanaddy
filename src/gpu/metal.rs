@@ -1206,4 +1206,61 @@ mod tests {
             end - base
         );
     }
+
+    /// `crate::gpu::parse_soak_count` against the live environment. Test-only,
+    /// and deliberately here rather than in `src/gpu/mod.rs`: `mod.rs` compiles
+    /// on every target, `metal.rs` does not, and `gpu_soak_matches_ring` below
+    /// is the only call site. In `mod.rs` this would be dead code on the
+    /// `--no-default-features` leg, and Task 8.5 Step 4 / Task 8.7 Step 4 gate
+    /// on that leg emitting no new diagnostic at all.
+    fn soak_count(default: usize) -> usize {
+        crate::gpu::parse_soak_count(std::env::var("VANADDY_GPU_SOAK_N").ok().as_deref(), default)
+    }
+
+    /// The long differential, and the gate the whole of Milestone 8 rests on.
+    /// `#[ignore]`d: 1,000,000 candidates is ~15 minutes in a debug build.
+    /// Every GPU seed is re-derived with `ring`; a mismatch prints the global
+    /// index and the phrase so the single case replays on its own.
+    ///
+    ///   VANADDY_GPU_SOAK_N=1e7 cargo test -- --ignored --nocapture
+    #[test]
+    #[ignore = "soak; run with --ignored"]
+    fn gpu_soak_matches_ring() {
+        let Some(mut gpu) = gpu_for_test() else {
+            return;
+        };
+        let n = soak_count(1_000_000);
+        let started = std::time::Instant::now();
+        let mut done = 0usize;
+        while done < n {
+            let take = crate::gpu::WAVE.min(n - done);
+            let mnemonics: Vec<Mnemonic> = (0..take)
+                .map(|_| Mnemonic::new(bip39::MnemonicType::Words12, Language::English))
+                .collect();
+            let phrases: Vec<&str> = mnemonics.iter().map(|m| m.phrase()).collect();
+            let seeds = gpu
+                .derive(&phrases, crate::seed::PBKDF2_ROUNDS)
+                .expect("wave");
+            assert_eq!(seeds.len(), take, "wave returned the wrong candidate count");
+            for (i, m) in mnemonics.iter().enumerate() {
+                let want = crate::seed::derive_seed(m);
+                assert_eq!(
+                    hex::encode(*seeds[i]),
+                    hex::encode(want),
+                    "soak mismatch at global index {}, phrase `{}`",
+                    done + i,
+                    m.phrase()
+                );
+            }
+            done += take;
+            eprintln!(
+                "soak: {done}/{n} in {:.1}s",
+                started.elapsed().as_secs_f64()
+            );
+        }
+        eprintln!(
+            "soak: {n} candidates, 0 mismatches, {:.1}s",
+            started.elapsed().as_secs_f64()
+        );
+    }
 }

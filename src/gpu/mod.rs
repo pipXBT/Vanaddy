@@ -590,3 +590,64 @@ mod command_buffer_status_tests {
         }
     }
 }
+
+/// Parse `VANADDY_GPU_SOAK_N`. Parsed as `f64` first, because the soak is
+/// documented and invoked as `VANADDY_GPU_SOAK_N=1e7` and `"1e7".parse::<usize>()`
+/// is an `Err` — the obvious `.parse().ok().unwrap_or(default)` spelling silently
+/// runs the 1,000,000 default and prints nothing that distinguishes it from a
+/// real 10,000,000-candidate soak. Anything unparseable, non-finite, or below 1
+/// falls back to `default`: a soak of zero candidates passes trivially and would
+/// green-light a broken kernel.
+#[cfg(test)]
+pub(crate) fn parse_soak_count(raw: Option<&str>, default: usize) -> usize {
+    match raw {
+        None => default,
+        Some(s) => match s.trim().parse::<f64>() {
+            Ok(v) if v.is_finite() && v >= 1.0 => v as usize,
+            _ => default,
+        },
+    }
+}
+
+#[cfg(test)]
+mod soak_count_tests {
+    use super::parse_soak_count;
+
+    #[test]
+    fn soak_count_parses_scientific_notation() {
+        // The documented invocation is literally `VANADDY_GPU_SOAK_N=1e7`.
+        assert_eq!(parse_soak_count(Some("1e7"), 1_000_000), 10_000_000);
+        assert_eq!(parse_soak_count(Some("2.5e6"), 1_000_000), 2_500_000);
+    }
+
+    #[test]
+    fn soak_count_parses_plain_integers_and_trims() {
+        assert_eq!(parse_soak_count(Some("4096"), 1_000_000), 4096);
+        assert_eq!(parse_soak_count(Some("  4096  "), 1_000_000), 4096);
+    }
+
+    #[test]
+    fn soak_count_defaults_when_unset() {
+        assert_eq!(parse_soak_count(None, 1_000_000), 1_000_000);
+    }
+
+    #[test]
+    fn soak_count_defaults_on_garbage_and_never_soaks_zero() {
+        // A zero or negative count would run no comparisons at all and report a
+        // green soak on a completely broken kernel. Fall back, never accept it.
+        assert_eq!(parse_soak_count(Some("banana"), 1_000_000), 1_000_000);
+        assert_eq!(parse_soak_count(Some(""), 1_000_000), 1_000_000);
+        assert_eq!(parse_soak_count(Some("0"), 1_000_000), 1_000_000);
+        assert_eq!(parse_soak_count(Some("-5"), 1_000_000), 1_000_000);
+        assert_eq!(parse_soak_count(Some("inf"), 1_000_000), 1_000_000);
+        assert_eq!(parse_soak_count(Some("NaN"), 1_000_000), 1_000_000);
+    }
+
+    #[test]
+    fn soak_count_parses_the_short_proof_count() {
+        // The Step 6 short-soak invocation is literally `VANADDY_GPU_SOAK_N=1e5`.
+        // An un-wired parser yields the 1,000,000 default here, not 100,000 — the
+        // shortfall this whole task exists to prevent, in the opposite direction.
+        assert_eq!(parse_soak_count(Some("1e5"), 1_000_000), 100_000);
+    }
+}
