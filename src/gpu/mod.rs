@@ -629,6 +629,10 @@ mod soak_count_tests {
     #[test]
     fn soak_count_defaults_when_unset() {
         assert_eq!(parse_soak_count(None, 1_000_000), 1_000_000);
+        // A second default value, because every other assertion in this module
+        // passes 1_000_000 and a body that ignored `default` and returned a
+        // hardcoded 1_000_000 would satisfy all of them.
+        assert_eq!(parse_soak_count(None, 7), 7);
     }
 
     #[test]
@@ -641,6 +645,9 @@ mod soak_count_tests {
         assert_eq!(parse_soak_count(Some("-5"), 1_000_000), 1_000_000);
         assert_eq!(parse_soak_count(Some("inf"), 1_000_000), 1_000_000);
         assert_eq!(parse_soak_count(Some("NaN"), 1_000_000), 1_000_000);
+        // Same reason as in `soak_count_defaults_when_unset`: pin the fallback
+        // to the `default` ARGUMENT, not to the number every other call uses.
+        assert_eq!(parse_soak_count(Some("banana"), 7), 7);
     }
 
     #[test]
