@@ -240,7 +240,7 @@ impl App {
     pub fn total_vanity_chars(&self) -> usize {
         match self.match_position {
             MatchPosition::StartsWith => self.vanity_prefix.chars().count(),
-            MatchPosition::EndsWith => self.vanity_prefix.chars().count(),
+            MatchPosition::EndsWith => self.vanity_suffix.chars().count(),
             MatchPosition::StartsAndEndsWith => {
                 self.vanity_prefix.chars().count() + self.vanity_suffix.chars().count()
             }
@@ -452,7 +452,7 @@ impl App {
 
         let (prefix, suffix) = match self.match_position {
             MatchPosition::StartsWith => (self.vanity_prefix.clone(), String::new()),
-            MatchPosition::EndsWith => (String::new(), self.vanity_prefix.clone()),
+            MatchPosition::EndsWith => (String::new(), self.vanity_suffix.clone()),
             MatchPosition::StartsAndEndsWith => (self.vanity_prefix.clone(), self.vanity_suffix.clone()),
         };
 
@@ -469,6 +469,7 @@ impl App {
         // open_csv_secure. No `expect`: a panic here now runs inside the
         // alternate screen, and a search that cannot write its CSV should
         // report that in the UI, not take the process down.
+        let mut csv_failed = false;
         match open_csv_secure(&self.csv_path) {
             Ok(mut file) => {
                 let needs_header = file.metadata().map(|m| m.len() == 0).unwrap_or(true);
@@ -487,18 +488,32 @@ impl App {
                         self.error_message = Some(format!(
                             "Failed to write CSV header ({e}); the file may be missing its header row"
                         ));
+                        csv_failed = true;
                     } else if let Err(e) = wtr.flush() {
                         self.error_message = Some(format!(
                             "Failed to write CSV header ({e}); the file may be missing its header row"
                         ));
+                        csv_failed = true;
                     }
                 }
-                self.csv_file = Some(file);
+                if !csv_failed {
+                    self.csv_file = Some(file);
+                }
             }
             Err(e) => {
                 self.csv_file = None;
                 self.error_message = Some(format!("Cannot open {}: {e}", self.csv_path.display()));
+                csv_failed = true;
             }
+        }
+        // A CSV that cannot be opened or headed must not start a search: no
+        // GPU thread, no Rayon pool. The error string above is the one the UI
+        // already shows.
+        if csv_failed {
+            self.rx = None;
+            self.csv_file = None;
+            self.state = AppState::Configuring;
+            return;
         }
 
         // A FRESH health cell per run, UNCONDITIONALLY — outside the branch on
@@ -3090,5 +3105,27 @@ mod tests {
             app.gpu_status,
             crate::gpu::GpuStatus::Disabled(crate::gpu::GpuDisableReason::UserOff)
         );
+    }
+
+    #[test]
+    fn ends_with_search_uses_vanity_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new();
+        app.csv_path = dir.path().join("vanity_wallets.csv");
+        app.chain = crate::chains::ChainKind::Solana;
+        app.match_position = MatchPosition::EndsWith;
+        app.vanity_prefix = String::new();
+        app.vanity_suffix = "zzzzzzzzz".into();
+        app.thread_count = "1".into();
+
+        app.validate().unwrap();
+        app.start_search();
+        // A debug Solana batch finishes between ~40 ms and ~80 ms. 40 ms often
+        // stops before `counter` moves, so 0 matches would not prove the suffix.
+        thread::sleep(Duration::from_millis(80));
+        app.stop_search();
+
+        assert_eq!(app.total_matches, 0);
+        assert_eq!(app.total_vanity_chars(), app.vanity_suffix.chars().count());
     }
 }
