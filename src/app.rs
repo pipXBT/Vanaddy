@@ -3046,4 +3046,49 @@ mod tests {
             "the GPU must shorten the pre-search ETA: {hybrid} vs {cpu}"
         );
     }
+
+    #[test]
+    fn gpu_env_off_recognises_every_documented_spelling() {
+        // VANADDY_GPU: value-based, case-insensitive, trimmed.
+        assert!(gpu_env_off(Some("0"), None));
+        assert!(gpu_env_off(Some("off"), None));
+        assert!(gpu_env_off(Some("OFF"), None));
+        assert!(gpu_env_off(Some("false"), None));
+        assert!(gpu_env_off(Some("no"), None));
+        assert!(gpu_env_off(Some(" 0 "), None));
+
+        // VANADDY_NO_GPU: presence-based, matching gpu_for_test's var_os().is_some().
+        assert!(gpu_env_off(None, Some("1")));
+        assert!(gpu_env_off(None, Some("")));
+        assert!(gpu_env_off(None, Some("0")));
+
+        // Neither set, or set to something affirmative: GPU stays on.
+        assert!(!gpu_env_off(None, None));
+        assert!(!gpu_env_off(Some("1"), None));
+        assert!(!gpu_env_off(Some("on"), None));
+        assert!(!gpu_env_off(Some("yes"), None));
+    }
+
+    #[test]
+    fn gpu_env_off_makes_gpu_effective_false_on_evm() {
+        let mut app = App::new();
+        app.chain = crate::chains::ChainKind::Evm;
+        app.gpu_status = crate::gpu::GpuStatus::Ready {
+            device: "Apple M1".to_string(),
+        };
+        app.gpu_requested = true;
+        assert!(app.gpu_effective(), "precondition: EVM + Ready + requested");
+
+        // Exactly what App::with_gpu_status applies when the env lever is pulled.
+        if gpu_env_off(Some("0"), None) {
+            app.gpu_requested = false;
+            app.gpu_status = crate::gpu::GpuStatus::Disabled(crate::gpu::GpuDisableReason::UserOff);
+        }
+
+        assert!(!app.gpu_effective());
+        assert_eq!(
+            app.gpu_status,
+            crate::gpu::GpuStatus::Disabled(crate::gpu::GpuDisableReason::UserOff)
+        );
+    }
 }
