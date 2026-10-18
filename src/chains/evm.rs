@@ -1,5 +1,5 @@
 use super::super::bip32::{bip32_derive_secp256k1, EVM_PATH};
-use super::Chain;
+use super::{Bip39GpuChain, Chain};
 use super::super::matcher::Matcher;
 use super::super::seed::{derive_seed, derive_seeds};
 use crate::pbkdf2_lanes::LANES;
@@ -33,7 +33,7 @@ fn eip55_encode(addr: &[u8; 20]) -> [u8; 40] {
 
 impl Evm {
     /// BIP-44 m/44'/60'/0'/0/0 address + secret key from a BIP-39 seed.
-    fn from_seed(seed: &[u8; 64]) -> ([u8; 20], secp256k1::SecretKey) {
+    pub(crate) fn from_seed(seed: &[u8; 64]) -> ([u8; 20], secp256k1::SecretKey) {
         let secret_key = bip32_derive_secp256k1(seed, &EVM_PATH);
         let public_key = secp256k1::PublicKey::from_secret_key_global(&secret_key);
         let pubkey_bytes = public_key.serialize_uncompressed();
@@ -110,6 +110,28 @@ impl Chain for Evm {
     }
 }
 
+impl Bip39GpuChain for Evm {
+    fn from_gpu_seed(seed: &[u8; 64]) -> (Self::AddressBytes, Self::SecretRaw) {
+        // Exactly the tail the CPU path uses. Sharing one body is what makes the
+        // pinned bip44_canonical_vector cover the GPU path too.
+        Self::from_seed(seed)
+    }
+
+    fn verify(address: &str, secret_hex: &str, phrase: &str) -> bool {
+        let Ok(m) = Mnemonic::from_phrase(phrase, Language::English) else {
+            // An unparseable phrase or a bad BIP-39 checksum is a REJECTION, not
+            // an "unverifiable" third state. There is deliberately no arm here
+            // that can turn a corrupted input into a pass.
+            return false;
+        };
+        // `derive_seed` is ring::pbkdf2 (src/seed.rs:8) — the reference path.
+        // NEVER `derive_seeds` (4-lane NEON) and never the GPU: the point of this
+        // function is to be more trusted than the thing it is checking.
+        let (addr, secret) = Self::from_seed(&derive_seed(&m));
+        Self::encode_address(&addr) == address && Self::encode_secret(&secret) == secret_hex
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +190,48 @@ mod tests {
         let mut addrs: Vec<_> = got.iter().map(|c| c.0).collect();
         addrs.dedup();
         assert_eq!(addrs.len(), LANES, "every lane must use fresh entropy");
+    }
+
+    /// The GPU tail (`from_gpu_seed`) and the re-derivation gate (`verify`) must
+    /// both land on the pinned BIP-44 vector, and `verify` must REJECT — never
+    /// panic on, never accept — a wrong address, a wrong phrase, or a phrase that
+    /// is not a mnemonic at all.
+    #[test]
+    fn from_gpu_seed_and_verify_agree_with_the_bip44_canonical_vector() {
+        const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let m = Mnemonic::from_phrase(PHRASE, Language::English).unwrap();
+        let seed = derive_seed(&m);
+
+        let (addr, sk) = Evm::from_gpu_seed(&seed);
+        assert_eq!(
+            hex::encode(addr),
+            "9858effd232b4033e47d90003d41ec34ecaeda94"
+        );
+
+        let address = Evm::encode_address(&addr);
+        let secret_hex = Evm::encode_secret(&sk);
+        assert!(Evm::verify(&address, &secret_hex, PHRASE));
+
+        // One flipped nibble in the address: reject.
+        let mut bad_addr = address.clone();
+        bad_addr.replace_range(2..3, "8"); // "0x9858..." -> "0x8858..."
+        assert!(!Evm::verify(&bad_addr, &secret_hex, PHRASE));
+
+        // One flipped nibble in the secret: reject.
+        let mut bad_secret = secret_hex.clone();
+        let first = if bad_secret.starts_with('0') {
+            "1"
+        } else {
+            "0"
+        };
+        bad_secret.replace_range(0..1, first);
+        assert!(!Evm::verify(&address, &bad_secret, PHRASE));
+
+        // A valid but DIFFERENT phrase: reject.
+        let other = Mnemonic::new(MnemonicType::Words12, Language::English);
+        assert!(!Evm::verify(&address, &secret_hex, other.phrase()));
+
+        // Not a mnemonic at all: reject, do not panic.
+        assert!(!Evm::verify(&address, &secret_hex, "not a mnemonic"));
     }
 }
