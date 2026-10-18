@@ -77,12 +77,7 @@ pub struct App {
     /// CLAUDE.md states: it is re-asserted once per search now, not once per
     /// row. Step 8a rewrites that line to match.
     csv_file: Option<File>,
-    /// How many rows failed to reach the CSV this run. Nothing in this codebase
-    /// checks that a row was actually written, so eviction cannot claim "it is
-    /// already durably in the CSV" without this counter: while it is non-zero
-    /// the in-memory list is the ONLY copy of those seed phrases, so eviction
-    /// stops (Step 7) and the exit summary must not claim they were saved
-    /// (Step 9).
+    /// Failed CSV rows this run. Eviction still applies; the exit summary must not claim they were saved.
     pub csv_write_failures: u64,
     pub selected_match: usize,
     pub counter: Arc<AtomicU64>,
@@ -557,22 +552,11 @@ impl App {
     }
 
     pub fn stop_search(&mut self) {
-        // Signal FIRST, then drain. Everything still in the mpsc queue is a
-        // match a worker already found and verified; dropping the receiver
-        // below would discard it silently — never written to the CSV, never
-        // counted in total_matches. `drain_matches` is a `try_recv` loop, so it
-        // is bounded and non-blocking, and the CSV handle is still open here
-        // (it closes at the bottom of this function).
-        //
-        // Setting `stop` before the drain rather than after narrows, but does
-        // not close, a race: a worker between its last stop check and its
-        // `send` can still enqueue a match after the final `try_recv` returns
-        // Empty, and `Receiver::drop` discards it while the sender saw Ok.
-        // The window is one worker batch wide and cannot be closed without
-        // blocking the UI thread on the producers, which this function exists
-        // to avoid. Draining after the signal at least catches the final flush
-        // instead of racing ongoing production.
+        // Set stop, join the workers, drain, then drop the receiver. Joining
+        // waits out a send that passed the last stop check, so that match is
+        // still queued. The GPU threads are only signalled below and never joined.
         self.stop.store(true, Ordering::Relaxed);
+        self.thread_pool = None;
         self.drain_matches();
         self.rx = None;
         // Dropping App's Receiver clone is producer wake-path #2: once App and
@@ -588,8 +572,6 @@ impl App {
         for engine in &self.gpu_engines {
             engine.signal_stop();
         }
-        // Drops the pool handle; workers will exit on the next stop check.
-        self.thread_pool = None;
 
         // Task 6.7 addition: detect whether the file this handle points at is
         // still the file at `csv_path`. Task 6.5 made start_search open the
@@ -748,22 +730,23 @@ impl App {
                     self.error_message = Some(format!(
                         "CSV write failed ({e}); matches are NOT being saved"
                     ));
+                    self.stop.store(true, Ordering::Relaxed);
                 }
 
                 self.total_matches += 1;
+                let following_end = self.matches.is_empty()
+                    || self.selected_match + 1 == self.matches.len();
                 self.matches.push_back(payload);
-                // Evict from the FRONT: the newest matches are the ones on
-                // screen. Eviction is only a RENDER budget while every row is
-                // durably on disk — and nothing above proves that until Task
-                // 6.5 Step 7 checks the write result. Once a write has failed,
-                // the in-memory list is the ONLY copy of those seed phrases, so
-                // stop evicting rather than destroying a found wallet.
-                if self.csv_write_failures == 0 {
-                    while self.matches.len() > MATCH_CAP {
-                        self.matches.pop_front();
+                // Drop the oldest row once the list passes MATCH_CAP, including after a failed write.
+                while self.matches.len() > MATCH_CAP {
+                    self.matches.pop_front();
+                    if self.selected_match > 0 {
+                        self.selected_match -= 1;
                     }
                 }
-                self.selected_match = self.matches.len().saturating_sub(1);
+                if following_end {
+                    self.selected_match = self.matches.len().saturating_sub(1);
+                }
             }
         }
     }
@@ -2361,6 +2344,10 @@ mod tests {
             app.error_message.is_some(),
             "the user must be told the CSV is not being written"
         );
+        assert!(
+            app.stop.load(Ordering::Relaxed),
+            "a failed CSV write stops the search"
+        );
     }
 
     #[test]
@@ -3127,5 +3114,45 @@ mod tests {
 
         assert_eq!(app.total_matches, 0);
         assert_eq!(app.total_vanity_chars(), app.vanity_suffix.chars().count());
+    }
+
+    #[test]
+    fn selection_stays_when_not_following_the_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new();
+        app.csv_path = dir.path().join("vanity_wallets.csv");
+
+        let (tx, rx) = mpsc::channel();
+        app.rx = Some(rx);
+        for i in 0..3 {
+            tx.send(Match {
+                chain: "EVM".to_string(),
+                address: format!("0x{i:040x}"),
+                secret_hex: "00".repeat(32),
+                mnemonic: "abandon abandon abandon".to_string(),
+                verified: crate::verify::Verified::cpu_reference(),
+            })
+            .unwrap();
+        }
+        drop(tx);
+        app.drain_matches();
+        app.selected_match = 0;
+
+        let (tx, rx) = mpsc::channel();
+        app.rx = Some(rx);
+        tx.send(Match {
+            chain: "EVM".to_string(),
+            address: format!("0x{:040x}", 3),
+            secret_hex: "00".repeat(32),
+            mnemonic: "abandon abandon abandon".to_string(),
+            verified: crate::verify::Verified::cpu_reference(),
+        })
+        .unwrap();
+        drop(tx);
+        app.drain_matches();
+
+        assert!(app.matches.len() < MATCH_CAP, "cap not hit");
+        assert_eq!(app.matches.len(), 4);
+        assert_eq!(app.selected_match, 0);
     }
 }
