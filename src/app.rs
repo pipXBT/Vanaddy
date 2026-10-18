@@ -796,7 +796,7 @@ fn open_csv_secure(path: &Path) -> io::Result<File> {
         if let Ok(metadata) = file.metadata() {
             let mut perms = metadata.permissions();
             perms.set_mode(0o600);
-            let _ = std::fs::set_permissions(path, perms);
+            std::fs::set_permissions(path, perms)?;
         }
     }
     Ok(file)
