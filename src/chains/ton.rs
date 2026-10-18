@@ -54,6 +54,16 @@ impl Ton {
         addr[35] = crc as u8;
         addr
     }
+
+    /// 36-byte user-friendly address as 48 ASCII chars of URL-safe unpadded base64.
+    fn user_friendly_ascii(bytes: &[u8; 36]) -> [u8; 48] {
+        let mut out = [0u8; 48];
+        let n = URL_SAFE_NO_PAD
+            .encode_slice(bytes, &mut out)
+            .expect("48-byte buffer holds a 36-byte unpadded base64 address");
+        assert_eq!(n, 48);
+        out
+    }
 }
 
 impl Chain for Ton {
@@ -86,7 +96,8 @@ impl Chain for Ton {
     }
 
     fn encode_address(bytes: &Self::AddressBytes) -> String {
-        URL_SAFE_NO_PAD.encode(bytes)
+        let ascii = Self::user_friendly_ascii(bytes);
+        String::from_utf8(ascii.to_vec()).expect("base64 alphabet is ASCII")
     }
 
     fn encode_secret(raw: &Self::SecretRaw) -> String {
@@ -96,13 +107,14 @@ impl Chain for Ton {
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool {
         // TON vanity applies after the fixed tag prefix "UQ" (non-bounceable mainnet).
         const FIXED_PREFIX_LEN: usize = 2;
-        let encoded = Ton::encode_address(bytes);
+        let ascii = Self::user_friendly_ascii(bytes);
+        let encoded = str::from_utf8(&ascii).expect("base64 alphabet is ASCII");
         let vanity_target = if encoded.len() > FIXED_PREFIX_LEN {
             &encoded[FIXED_PREFIX_LEN..]
         } else {
             ""
         };
-        matcher.prefix_matches(vanity_target) && matcher.suffix_matches(&encoded)
+        matcher.prefix_matches(vanity_target) && matcher.suffix_matches(encoded)
     }
 }
 
@@ -130,6 +142,32 @@ mod tests {
         let encoded = Ton::encode_address(&addr);
         assert_eq!(encoded.len(), 48, "TON addresses must be 48 chars, got: {}", encoded);
         assert!(encoded.starts_with("UQ"), "non-bounceable mainnet must start with UQ, got: {}", encoded);
+    }
+
+    #[test]
+    fn matches_raw_agrees_with_encode_address_for_one_char_affix() {
+        use super::super::super::matcher::Matcher;
+        use super::super::ChainKind;
+
+        let (_phrase, sk) = super::super::ton_mnemonic::generate_ton_wallet();
+        let addr = Ton::address_bytes(&sk.verifying_key().to_bytes());
+        let encoded = Ton::encode_address(&addr);
+        let prefix = &encoded[2..3];
+        let suffix = &encoded[encoded.len() - 1..];
+        let missing = if prefix == "A" { "B" } else { "A" };
+
+        let hit = Matcher::new(prefix.to_string(), suffix.to_string(), true, ChainKind::Ton);
+        assert!(
+            Ton::matches_raw(&hit, &addr),
+            "1-char prefix after UQ and 1-char suffix must match {}",
+            encoded
+        );
+
+        let miss = Matcher::new(missing.to_string(), suffix.to_string(), true, ChainKind::Ton);
+        assert!(
+            !Ton::matches_raw(&miss, &addr),
+            "must reject a prefix that is not the character after UQ"
+        );
     }
 
     #[test]
