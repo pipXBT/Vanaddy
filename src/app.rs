@@ -736,9 +736,8 @@ fn open_csv_secure(path: &Path) -> io::Result<File> {
 /// handle in `drain_matches` and the path-based `append_match_row` — funnel
 /// through here, so a row can never be written two different ways.
 ///
-/// Taking `&Match` is the enforcement point for the trust boundary: a `Match`
-/// cannot be constructed without a `verify::Verified` token, so an unverified
-/// GPU candidate has no path to disk.
+/// The trust boundary is upstream: a GPU candidate becomes a `Match` only after
+/// `verify::verify_gpu` re-derived it on the CPU.
 fn write_match_row(file: &mut File, m: &Match) -> io::Result<()> {
     write_row(file, [&m.chain, &m.address, &m.secret_hex, &m.mnemonic])
 }
@@ -1650,14 +1649,12 @@ mod tests {
         );
     }
 
-    /// A `Match` cannot exist without a `verify::Verified`, so `append_match_row`
-    /// is structurally unable to write an unverified row. Assert the consequence:
-    /// what lands on disk re-derives, and the file is 0600.
+    /// A real CPU-path match written by `append_match_row` re-derives from what
+    /// lands on disk, and the file is 0600.
     #[test]
     #[cfg(unix)]
     fn verified_match_is_written_and_file_is_0600() {
         use crate::chains::evm::Evm;
-        use crate::chains::Bip39GpuChain;
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1697,7 +1694,7 @@ mod tests {
     /// of the PERSISTED file and recomputes the address without touching the
     /// in-memory `Match`, so it proves the CSV writer, the channel and the phrase
     /// round-trip are faithful. It is NOT a second, independent check of the Metal
-    /// kernel: `verify_gpu` already ran that same `derive_seed` -> `from_gpu_seed`
+    /// kernel: `verify_gpu` already ran that same `derive_seed` -> `from_seed`
     /// chain before the row was built, and the row carries ITS output, never the
     /// GPU's. The kernel's honesty is what `verify_rejections == 0` asserts — a GPU
     /// seed that matched the prefix but failed re-derivation would have raised
@@ -1707,7 +1704,7 @@ mod tests {
     #[ignore = "requires a Metal device and runs for ~5 s; run with --ignored"]
     #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
     fn hybrid_evm_search_with_live_gpu_emits_only_rederivable_matches() {
-        use crate::chains::{evm::Evm, search_hybrid, Bip39GpuChain, Chain};
+        use crate::chains::{evm::Evm, search_hybrid, Chain};
         use crate::gpu::{GpuEngine, GpuHealth, SeedBlock, CHANNEL_CAPACITY};
         use bip39::{Language, Mnemonic};
 
@@ -1736,14 +1733,7 @@ mod tests {
                 let stop_w = &stop;
                 let counter_w = &counter;
                 s.spawn(move || {
-                    search_hybrid::<Evm>(
-                        matcher_w,
-                        stop_w,
-                        counter_w,
-                        &tx_w,
-                        Some(&grx_w),
-                        &health_w,
-                    );
+                    search_hybrid(matcher_w, stop_w, counter_w, &tx_w, Some(&grx_w), &health_w);
                 });
             }
             thread::sleep(Duration::from_secs(5));
@@ -1821,7 +1811,7 @@ mod tests {
             );
             let m = Mnemonic::from_phrase(f[3], Language::English)
                 .unwrap_or_else(|e| panic!("CSV phrase is not a valid mnemonic ({e}): {line}"));
-            let (addr, sk) = Evm::from_gpu_seed(&crate::seed::derive_seed(&m));
+            let (addr, sk) = Evm::from_seed(&crate::seed::derive_seed(&m));
             assert_eq!(
                 Evm::encode_address(&addr),
                 f[1],
@@ -1886,9 +1876,7 @@ mod tests {
         );
     }
 
-    /// One genuine CPU-path match, produced by the real `search` loop so the
-    /// `Verified` token is minted at its real site rather than forged here
-    /// (which is impossible — the field is private to `crate::verify`).
+    /// One genuine CPU-path match, produced by the real `search` loop.
     #[cfg(unix)]
     fn one_cpu_match() -> Match {
         use crate::chains::evm::Evm;
@@ -1917,7 +1905,6 @@ mod tests {
             address: addr.to_string(),
             secret_hex: "00".repeat(32),
             mnemonic: "abandon abandon abandon".to_string(),
-            verified: crate::verify::Verified::cpu_reference(),
         }
     }
 

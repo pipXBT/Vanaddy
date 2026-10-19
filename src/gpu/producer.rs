@@ -34,7 +34,7 @@ pub(crate) fn read_status(cell: &Mutex<GpuStatus>) -> GpuStatus {
 
 /// Re-derive `indices` of a finished wave with `ring` and compare.
 ///
-/// A wrong GPU seed cannot reach the CSV — the `Verified` token gate stops that
+/// A wrong GPU seed cannot reach the CSV — the `verify_gpu` gate stops that
 /// — but it can silently waste the search: the counter climbs while up to ~55%
 /// of it is noise. This is the only detector for that, so a disagreement is a
 /// hard, sticky fault, never a retry.

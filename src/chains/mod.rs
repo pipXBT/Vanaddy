@@ -9,6 +9,7 @@ mod ton_mnemonic;
 
 use super::matcher::Matcher;
 use crate::gpu::{GpuDisableReason, GpuHealth};
+use evm::Evm;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 
@@ -18,14 +19,6 @@ pub struct Match {
     pub address: String,
     pub secret_hex: String,
     pub mnemonic: String,
-    /// Proof that this row re-derives via the reference (`ring`) path.
-    /// `app::append_match_row(path: &Path, m: &Match)` is the crate's single
-    /// CSV-row writer, and takes `&Match` — so it cannot receive a row without
-    /// one, even though it never reads this field's value directly.
-    /// `App::drain_matches` routes every emitted match through it. See
-    /// `verify::Verified`'s module doc for what this token does and does not
-    /// guarantee.
-    pub verified: crate::verify::Verified,
 }
 
 pub trait Chain: Send + Sync + 'static {
@@ -48,25 +41,6 @@ pub trait Chain: Send + Sync + 'static {
     fn encode_address(bytes: &Self::AddressBytes) -> String;
     fn encode_secret(raw: &Self::SecretRaw) -> String;
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool;
-}
-
-/// A chain whose entire candidate is a pure function of a 64-byte BIP-39 seed.
-/// Implementing this — and nothing else — opts a chain into the GPU pipeline.
-/// Evm implements it. Solana and Bitcoin each already have a private `from_seed`
-/// of exactly this shape and are one line away; Ton (own mnemonic, 100k rounds,
-/// different salt) and Monero (no BIP-39) structurally cannot — that is the
-/// reuse seam.
-///
-/// A separate trait, rather than `const GPU_SEEDS: bool` plus a defaulted
-/// `from_gpu_seed` whose body is `unreachable!()`: with the const, a future
-/// maintainer can flip it true without implementing the tail, compile cleanly,
-/// and then panic inside a Rayon worker with the terminal in raw mode. Here that
-/// state is unrepresentable.
-pub trait Bip39GpuChain: Chain {
-    fn from_gpu_seed(seed: &[u8; 64]) -> (Self::AddressBytes, Self::SecretRaw);
-    /// Re-derive from the phrase alone with the reference (`ring`) path.
-    /// MUST NOT use the batched or GPU path. Returns `bool`, never `Option`.
-    fn verify(address: &str, secret_hex: &str, phrase: &str) -> bool;
 }
 
 /// Runtime chain selection. The `match` is evaluated once per thread spawn,
@@ -123,7 +97,7 @@ impl ChainKind {
     ) {
         match self {
             Self::Solana => search::<solana::Solana>(matcher, stop, counter, tx),
-            Self::Evm => search_hybrid::<evm::Evm>(matcher, stop, counter, tx, gpu, health),
+            Self::Evm => search_hybrid(matcher, stop, counter, tx, gpu, health),
             Self::Bitcoin => search::<bitcoin::Bitcoin>(matcher, stop, counter, tx),
             Self::Ton => search::<ton::Ton>(matcher, stop, counter, tx),
             Self::Monero => search::<monero::Monero>(matcher, stop, counter, tx),
@@ -142,7 +116,6 @@ fn search_cpu_step<C: Chain>(matcher: &Matcher, counter: &AtomicU64, tx: &Sender
                 address: C::encode_address(&addr_bytes),
                 secret_hex: C::encode_secret(&secret_raw),
                 mnemonic: phrase,
-                verified: crate::verify::Verified::cpu_reference(),
             });
         }
     });
@@ -161,7 +134,7 @@ pub fn search<C: Chain>(
     }
 }
 
-/// Stop check granularity inside a GPU block: 16 × C::BATCH = 64 candidates
+/// Stop check granularity inside a GPU block: 16 × Evm::BATCH = 64 candidates
 /// ≈ 3.2 ms at the measured 50.5 µs tail — comparable to the CPU path's
 /// ~1.3 ms, versus 25.9 ms for a whole 512-block.
 const GPU_CHUNK_BATCHES: usize = 16;
@@ -170,7 +143,7 @@ const GPU_CHUNK_BATCHES: usize = 16;
 /// non-blocking and therefore self-balancing: when the GPU is fast the workers
 /// drain it, when the GPU stalls (compositor contention drops it 2–4×) they fall
 /// straight through to the CPU batch with no static split to get wrong.
-pub fn search_hybrid<C: Bip39GpuChain>(
+pub fn search_hybrid(
     matcher: &Matcher,
     stop: &AtomicBool,
     counter: &AtomicU64,
@@ -182,16 +155,16 @@ pub fn search_hybrid<C: Bip39GpuChain>(
         if let Some(rx) = gpu {
             if !health.disable.load(Ordering::Relaxed) {
                 if let Ok(block) = rx.try_recv() {
-                    drain_gpu_block::<C>(&block, matcher, stop, counter, tx, health);
+                    drain_gpu_block(&block, matcher, stop, counter, tx, health);
                     continue; // block is zeroized on drop
                 }
             }
         }
-        search_cpu_step::<C>(matcher, counter, tx);
+        search_cpu_step::<Evm>(matcher, counter, tx);
     }
 }
 
-fn drain_gpu_block<C: Bip39GpuChain>(
+fn drain_gpu_block(
     block: &crate::gpu::SeedBlock,
     matcher: &Matcher,
     stop: &AtomicBool,
@@ -199,16 +172,16 @@ fn drain_gpu_block<C: Bip39GpuChain>(
     tx: &Sender<Match>,
     health: &crate::gpu::GpuHealth,
 ) {
-    debug_assert_eq!(block.len() % C::BATCH.max(1), 0);
-    for chunk in block.chunks(C::BATCH.max(1) * GPU_CHUNK_BATCHES) {
+    debug_assert_eq!(block.len() % Evm::BATCH, 0);
+    for chunk in block.chunks(Evm::BATCH * GPU_CHUNK_BATCHES) {
         if stop.load(Ordering::Relaxed) {
             return; // only what was checked has been counted
         }
         for cand in chunk {
             // The GPU seed is UNTRUSTED and is used only to FILTER.
-            let (addr, _gpu_secret) = C::from_gpu_seed(&cand.seed);
-            if C::matches_raw(matcher, &addr) {
-                emit_gpu_match::<C>(tx, &cand.entropy, &addr, health);
+            let (addr, _gpu_secret) = Evm::from_seed(&cand.seed);
+            if Evm::matches_raw(matcher, &addr) {
+                emit_gpu_match(tx, &cand.entropy, &addr, health);
             }
         }
         counter.fetch_add(chunk.len() as u64, Ordering::Relaxed);
@@ -218,22 +191,16 @@ fn drain_gpu_block<C: Bip39GpuChain>(
     }
 }
 
-fn emit_gpu_match<C: Bip39GpuChain>(
-    tx: &Sender<Match>,
-    entropy: &[u8; 16],
-    gpu_addr: &C::AddressBytes,
-    health: &GpuHealth,
-) {
-    match crate::verify::verify_gpu::<C>(entropy, gpu_addr) {
-        Some((addr, secret, phrase, proof)) => {
+fn emit_gpu_match(tx: &Sender<Match>, entropy: &[u8; 16], gpu_addr: &[u8; 20], health: &GpuHealth) {
+    match crate::verify::verify_gpu(entropy, gpu_addr) {
+        Some((addr, secret, phrase)) => {
             // Everything written here is the CPU-derived value, never the
             // GPU-derived one.
             let _ = tx.send(Match {
-                chain: C::LABEL.to_string(),
-                address: C::encode_address(&addr),
-                secret_hex: C::encode_secret(&secret),
+                chain: Evm::LABEL.to_string(),
+                address: Evm::encode_address(&addr),
+                secret_hex: Evm::encode_secret(&secret),
                 mnemonic: phrase,
-                verified: proof,
             });
         }
         None => {
@@ -243,7 +210,7 @@ fn emit_gpu_match<C: Bip39GpuChain>(
             // provably not a wallet anyone can open, so there is nothing to save.
             health.verify_rejections.fetch_add(1, Ordering::Relaxed);
             health.raise(GpuDisableReason::VerifyMismatch {
-                address: C::encode_address(gpu_addr),
+                address: Evm::encode_address(gpu_addr),
             });
         }
     }
@@ -300,7 +267,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::pbkdf2_lanes::LANES;
     use std::sync::mpsc;
@@ -380,7 +347,7 @@ mod tests {
 
     /// A 512-candidate GPU block is ~25.9 ms of work. Ctrl+C must not have to
     /// wait for it, so `drain_gpu_block` re-reads `stop` at every
-    /// `C::BATCH * GPU_CHUNK_BATCHES` = 64-candidate boundary (~3.2 ms), and
+    /// `Evm::BATCH * GPU_CHUNK_BATCHES` = 64-candidate boundary (~3.2 ms), and
     /// counts only chunks it actually finished. Milestone 2's
     /// `gpu_drain_honours_stop_mid_block` covers the already-stopped case;
     /// this covers stopping part-way through a block.
@@ -412,13 +379,11 @@ mod tests {
         let counter = AtomicU64::new(0);
         let health = GpuHealth::default();
         let (tx, rx) = mpsc::channel();
-        let chunk = (evm::Evm::BATCH * GPU_CHUNK_BATCHES) as u64;
+        let chunk = (Evm::BATCH * GPU_CHUNK_BATCHES) as u64;
         assert_eq!(chunk, 64, "chunk is BATCH(4) * GPU_CHUNK_BATCHES(16)");
 
         thread::scope(|s| {
-            s.spawn(|| {
-                drain_gpu_block::<evm::Evm>(&block, &matcher, &stop, &counter, &tx, &health)
-            });
+            s.spawn(|| drain_gpu_block(&block, &matcher, &stop, &counter, &tx, &health));
             let deadline = std::time::Instant::now() + Duration::from_secs(20);
             while counter.load(Ordering::Relaxed) < chunk && std::time::Instant::now() < deadline {
                 thread::sleep(Duration::from_millis(1));
@@ -457,8 +422,8 @@ mod tests {
     /// The routing property `chain_kind_search_with_no_gpu_source_is_unchanged`
     /// cannot see: with `gpu: Some(rx)` actually holding a block, `ChainKind::Evm
     /// .search` must route through `search_hybrid` and drain it. If the `Evm` arm
-    /// ever regressed to `search::<evm::Evm>(..)`, this would still compile (Evm
-    /// implements both traits) and the block would sit undrained forever.
+    /// ever regressed to `search::<evm::Evm>(..)`, this would still compile and
+    /// the block would sit undrained forever.
     #[test]
     fn chain_kind_search_evm_drains_a_real_gpu_block() {
         use crate::gpu::{GpuHealth, SeedBlock};
@@ -497,11 +462,11 @@ mod tests {
         );
     }
 
-    /// The CPU path is the reference, so its matches mint `Verified::cpu_reference()`
-    /// directly — but they must still actually re-derive. This is the property the
-    /// whole gate exists to preserve, asserted on the path that does not need a GPU.
+    /// The CPU path is the reference, so its matches skip `verify_gpu` — but they
+    /// must still actually re-derive. This is the property the whole gate exists
+    /// to preserve, asserted on the path that does not need a GPU.
     #[test]
-    fn cpu_step_emits_matches_that_carry_a_token_and_re_derive() {
+    fn cpu_step_emits_matches_that_re_derive() {
         use crate::chains::evm::Evm;
 
         // Empty prefix and empty suffix: Matcher::new leaves evm_prefix/evm_suffix
@@ -531,113 +496,9 @@ mod tests {
         }
     }
 
-    /// Regression guard, not a driver: it passes the moment this file exists.
-    /// Its job is to FAIL LATER, if someone re-adds a `Clone`/`Copy` derive to
-    /// `Match` — that would let a caller build `let mut fake = real.clone();
-    /// fake.address = "...".to_string();`, keeping the original's minted
-    /// `Verified` token while attesting to unrelated data. See
-    /// `verify::Verified`'s module doc for the forgery this closes.
-    ///
-    /// A `compile_fail` doc test would be the natural spelling, but this crate
-    /// is binary-only (no `lib.rs`, see CLAUDE.md), and `cargo test` never runs
-    /// doc tests for a bin target — the doctest would silently never execute.
-    /// So the property is pinned at the source level, like
-    /// `verify::tests::verify_source_pins_the_private_field_declaration`.
-    ///
-    /// What the walk below covers: a derive directly above the declaration; a
-    /// derive stacked under another attribute (e.g. `#[repr(...)]`); a derive
-    /// hidden inside `#[cfg_attr(test, derive(Clone))]`; a derive separated
-    /// from the declaration by a blank line, a `//`/`///` comment, or a
-    /// single-line or non-nested multi-line `/* ... */` block comment.
-    ///
-    /// What it does NOT cover: a NESTED multi-line block comment (Rust
-    /// permits nesting `/* ... /* ... */ ... */`; C does not). The walk
-    /// tracks "am I in a block comment" as a boolean, not a nesting depth, so
-    /// it clears on the first inner `*/` it meets and reads the outer
-    /// comment's remaining text as code, missing a derive above it. This is a
-    /// known, accepted gap — closing it needs a real nesting-depth counter,
-    /// not a boolean — and rustfmt does not restructure a nested block
-    /// comment away, so unlike the ordinary multi-line-attribute residual, no
-    /// other gate catches this one either. Nobody writes a nested multi-line
-    /// block comment between an attribute and its item by accident, and
-    /// against a deliberate actor this source-level guard was never
-    /// sufficient anyway — the properties that actually hold the invariant
-    /// are the compiler-enforced private field on `verify::Verified` and the
-    /// two audited construction sites (`Verified::cpu_reference`/
-    /// `Verified::gpu_reverified`).
-    #[test]
-    fn match_source_pins_the_absence_of_a_forging_derive() {
-        let src = include_str!("mod.rs");
-        // Assembled with concat! so this test's OWN source text does not
-        // contain the needle contiguously — otherwise `find` would match this
-        // call site instead of the real declaration.
-        let decl = concat!("pub struct ", "Match {");
-        assert_eq!(
-            src.matches(decl).count(),
-            1,
-            "expected exactly one occurrence of Match's declaration; the source may have \
-             changed shape"
-        );
-        let at = src.find(decl).expect("Match's declaration must exist");
-        // Walk upward over the WHOLE contiguous run of attribute lines above
-        // the declaration — not just the one line immediately above it — so a
-        // derive stacked under an unrelated attribute (e.g. `#[repr(...)]`)
-        // can't hide from this check. `contains`, not `starts_with`, so
-        // `#[cfg_attr(test, derive(Clone))]` is caught too. Blank lines and
-        // `//`/`///` line comments and `/* ... */` block comments (single- or
-        // multi-line) are SKIPPED rather than stopping the walk (any of these
-        // between the derive and the declaration must not hide it either) —
-        // but a comment's own text is never inspected for "derive", only
-        // lines starting with `#[` are, so a doc comment reflow (even one
-        // that happens to say "derive" in prose, or a `/* */` block that
-        // does) still can't fail this test. The walk stops only at the first
-        // real code line.
-        let mut forging_attr = None;
-        let mut in_block_comment = false;
-        for line in src[..at].lines().rev() {
-            let line = line.trim();
-            if in_block_comment {
-                // Comment content is never inspected for "derive" — only the
-                // opening delimiter, which ends the skip, is looked for.
-                if line.contains("/*") {
-                    in_block_comment = false;
-                }
-                continue;
-            }
-            if line.is_empty() || line.starts_with("//") {
-                continue;
-            }
-            if let (Some(open), Some(close)) = (line.find("/*"), line.rfind("*/")) {
-                if open < close {
-                    continue; // self-contained /* ... */ on one line
-                }
-            }
-            if line.ends_with("*/") {
-                // The closing delimiter of a block comment that opened on an
-                // earlier (higher, so later in this reverse walk) line.
-                in_block_comment = true;
-                continue;
-            }
-            if line.starts_with("#[") {
-                if line.contains("derive") {
-                    forging_attr = Some(line);
-                    break;
-                }
-                continue;
-            }
-            break;
-        }
-        assert!(
-            forging_attr.is_none(),
-            "Match must have no #[derive(...)] (directly or via cfg_attr) anywhere in the \
-             attribute run above it (found: {forging_attr:?}). Clone would let a caller clone an \
-             existing Match, keeping its minted token while swapping in unrelated data."
-        );
-    }
-
     /// Deterministic entropy so a red build replays exactly. Every 16-byte array
     /// is valid BIP-39 entropy — the checksum is computed FROM it.
-    fn gpu_test_entropy(i: usize) -> [u8; 16] {
+    pub(crate) fn gpu_test_entropy(i: usize) -> [u8; 16] {
         let mut e = [0u8; 16];
         e[14] = (i >> 8) as u8;
         e[15] = i as u8;
@@ -646,7 +507,7 @@ mod tests {
 
     /// A block the GPU could have produced, except `ring` did the PBKDF2.
     /// Returns the block plus the address each candidate must resolve to.
-    fn ring_seed_block(n: usize) -> (crate::gpu::SeedBlock, Vec<String>) {
+    pub(crate) fn ring_seed_block(n: usize) -> (crate::gpu::SeedBlock, Vec<[u8; 20]>) {
         use crate::chains::evm::Evm;
         use crate::gpu::{GpuCandidate, SeedBlock};
         use bip39::{Language, Mnemonic};
@@ -657,8 +518,7 @@ mod tests {
             let entropy = gpu_test_entropy(i);
             let m = Mnemonic::from_entropy(&entropy, Language::English).unwrap();
             let seed = crate::seed::derive_seed(&m);
-            let (addr, _sk) = Evm::from_gpu_seed(&seed);
-            addrs.push(Evm::encode_address(&addr));
+            addrs.push(Evm::from_seed(&seed).0);
             block.push(GpuCandidate { entropy, seed });
         }
         (block, addrs)
@@ -669,7 +529,7 @@ mod tests {
         use crate::chains::evm::Evm;
         use crate::gpu::GpuHealth;
 
-        // 128 = 2 full chunks of C::BATCH(4) * GPU_CHUNK_BATCHES(16), so the
+        // 128 = 2 full chunks of Evm::BATCH(4) * GPU_CHUNK_BATCHES(16), so the
         // chunk loop must actually advance rather than handling one chunk.
         const N: usize = 128;
         let (block, want) = ring_seed_block(N);
@@ -680,7 +540,7 @@ mod tests {
         let health = GpuHealth::default();
         let (tx, rx) = mpsc::channel();
 
-        drain_gpu_block::<Evm>(&block, &matcher, &stop, &counter, &tx, &health);
+        drain_gpu_block(&block, &matcher, &stop, &counter, &tx, &health);
         drop(tx);
 
         let got: Vec<Match> = rx.into_iter().collect();
@@ -695,6 +555,7 @@ mod tests {
         assert!(!health.disable.load(Ordering::Relaxed));
 
         let got_addrs: Vec<String> = got.iter().map(|m| m.address.clone()).collect();
+        let want: Vec<String> = want.iter().map(Evm::encode_address).collect();
         assert_eq!(got_addrs, want, "pairing and order must survive the drain");
         for m in &got {
             assert_eq!(m.chain, "EVM");
@@ -725,10 +586,10 @@ mod tests {
             let mut seed = crate::seed::derive_seed(&m);
             if i == 3 {
                 seed[0] ^= 0x01; // one flipped bit, exactly as a faulty kernel would
-                let (bad, _sk) = Evm::from_gpu_seed(&seed);
+                let (bad, _sk) = Evm::from_seed(&seed);
                 corrupted_addr = Evm::encode_address(&bad);
             } else {
-                let (addr, _sk) = Evm::from_gpu_seed(&seed);
+                let (addr, _sk) = Evm::from_seed(&seed);
                 good.push(Evm::encode_address(&addr));
             }
             block.push(GpuCandidate { entropy, seed });
@@ -740,7 +601,7 @@ mod tests {
         let health = GpuHealth::default();
         let (tx, rx) = mpsc::channel();
 
-        drain_gpu_block::<Evm>(&block, &matcher, &stop, &counter, &tx, &health);
+        drain_gpu_block(&block, &matcher, &stop, &counter, &tx, &health);
         drop(tx);
 
         let got: Vec<Match> = rx.into_iter().collect();
@@ -768,12 +629,11 @@ mod tests {
         );
     }
 
-    /// The stop check is per chunk of C::BATCH * GPU_CHUNK_BATCHES = 64 candidates
+    /// The stop check is per chunk of Evm::BATCH * GPU_CHUNK_BATCHES = 64 candidates
     /// (~3.2 ms), and the counter is incremented only AFTER a chunk was actually
     /// inspected — "only what was checked has been counted".
     #[test]
     fn gpu_drain_honours_stop_mid_block() {
-        use crate::chains::evm::Evm;
         use crate::gpu::GpuHealth;
 
         const N: usize = 128;
@@ -785,7 +645,7 @@ mod tests {
         let health = GpuHealth::default();
         let (tx, rx) = mpsc::channel();
 
-        drain_gpu_block::<Evm>(&block, &matcher, &stop, &counter, &tx, &health);
+        drain_gpu_block(&block, &matcher, &stop, &counter, &tx, &health);
         drop(tx);
 
         assert_eq!(
