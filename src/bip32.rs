@@ -2,7 +2,7 @@ use ring::hmac;
 use secp256k1::{PublicKey, Scalar, SecretKey};
 
 /// HMAC-SHA512 of `data` under `key`, split into its left and right halves.
-fn hmac512(key: &[u8], data: &[u8]) -> ([u8; 32], [u8; 32]) {
+pub(crate) fn hmac512(key: &[u8], data: &[u8]) -> ([u8; 32], [u8; 32]) {
     let tag = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA512, key), data);
     let (l, r) = tag.as_ref().split_at(32);
     (l.try_into().unwrap(), r.try_into().unwrap())

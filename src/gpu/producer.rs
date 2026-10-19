@@ -825,9 +825,9 @@ mod gpu_tests {
         engine.reap();
     }
 
-    /// MEASUREMENT, not a gate. Run it under CPU load (Task 4.8 Step 4) when
-    /// the kernel, the wave geometry or the machine changes, then run Step 5
-    /// to fold the result into `EVM_GPU_SEEDS_PER_SEC`:
+    /// MEASUREMENT, not a gate. Run it under CPU load when the kernel, the
+    /// wave geometry or the machine changes, then copy the printed mean into
+    /// `EVM_GPU_SEEDS_PER_SEC`:
     ///
     ///   cargo test --release gpu_seed_rate_end_to_end -- --ignored --nocapture
     ///
@@ -840,7 +840,7 @@ mod gpu_tests {
     /// re-run with the display otherwise quiescent. This test never edits the
     /// constant itself.
     #[test]
-    #[ignore = "measurement; run with --release --nocapture, see Task 4.8 Step 4"]
+    #[ignore = "measurement; run with --release --nocapture"]
     fn gpu_seed_rate_end_to_end() {
         if no_gpu() {
             return;

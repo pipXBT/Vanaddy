@@ -115,20 +115,6 @@ pub fn classify_command_buffer_status(
     })
 }
 
-impl GpuError {
-    /// Bare variant name, for the TUI's narrow GPU columns.
-    pub fn label(&self) -> &'static str {
-        match self {
-            GpuError::NoDevice => "NoDevice",
-            GpuError::ShaderCompile(_) => "ShaderCompile",
-            GpuError::PipelineCreate(_) => "PipelineCreate",
-            GpuError::BufferAlloc => "BufferAlloc",
-            GpuError::BadConfig(_) => "BadConfig",
-            GpuError::CommandBuffer { .. } => "CommandBuffer",
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum GpuStatus {
     /// not aarch64-macos, no device, or --no-default-features

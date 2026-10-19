@@ -1360,6 +1360,58 @@ mod tests {
         assert!(app.gpu_engines.is_empty());
     }
 
+    /// The cycle test above waits for each engine to finish, so it never
+    /// reaches this branch: an engine still winding down when the next search
+    /// starts. That run must be CPU only — a second engine would break the
+    /// one-live-engine invariant `drain_matches` sections 2 and 3 rely on.
+    #[test]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
+    fn start_search_spawns_no_second_engine_while_one_winds_down() {
+        if std::env::var_os("VANADDY_NO_GPU").is_some() {
+            eprintln!("SKIP: VANADDY_NO_GPU is set");
+            return;
+        }
+        if let GpuStatus::Unavailable(reason) = crate::gpu::probe() {
+            eprintln!("SKIP: no Metal device on this machine ({reason})");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_gpu_status(crate::gpu::probe());
+        app.csv_path = dir.path().join("vanity_wallets.csv");
+        app.chain = crate::chains::ChainKind::Evm;
+        app.vanity_prefix = "aaaaaaaa".into();
+        app.thread_count = "1".into();
+        app.gpu_requested = true;
+        app.validate().unwrap();
+        assert!(app.validated_gpu, "precondition: the GPU is validated");
+
+        // Live and unfinished: `keep_rx` stays alive, so it cannot exit on
+        // Disconnected, and nothing has signalled it.
+        let (tx, keep_rx) = crossbeam_channel::bounded(crate::gpu::CHANNEL_CAPACITY);
+        app.gpu_engines
+            .push(GpuEngine::start(tx, Arc::new(GpuHealth::default())));
+        assert!(
+            !app.gpu_engines[0].is_finished(),
+            "precondition: still live"
+        );
+
+        app.start_search();
+
+        assert_eq!(app.gpu_engines.len(), 1, "no second engine spawned");
+        assert!(app.gpu_rx.is_none(), "this run is CPU only");
+        assert!(
+            app.error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("winding down")),
+            "{:?}",
+            app.error_message
+        );
+
+        app.stop_search();
+        drop(keep_rx);
+        app.shutdown_gpu(Duration::from_secs(5));
+    }
+
     #[test]
     fn stop_search_releases_everything_and_never_blocks_the_ui_thread() {
         let dir = tempfile::tempdir().unwrap();
@@ -2137,8 +2189,9 @@ mod tests {
         //
         // It does NOT cover the opposite error — a section-3 condition that
         // UNDER-reports, such as a transposed `gpu_rx`/`disable` check — because
-        // `gpu_engines` is empty in every test here, so section 3's true branch
-        // never executes. That needs a live engine.
+        // nothing is parked, so section 3's true branch never executes.
+        // `drain_matches_flags_a_quiet_gpu_exit_only_on_a_live_faultless_run`
+        // covers that.
         //
         // It also does NOT prove the status-refresh block is present. With
         // nothing parked, `gpu_engines.last()` is None, so that block is a no-op
@@ -2169,6 +2222,73 @@ mod tests {
             "a faultless tick must not release the channel"
         );
         drop(keep_tx);
+    }
+
+    /// Section 3 of `drain_matches`: a parked engine that finished with nothing
+    /// raised is a quiet death, but only while THIS run is Searching with a live
+    /// channel and no fault already recorded. Runs on every target: the stub
+    /// engine is born finished; a Metal one is stopped and waited out.
+    #[test]
+    fn drain_matches_flags_a_quiet_gpu_exit_only_on_a_live_faultless_run() {
+        // (label, state, live channel, fault already recorded, must fire)
+        let rows = [
+            ("live faultless run", AppState::Searching, true, false, true),
+            ("stopped run", AppState::Configuring, true, false, false),
+            (
+                "GPU skipped this run",
+                AppState::Searching,
+                false,
+                false,
+                false,
+            ),
+            (
+                "fault already recorded",
+                AppState::Searching,
+                true,
+                true,
+                false,
+            ),
+        ];
+        for (label, state, live, faulted, fires) in rows {
+            // A throwaway health cell: the stub's `start` raises on the one it
+            // is given, and that must not reach `app.gpu_health`.
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            drop(rx);
+            let engine = GpuEngine::start(tx, Arc::new(GpuHealth::default()));
+            engine.signal_stop();
+            let give_up = Instant::now() + Duration::from_secs(60);
+            while !engine.is_finished() && Instant::now() < give_up {
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                engine.is_finished(),
+                "{label}: precondition: engine finished"
+            );
+
+            let (keep_tx, rx) = crossbeam_channel::bounded::<Box<crate::gpu::SeedBlock>>(1);
+            let mut app = App::new();
+            app.state = state;
+            app.gpu_rx = live.then_some(rx);
+            app.gpu_engines.push(engine);
+            if faulted {
+                // Already Disabled, so section 1 leaves it and the channel
+                // alone: only section 3 could overwrite it with Panicked.
+                let r = GpuDisableReason::AuditMismatch { index: 7 };
+                app.gpu_health.raise(r.clone());
+                app.gpu_status = GpuStatus::Disabled(r);
+            }
+
+            app.drain_matches();
+
+            assert_eq!(
+                app.gpu_status == GpuStatus::Disabled(GpuDisableReason::Panicked),
+                fires,
+                "{label}: {:?}",
+                app.gpu_status
+            );
+            assert_eq!(app.gpu_rx.is_some(), live && !fires, "{label}: channel");
+            drop(keep_tx);
+        }
     }
 
     #[test]

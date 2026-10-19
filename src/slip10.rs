@@ -1,11 +1,4 @@
-use ring::hmac;
-
-/// HMAC-SHA512 of `data` under `key`, split into its left and right halves.
-fn hmac512(key: &[u8], data: &[u8]) -> ([u8; 32], [u8; 32]) {
-    let tag = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA512, key), data);
-    let (l, r) = tag.as_ref().split_at(32);
-    (l.try_into().unwrap(), r.try_into().unwrap())
-}
+use crate::bip32::hmac512;
 
 /// SLIP-0010 Ed25519 child-key derivation.
 /// All indices in `path` MUST be hardened (>= 0x80000000); Ed25519 does not support

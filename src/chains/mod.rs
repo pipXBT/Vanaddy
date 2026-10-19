@@ -505,7 +505,7 @@ pub(crate) mod tests {
 
     /// A block the GPU could have produced, except `ring` did the PBKDF2.
     /// Returns the block plus the address each candidate must resolve to.
-    pub(crate) fn ring_seed_block(n: usize) -> (crate::gpu::SeedBlock, Vec<[u8; 20]>) {
+    fn ring_seed_block(n: usize) -> (crate::gpu::SeedBlock, Vec<[u8; 20]>) {
         use crate::chains::evm::Evm;
         use crate::gpu::{GpuCandidate, SeedBlock};
         use bip39::{Language, Mnemonic};

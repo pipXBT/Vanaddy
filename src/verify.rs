@@ -33,18 +33,26 @@ pub fn verify_gpu(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chains::tests::{gpu_test_entropy, ring_seed_block};
+    use crate::chains::tests::gpu_test_entropy;
     use crate::chains::Chain;
     use bip39::{Language, Mnemonic};
+
+    /// What the GPU would have delivered for `gpu_test_entropy(i)`, with `ring`
+    /// doing the PBKDF2: the entropy and the address it must resolve to.
+    fn candidate(i: usize) -> ([u8; 16], [u8; 20]) {
+        let e = gpu_test_entropy(i);
+        let m = Mnemonic::from_entropy(&e, Language::English).unwrap();
+        (e, Evm::from_seed(&crate::seed::derive_seed(&m)).0)
+    }
 
     /// Anchor the gate to external ground truth first: entropy = 16 zero bytes is
     /// the BIP-39 canonical phrase, whose m/44'/60'/0'/0/0 address is the pinned
     /// first MetaMask account.
     #[test]
     fn verify_gpu_accepts_the_bip39_canonical_vector() {
-        let (_, addrs) = ring_seed_block(1);
+        let (entropy, gpu_addr) = candidate(0);
         let (addr, secret, phrase) =
-            verify_gpu(&gpu_test_entropy(0), &addrs[0]).expect("canonical vector must verify");
+            verify_gpu(&entropy, &gpu_addr).expect("canonical vector must verify");
         assert_eq!(
             hex::encode(addr),
             "9858effd232b4033e47d90003d41ec34ecaeda94"
@@ -59,11 +67,10 @@ mod tests {
 
     #[test]
     fn verify_gpu_rejects_flipped_address_nibble() {
-        let (_, addrs) = ring_seed_block(10);
-        let mut tampered = addrs[9];
+        let (entropy, mut tampered) = candidate(9);
         tampered[0] ^= 0x10; // one nibble
         assert!(
-            verify_gpu(&gpu_test_entropy(9), &tampered).is_none(),
+            verify_gpu(&entropy, &tampered).is_none(),
             "a GPU address that does not re-derive must be REJECTED, never accepted"
         );
     }
@@ -73,8 +80,7 @@ mod tests {
     /// and it must not be able to reach the CSV.
     #[test]
     fn verify_gpu_rejects_entropy_from_a_different_candidate() {
-        let (_, addrs) = ring_seed_block(13);
-        assert!(verify_gpu(&gpu_test_entropy(11), &addrs[12]).is_none());
+        assert!(verify_gpu(&candidate(11).0, &candidate(12).1).is_none());
     }
 
     /// An honest candidate verifies, and what comes back is the CPU-derived
@@ -82,12 +88,11 @@ mod tests {
     /// re-derives from that phrase.
     #[test]
     fn verify_gpu_result_carries_a_usable_secret_for_the_returned_address() {
-        let (_, addrs) = ring_seed_block(38);
-        let entropy = gpu_test_entropy(37);
+        let (entropy, gpu_addr) = candidate(37);
         let (addr, secret, phrase) =
-            verify_gpu(&entropy, &addrs[37]).expect("an honest candidate must verify");
+            verify_gpu(&entropy, &gpu_addr).expect("an honest candidate must verify");
         assert_eq!(
-            addr, addrs[37],
+            addr, gpu_addr,
             "the returned address is the CPU-derived one"
         );
         let round = Mnemonic::from_phrase(&phrase, Language::English).unwrap();

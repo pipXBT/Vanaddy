@@ -1,7 +1,7 @@
 use super::app::{App, AppState};
 use super::chains::ChainKind;
 use super::matcher::MatchPosition;
-use crate::gpu::{GpuDisableReason, GpuStatus};
+use crate::gpu::{GpuDisableReason, GpuError, GpuStatus};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -195,7 +195,12 @@ fn gpu_reason_label(r: &GpuDisableReason) -> &'static str {
     match r {
         GpuDisableReason::NotSupported => "NotSupported",
         GpuDisableReason::UserOff => "UserOff",
-        GpuDisableReason::Backend(e) => e.label(),
+        GpuDisableReason::Backend(GpuError::NoDevice) => "NoDevice",
+        GpuDisableReason::Backend(GpuError::ShaderCompile(_)) => "ShaderCompile",
+        GpuDisableReason::Backend(GpuError::PipelineCreate(_)) => "PipelineCreate",
+        GpuDisableReason::Backend(GpuError::BufferAlloc) => "BufferAlloc",
+        GpuDisableReason::Backend(GpuError::BadConfig(_)) => "BadConfig",
+        GpuDisableReason::Backend(GpuError::CommandBuffer { .. }) => "CommandBuffer",
         GpuDisableReason::SelfTest(_) => "SelfTest",
         GpuDisableReason::AuditMismatch { .. } => "AuditMismatch",
         GpuDisableReason::VerifyMismatch { .. } => "VerifyMismatch",

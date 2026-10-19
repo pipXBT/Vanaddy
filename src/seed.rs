@@ -5,8 +5,9 @@ use bip39::Mnemonic;
 /// kernel for exactly the number of rounds the CPU reference uses.
 pub const PBKDF2_ROUNDS: u32 = 2048;
 
-/// BIP-39 salt with an empty passphrase. `pub` so `crate::gpu::pack` builds the
-/// GPU's salt block from the same bytes `derive_seed` hands to `ring`.
+/// BIP-39 salt with an empty passphrase. The GPU uses a hard-coded padded copy
+/// (`gpu::pack::BIP39_SALT_BLOCK`); the startup self-test's canonical-vector
+/// check catches any drift.
 pub const BIP39_SALT: &[u8; 8] = b"mnemonic";
 
 /// BIP-39 canonical vector: the phrase for 16 zero bytes of entropy and its

@@ -231,22 +231,6 @@ where
     Ok(())
 }
 
-/// PBKDF2-HMAC-SHA512 over `crate::seed::BIP39_SALT` via `ring` — the same
-/// primitive `src/seed.rs` uses, but with `iters` free. The reference every GPU
-/// test compares against.
-#[cfg(test)]
-pub(crate) fn ring_reference(phrase: &str, iters: u32) -> [u8; 64] {
-    let mut out = [0u8; 64];
-    ring::pbkdf2::derive(
-        ring::pbkdf2::PBKDF2_HMAC_SHA512,
-        std::num::NonZeroU32::new(iters).expect("iters >= 1"),
-        crate::seed::BIP39_SALT,
-        phrase.as_bytes(),
-        &mut out,
-    );
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,7 +242,13 @@ mod tests {
     fn reference(phrases: &[&str], iters: u32, _schedule: Schedule) -> Result<Seeds, GpuError> {
         Ok(phrases
             .iter()
-            .map(|p| Zeroizing::new(ring_reference(p, iters)))
+            .map(|p| {
+                Zeroizing::new(crate::pbkdf2_lanes::ring_pbkdf2_sha512(
+                    p.as_bytes(),
+                    crate::seed::BIP39_SALT,
+                    iters,
+                ))
+            })
             .collect())
     }
 
@@ -371,13 +361,13 @@ mod tests {
                     }
                 },
             ),
-            // Corrupts index 250 ONLY on the count=512 wave, leaving the
-            // count=511 ragged wave and the single-phrase schedule calls
-            // untouched, so the full and ragged waves disagree there.
+            // Corrupts index 250 ONLY on the count=511 ragged wave. The full
+            // wave stays clean and passes its `ring` loop, so only the
+            // ragged-vs-full comparison can see it.
             (
-                "full-wave-only ring mismatch",
+                "ragged-wave-only mismatch",
                 |p, _, o| {
-                    if p.len() == SELF_TEST_COUNT {
+                    if p.len() == SELF_TEST_RAGGED_COUNT {
                         o[250][0] ^= 0x01;
                     }
                 },

@@ -25,6 +25,9 @@ fn main() -> io::Result<()> {
 
     // Raw mode + alternate screen, plus a panic hook that restores the terminal
     // and then chains to the previous hook so the message and backtrace print.
+    // ponytail: ratatui's restore (in that hook and at exit below) stops at the
+    // first error, so a failed disable_raw_mode also skips LeaveAlternateScreen.
+    // Install two independent `let _ =` restores if that ever bites.
     let mut terminal = ratatui::try_init()?;
 
     let mut app = App::with_gpu_status(gpu_status);

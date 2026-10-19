@@ -66,7 +66,7 @@ fn size1(width: usize) -> MTLSize {
     }
 }
 
-/// ~1 ms device probe. Called ONCE from `main()`, BEFORE `enable_raw_mode()`,
+/// ~1 ms device probe. Called ONCE from `main()`, BEFORE `ratatui::try_init()`,
 /// so that a panic or any Metal stderr noise cannot land inside the alternate
 /// screen.
 pub fn probe() -> GpuStatus {
@@ -658,8 +658,8 @@ pub(crate) fn gpu_for_test() -> Option<MetalPbkdf2> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpu::selftest::ring_reference;
-    use crate::seed::{CANONICAL_PHRASE, CANONICAL_SEED_HEX};
+    use crate::pbkdf2_lanes::ring_pbkdf2_sha512;
+    use crate::seed::{BIP39_SALT, CANONICAL_PHRASE, CANONICAL_SEED_HEX};
     use bip39::{Language, Mnemonic};
     use rand::{RngCore, SeedableRng};
     use rand_chacha::ChaCha20Rng;
@@ -687,7 +687,7 @@ mod tests {
             for (i, phrase) in phrases.iter().enumerate() {
                 assert_eq!(
                     hex::encode(*out[i]),
-                    hex::encode(ring_reference(phrase, iters)),
+                    hex::encode(ring_pbkdf2_sha512(phrase.as_bytes(), BIP39_SALT, iters)),
                     "iters={iters} index={i} phrase=`{phrase}` ({} bytes)",
                     phrase.len()
                 );
@@ -727,7 +727,11 @@ mod tests {
             for (i, phrase) in phrases.iter().enumerate() {
                 assert_eq!(
                     hex::encode(*out[i]),
-                    hex::encode(ring_reference(phrase, crate::seed::PBKDF2_ROUNDS)),
+                    hex::encode(ring_pbkdf2_sha512(
+                        phrase.as_bytes(),
+                        BIP39_SALT,
+                        crate::seed::PBKDF2_ROUNDS
+                    )),
                     "schedule {label} index {i}"
                 );
             }
