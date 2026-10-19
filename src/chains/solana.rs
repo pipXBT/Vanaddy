@@ -58,8 +58,13 @@ impl Chain for Solana {
     }
 
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool {
-        let addr = bs58::encode(bytes).into_string();
-        matcher.prefix_matches(&addr) && matcher.suffix_matches(&addr)
+        // 32 bytes encode to at most 44 base58 chars; stack buffer, no String.
+        let mut buf = [0u8; 44];
+        let len = bs58::encode(bytes)
+            .into(&mut buf[..])
+            .expect("44 fits 32 bytes");
+        let addr = std::str::from_utf8(&buf[..len]).expect("base58 is ascii");
+        matcher.prefix_matches(addr) && matcher.suffix_matches(addr)
     }
 }
 
@@ -127,5 +132,27 @@ mod tests {
     #[test]
     fn generate_batch_emits_lane_count_candidates_matching_single_path() {
         super::super::assert_batch_matches_single_path::<Solana, _>(Solana::from_seed);
+    }
+
+    /// The stack-buffer encode in `matches_raw` must agree with `encode_address`
+    /// on random keys, a leading-zero key ('1' prefix) and the all-zero key
+    /// (32 chars, far short of the 44-byte buffer).
+    #[test]
+    fn matches_raw_agrees_with_encode_address_on_random_candidates() {
+        use super::super::ChainKind;
+        let mut cands: Vec<[u8; 32]> = (0..16).map(|_| rand::random()).collect();
+        cands[0][0] = 0;
+        cands.push([0; 32]);
+        for bytes in &cands {
+            let addr = Solana::encode_address(bytes);
+            let (pre, suf) = (&addr[..3], &addr[addr.len() - 3..]);
+            let last = if suf.ends_with(['z', 'Z']) { "2" } else { "z" };
+            let wrong = format!("{}{last}", &suf[..2]);
+            for cs in [true, false] {
+                let m = |s: &str| Matcher::new(pre.into(), s.into(), cs, ChainKind::Solana);
+                assert!(Solana::matches_raw(&m(suf), bytes), "must match {addr}");
+                assert!(!Solana::matches_raw(&m(&wrong), bytes), "{wrong} vs {addr}");
+            }
+        }
     }
 }

@@ -13,20 +13,19 @@ pub struct Evm;
 ///
 /// Example: 0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed
 fn eip55_encode(addr: &[u8; 20]) -> [u8; 40] {
-    let lower = hex::encode(addr);
-    let hash = Keccak256::digest(lower.as_bytes());
+    // Stack-only: runs per candidate in case-sensitive `matches_raw`.
     let mut out = [0u8; 40];
-    for (i, c) in lower.as_bytes().iter().enumerate() {
+    hex::encode_to_slice(addr, &mut out).expect("20 bytes -> 40 hex chars");
+    let hash = Keccak256::digest(&out);
+    for (i, c) in out.iter_mut().enumerate() {
         let hash_nibble = if i % 2 == 0 {
             hash[i / 2] >> 4
         } else {
             hash[i / 2] & 0x0f
         };
-        out[i] = if c.is_ascii_alphabetic() && hash_nibble >= 8 {
-            c.to_ascii_uppercase()
-        } else {
-            *c
-        };
+        if hash_nibble >= 8 {
+            c.make_ascii_uppercase(); // no-op on digits
+        }
     }
     out
 }
@@ -161,6 +160,40 @@ mod tests {
         assert!(Evm::matches_raw(&m("", "Eda94"), &addr));
         assert!(!Evm::matches_raw(&m("9858effd", ""), &addr));
         assert!(!Evm::matches_raw(&m("9858EfFD", "ecaeda94"), &addr));
+    }
+
+    /// Stack `eip55_encode` must equal the allocating EIP-55 of `encode_address`'s
+    /// hex on random addresses, and case-sensitive `matches_raw` must hit on that
+    /// casing and miss on the all-lowercase form whenever they differ.
+    #[test]
+    fn matches_raw_agrees_with_encode_address_on_random_candidates() {
+        use super::super::ChainKind;
+        for _ in 0..16 {
+            let addr: [u8; 20] = rand::random();
+            let lower = Evm::encode_address(&addr)[2..].to_string();
+            let hash = Keccak256::digest(lower.as_bytes());
+            let want: String = lower
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    let n = if i % 2 == 0 {
+                        hash[i / 2] >> 4
+                    } else {
+                        hash[i / 2] & 0x0f
+                    };
+                    if n >= 8 {
+                        c.to_ascii_uppercase()
+                    } else {
+                        c
+                    }
+                })
+                .collect();
+            assert_eq!(std::str::from_utf8(&eip55_encode(&addr)).unwrap(), want);
+
+            let m = |p: &str| Matcher::new(p.into(), String::new(), true, ChainKind::Evm);
+            assert!(Evm::matches_raw(&m(&want), &addr));
+            assert_eq!(Evm::matches_raw(&m(&lower), &addr), want == lower);
+        }
     }
 
     #[test]
