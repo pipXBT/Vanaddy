@@ -140,40 +140,15 @@ mod tests {
 
     #[test]
     fn bitcoin_starts_and_ends_with_both_required() {
-        use super::super::super::matcher::Matcher;
-        use super::super::ChainKind;
+        use super::super::{assert_prefix_suffix, ChainKind};
 
         let m = Mnemonic::from_phrase(
             "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
             Language::English,
         ).unwrap();
-        let seed = derive_seed(&m);
-        let sk = bip32_derive_secp256k1(&seed, &BTC_BIP84_PATH);
-        let pk = secp256k1::PublicKey::from_secret_key_global(&sk);
-        let hash = hash160(&pk.serialize());
-        let addr = Bitcoin::encode_address(&hash);
-        // addr = "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
-        // after "bc1q": "cr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
-        let vanity_target = &addr[4..];
-        let actual_prefix = &vanity_target[..3]; // "cr8"
-        let actual_suffix = &addr[addr.len() - 3..]; // "fyu"
-
-        let wrong_suffix = if actual_suffix == "zzz" { "aaa" } else { "zzz" };
-        let matcher = Matcher::new(
-            actual_prefix.to_string(),
-            wrong_suffix.to_string(),
-            true,
-            ChainKind::Bitcoin,
-        );
-        assert!(!Bitcoin::matches_raw(&matcher, &hash), "must reject wrong suffix");
-
-        let matcher = Matcher::new(
-            actual_prefix.to_string(),
-            actual_suffix.to_string(),
-            true,
-            ChainKind::Bitcoin,
-        );
-        assert!(Bitcoin::matches_raw(&matcher, &hash), "must accept both correct");
+        // "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu": "cr8" after "bc1q", "fyu".
+        let (hash, _) = Bitcoin::from_seed(&derive_seed(&m));
+        assert_prefix_suffix::<Bitcoin>(ChainKind::Bitcoin, &hash, 4, true);
     }
 
     #[test]
@@ -194,19 +169,6 @@ mod tests {
 
     #[test]
     fn generate_batch_emits_lane_count_candidates_matching_single_path() {
-        use crate::pbkdf2_lanes::LANES;
-        let mut got = Vec::new();
-        Bitcoin::generate_batch(|addr, secret, phrase| got.push((addr, secret, phrase)));
-        assert_eq!(Bitcoin::BATCH, LANES);
-        assert_eq!(got.len(), LANES);
-        for (addr, secret, phrase) in &got {
-            let m = Mnemonic::from_phrase(phrase, Language::English).unwrap();
-            let (addr2, secret2) = Bitcoin::from_seed(&derive_seed(&m));
-            assert_eq!(addr, &addr2, "batch address must match single-path derivation");
-            assert_eq!(Bitcoin::encode_secret(secret), Bitcoin::encode_secret(&secret2));
-        }
-        let mut addrs: Vec<_> = got.iter().map(|c| c.0).collect();
-        addrs.dedup();
-        assert_eq!(addrs.len(), LANES, "every lane must use fresh entropy");
+        super::super::assert_batch_matches_single_path::<Bitcoin, _>(Bitcoin::from_seed);
     }
 }

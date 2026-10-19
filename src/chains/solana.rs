@@ -94,42 +94,15 @@ mod tests {
 
     #[test]
     fn solana_starts_and_ends_with_both_required() {
-        use super::super::super::matcher::Matcher;
-        use super::super::ChainKind;
+        use super::super::{assert_prefix_suffix, ChainKind};
 
         // Derive the canonical pinned address as a reliable test payload.
         let m = Mnemonic::from_phrase(
             "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
             Language::English,
         ).unwrap();
-        let seed = derive_seed(&m);
-        let key = slip10_derive_ed25519(&seed, &PHANTOM_SOLANA_PATH);
-        let sk = SigningKey::from_bytes(&key);
-        let pubkey: [u8; 32] = sk.verifying_key().to_bytes();
-        let addr = bs58::encode(&pubkey).into_string();
-
-        let actual_prefix = &addr[..3];
-        let actual_suffix = &addr[addr.len() - 3..];
-
-        // Use case_sensitive=false so raw_prefix fast-path is skipped (it decodes
-        // base58 byte-wise which isn't a clean string-prefix match). The matches_raw
-        // path then goes through the full encode + string compare.
-        let wrong_suffix = if actual_suffix == "zzz" { "aaa" } else { "zzz" };
-        let matcher = Matcher::new(
-            actual_prefix.to_string(),
-            wrong_suffix.to_string(),
-            false,
-            ChainKind::Solana,
-        );
-        assert!(!Solana::matches_raw(&matcher, &pubkey), "must reject wrong suffix");
-
-        let matcher = Matcher::new(
-            actual_prefix.to_string(),
-            actual_suffix.to_string(),
-            false,
-            ChainKind::Solana,
-        );
-        assert!(Solana::matches_raw(&matcher, &pubkey), "must accept both correct");
+        let (pubkey, _) = Solana::from_seed(&derive_seed(&m));
+        assert_prefix_suffix::<Solana>(ChainKind::Solana, &pubkey, 0, false);
     }
 
     #[test]
@@ -158,19 +131,6 @@ mod tests {
 
     #[test]
     fn generate_batch_emits_lane_count_candidates_matching_single_path() {
-        use crate::pbkdf2_lanes::LANES;
-        let mut got = Vec::new();
-        Solana::generate_batch(|addr, secret, phrase| got.push((addr, secret, phrase)));
-        assert_eq!(Solana::BATCH, LANES);
-        assert_eq!(got.len(), LANES);
-        for (addr, secret, phrase) in &got {
-            let m = Mnemonic::from_phrase(phrase, Language::English).unwrap();
-            let (addr2, secret2) = Solana::from_seed(&derive_seed(&m));
-            assert_eq!(addr, &addr2, "batch address must match single-path derivation");
-            assert_eq!(Solana::encode_secret(secret), Solana::encode_secret(&secret2));
-        }
-        let mut addrs: Vec<_> = got.iter().map(|c| c.0).collect();
-        addrs.dedup();
-        assert_eq!(addrs.len(), LANES, "every lane must use fresh entropy");
+        super::super::assert_batch_matches_single_path::<Solana, _>(Solana::from_seed);
     }
 }

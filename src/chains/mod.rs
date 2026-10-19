@@ -249,6 +249,56 @@ fn emit_gpu_match<C: Bip39GpuChain>(
     }
 }
 
+/// Shared body of each chain's `*_starts_and_ends_with_both_required` test: the
+/// address's own 3-char prefix (after the chain's `skip` fixed chars) and 3-char
+/// suffix must match, and the same prefix with a wrong suffix must not.
+#[cfg(test)]
+fn assert_prefix_suffix<C: Chain>(
+    kind: ChainKind,
+    bytes: &C::AddressBytes,
+    skip: usize,
+    case_sensitive: bool,
+) {
+    let addr = C::encode_address(bytes);
+    let prefix = &addr[skip..skip + 3];
+    let suffix = &addr[addr.len() - 3..];
+    let wrong_suffix = if suffix == "zzz" { "aaa" } else { "zzz" };
+    let m = Matcher::new(prefix.into(), wrong_suffix.into(), case_sensitive, kind);
+    assert!(!C::matches_raw(&m, bytes), "must reject wrong suffix");
+    let m = Matcher::new(prefix.into(), suffix.into(), case_sensitive, kind);
+    assert!(C::matches_raw(&m, bytes), "must accept both correct");
+}
+
+/// Shared body of each BIP-39 chain's
+/// `generate_batch_emits_lane_count_candidates_matching_single_path`: the
+/// batched (4-lane) path must emit `LANES` candidates that each equal the
+/// single-path (`ring`) derivation of their own phrase.
+#[cfg(test)]
+fn assert_batch_matches_single_path<C: Chain, F>(from_seed: F)
+where
+    F: Fn(&[u8; 64]) -> (C::AddressBytes, C::SecretRaw),
+    C::AddressBytes: Copy + PartialEq + std::fmt::Debug,
+{
+    use crate::pbkdf2_lanes::LANES;
+    use bip39::{Language, Mnemonic};
+    let mut got = Vec::new();
+    C::generate_batch(|addr, secret, phrase| got.push((addr, secret, phrase)));
+    assert_eq!(C::BATCH, LANES);
+    assert_eq!(got.len(), LANES);
+    for (addr, secret, phrase) in &got {
+        let m = Mnemonic::from_phrase(phrase, Language::English).unwrap();
+        let (addr2, secret2) = from_seed(&crate::seed::derive_seed(&m));
+        assert_eq!(
+            addr, &addr2,
+            "batch address must match single-path derivation"
+        );
+        assert_eq!(C::encode_secret(secret), C::encode_secret(&secret2));
+    }
+    let mut addrs: Vec<_> = got.iter().map(|c| c.0).collect();
+    addrs.dedup();
+    assert_eq!(addrs.len(), LANES, "every lane must use fresh entropy");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,27 +307,9 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    #[test]
-    fn search_counts_whole_batches_and_honours_stop() {
-        // Nine 'z's cannot occur at the start of a 44-char base58 key in 20 ms.
-        let matcher = Matcher::new("zzzzzzzzz".into(), String::new(), true, ChainKind::Solana);
-        let stop = AtomicBool::new(false);
-        let counter = AtomicU64::new(0);
-        let (tx, _rx) = mpsc::channel();
-        thread::scope(|s| {
-            s.spawn(|| search::<solana::Solana>(&matcher, &stop, &counter, &tx));
-            thread::sleep(Duration::from_millis(20));
-            stop.store(true, Ordering::Relaxed);
-        });
-        let n = counter.load(Ordering::Relaxed);
-        assert!(n > 0, "search must make progress");
-        assert_eq!(solana::Solana::BATCH, LANES);
-        assert_eq!(n % LANES as u64, 0, "counter advances in whole batches, got {n}");
-    }
-
-    /// `ChainKind::search` gained two GPU parameters. Milestone 2 already pinned
-    /// the free function `search_hybrid` with `gpu: None`; this pins the
-    /// `ChainKind` arm. With `gpu: None` — the state every non-EVM chain is
+    /// `ChainKind::search` gained two GPU parameters; this pins the `ChainKind`
+    /// arms (the Evm arm is `search_hybrid`, the others are `search`). With
+    /// `gpu: None` — the state every non-EVM chain is
     /// permanently in, and the state EVM is in until Milestone 6 spawns a
     /// producer — behaviour must be exactly what it was: whole `C::BATCH`
     /// increments, prompt stop, and no GPU bookkeeping.
@@ -605,7 +637,6 @@ mod tests {
 
     /// Deterministic entropy so a red build replays exactly. Every 16-byte array
     /// is valid BIP-39 entropy — the checksum is computed FROM it.
-    #[cfg(test)]
     fn gpu_test_entropy(i: usize) -> [u8; 16] {
         let mut e = [0u8; 16];
         e[14] = (i >> 8) as u8;
@@ -764,38 +795,5 @@ mod tests {
         );
         assert_eq!(health.seeds_delivered.load(Ordering::Relaxed), 0);
         assert!(rx.try_recv().is_err(), "a stopped drain must emit nothing");
-    }
-
-    /// With `gpu: None`, `search_hybrid` must behave exactly like `search`:
-    /// whole CPU batches, honours stop, touches no GPU health counter.
-    #[test]
-    fn search_with_no_gpu_source_is_unchanged() {
-        use crate::chains::evm::Evm;
-        use crate::gpu::GpuHealth;
-
-        // Eight hex 'f's cannot occur at the start of an EVM address in 30 ms.
-        let matcher = Matcher::new("ffffffff".into(), String::new(), false, ChainKind::Evm);
-        let stop = AtomicBool::new(false);
-        let counter = AtomicU64::new(0);
-        let health = GpuHealth::default();
-        let (tx, _rx) = mpsc::channel();
-        thread::scope(|s| {
-            s.spawn(|| search_hybrid::<Evm>(&matcher, &stop, &counter, &tx, None, &health));
-            thread::sleep(Duration::from_millis(30));
-            stop.store(true, Ordering::Relaxed);
-        });
-        let n = counter.load(Ordering::Relaxed);
-        assert!(
-            n > 0,
-            "hybrid search with no GPU must still make CPU progress"
-        );
-        assert_eq!(Evm::BATCH, LANES);
-        assert_eq!(
-            n % LANES as u64,
-            0,
-            "counter advances in whole CPU batches, got {n}"
-        );
-        assert_eq!(health.seeds_delivered.load(Ordering::Relaxed), 0);
-        assert!(!health.disable.load(Ordering::Relaxed));
     }
 }

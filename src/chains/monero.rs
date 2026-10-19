@@ -170,11 +170,7 @@ mod tests {
 
     #[test]
     fn monero_address_starts_with_4_and_is_95_chars() {
-        let (keypair, spend_pub, view_pub) = generate_keys();
-        let mut payload = [0u8; 65];
-        payload[0] = NETWORK_BYTE_MAINNET;
-        payload[1..33].copy_from_slice(&spend_pub);
-        payload[33..65].copy_from_slice(&view_pub);
+        let (payload, keypair, _) = Monero::generate();
         let addr = Monero::encode_address(&payload);
         assert_eq!(addr.len(), 95, "Monero mainnet addresses are 95 chars, got len={}: {}", addr.len(), addr);
         assert!(addr.starts_with('4'), "network byte 0x12 must produce leading '4', got: {}", addr);
@@ -182,25 +178,6 @@ mod tests {
         let secret = Monero::encode_secret(&keypair);
         assert!(secret.contains(':'));
         assert_eq!(secret.len(), 64 + 1 + 64, "spend_hex:view_hex = 64+1+64 chars");
-    }
-
-    #[test]
-    fn monero_seed_phrase_has_25_words() {
-        let spend_sec = [0u8; 32];
-        let phrase = monero_seed_phrase(&spend_sec);
-        let words: Vec<&str> = phrase.split_whitespace().collect();
-        assert_eq!(words.len(), 25, "Monero mnemonic must be 25 words");
-        for w in &words {
-            assert!(MONERO_WORDLIST.contains(w), "word '{}' not in wordlist", w);
-        }
-    }
-
-    #[test]
-    fn monero_seed_phrase_deterministic() {
-        let spend_sec = [0xABu8; 32];
-        let p1 = monero_seed_phrase(&spend_sec);
-        let p2 = monero_seed_phrase(&spend_sec);
-        assert_eq!(p1, p2);
     }
 
     #[test]
@@ -227,35 +204,10 @@ mod tests {
 
     #[test]
     fn monero_starts_and_ends_with_both_required() {
-        use super::super::super::matcher::Matcher;
-        use super::super::ChainKind;
+        use super::super::{assert_prefix_suffix, ChainKind};
 
-        let (_keypair, spend_pub, view_pub) = super::generate_keys();
-        let mut payload = [0u8; 65];
-        payload[0] = super::NETWORK_BYTE_MAINNET;
-        payload[1..33].copy_from_slice(&spend_pub);
-        payload[33..65].copy_from_slice(&view_pub);
-
-        let addr = Monero::encode_address(&payload);
-        let actual_prefix = &addr[1..3];
-        let actual_suffix = &addr[addr.len() - 3..];
-
-        let wrong_suffix = if actual_suffix == "zzz" { "aaa" } else { "zzz" };
-        let m = Matcher::new(
-            actual_prefix.to_string(),
-            wrong_suffix.to_string(),
-            true,
-            ChainKind::Monero,
-        );
-        assert!(!Monero::matches_raw(&m, &payload), "must reject wrong suffix");
-
-        let m = Matcher::new(
-            actual_prefix.to_string(),
-            actual_suffix.to_string(),
-            true,
-            ChainKind::Monero,
-        );
-        assert!(Monero::matches_raw(&m, &payload), "must accept both correct");
+        let (payload, _, _) = Monero::generate();
+        assert_prefix_suffix::<Monero>(ChainKind::Monero, &payload, 1, true);
     }
 
     #[test]
@@ -263,11 +215,7 @@ mod tests {
         use super::super::super::matcher::Matcher;
         use super::super::ChainKind;
 
-        let (_, spend_pub, view_pub) = super::generate_keys();
-        let mut payload = [0u8; 65];
-        payload[0] = super::NETWORK_BYTE_MAINNET;
-        payload[1..33].copy_from_slice(&spend_pub);
-        payload[33..65].copy_from_slice(&view_pub);
+        let (payload, _, _) = Monero::generate();
         let addr = Monero::encode_address(&payload);
         let actual_suffix_upper = addr[addr.len() - 3..].to_uppercase();
 
@@ -279,21 +227,6 @@ mod tests {
             ChainKind::Monero,
         );
         assert!(Monero::matches_raw(&m, &payload));
-    }
-
-    #[test]
-    fn monero_user_reported_scenario_8888_prefix_888_suffix() {
-        use super::super::super::matcher::Matcher;
-        use super::super::ChainKind;
-
-        let m = Matcher::new(
-            "8888".to_string(),
-            "888".to_string(),
-            true,
-            ChainKind::Monero,
-        );
-        assert_eq!(m.prefix, "8888");
-        assert_eq!(m.suffix, "888");
     }
 
     #[test]

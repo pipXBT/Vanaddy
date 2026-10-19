@@ -176,20 +176,7 @@ mod tests {
 
     #[test]
     fn generate_batch_emits_lane_count_candidates_matching_single_path() {
-        use crate::pbkdf2_lanes::LANES;
-        let mut got = Vec::new();
-        Evm::generate_batch(|addr, secret, phrase| got.push((addr, secret, phrase)));
-        assert_eq!(Evm::BATCH, LANES);
-        assert_eq!(got.len(), LANES);
-        for (addr, secret, phrase) in &got {
-            let m = Mnemonic::from_phrase(phrase, Language::English).unwrap();
-            let (addr2, secret2) = Evm::from_seed(&derive_seed(&m));
-            assert_eq!(addr, &addr2, "batch address must match single-path derivation");
-            assert_eq!(Evm::encode_secret(secret), Evm::encode_secret(&secret2));
-        }
-        let mut addrs: Vec<_> = got.iter().map(|c| c.0).collect();
-        addrs.dedup();
-        assert_eq!(addrs.len(), LANES, "every lane must use fresh entropy");
+        super::super::assert_batch_matches_single_path::<Evm, _>(Evm::from_seed);
     }
 
     /// The GPU tail (`from_gpu_seed`) and the re-derivation gate (`verify`) must
