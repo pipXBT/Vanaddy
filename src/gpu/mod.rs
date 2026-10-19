@@ -115,17 +115,16 @@ pub fn classify_command_buffer_status(
     })
 }
 
-impl From<GpuError> for GpuDisableReason {
-    fn from(e: GpuError) -> Self {
-        match e {
-            GpuError::NoDevice => GpuDisableReason::NoDevice,
-            GpuError::ShaderCompile(m) => GpuDisableReason::ShaderCompile(m),
-            GpuError::PipelineCreate(m) => GpuDisableReason::PipelineCreate(m),
-            GpuError::BufferAlloc => GpuDisableReason::BufferAlloc,
-            GpuError::BadConfig(m) => GpuDisableReason::BadConfig(m),
-            GpuError::CommandBuffer { status, message } => {
-                GpuDisableReason::CommandBuffer { status, message }
-            }
+impl GpuError {
+    /// Bare variant name, for the TUI's narrow GPU columns.
+    pub fn label(&self) -> &'static str {
+        match self {
+            GpuError::NoDevice => "NoDevice",
+            GpuError::ShaderCompile(_) => "ShaderCompile",
+            GpuError::PipelineCreate(_) => "PipelineCreate",
+            GpuError::BufferAlloc => "BufferAlloc",
+            GpuError::BadConfig(_) => "BadConfig",
+            GpuError::CommandBuffer { .. } => "CommandBuffer",
         }
     }
 }
@@ -152,18 +151,11 @@ pub enum GpuStatus {
 #[derive(Clone, Debug, PartialEq)]
 pub enum GpuDisableReason {
     NotSupported,
-    NoDevice,
     UserOff,
-    ShaderCompile(String),
-    PipelineCreate(String),
-    BufferAlloc,
-    BadConfig(String),
+    /// Any backend failure: device, compile, pipeline, allocation, config, or
+    /// a command buffer that did not finish Completed-with-nil-error.
+    Backend(GpuError),
     SelfTest(SelfTestError),
-    /// Command buffer status != Completed, or error() was set.
-    CommandBuffer {
-        status: i64,
-        message: String,
-    },
     /// The in-wave random ring audit disagreed.
     AuditMismatch {
         index: usize,
@@ -236,6 +228,7 @@ pub type GpuRx = crossbeam_channel::Receiver<Box<SeedBlock>>;
 /// path: `drain_matches` reads this from the render loop every 100 ms, and a
 /// worker that panicked while holding a `Mutex` would poison it and turn a GPU
 /// fault into a UI-thread `unwrap` panic inside raw mode.
+#[derive(Default)]
 pub struct GpuHealth {
     pub disable: AtomicBool,
     /// Set-once, so the FIRST fault is the one reported. A later, derivative
@@ -243,19 +236,9 @@ pub struct GpuHealth {
     /// the root cause. `OnceLock` also cannot be poisoned.
     reason: OnceLock<GpuDisableReason>,
     pub seeds_delivered: AtomicU64,
-    pub verify_rejections: AtomicU64,
 }
 
 impl GpuHealth {
-    pub fn new() -> Self {
-        GpuHealth {
-            disable: AtomicBool::new(false),
-            reason: OnceLock::new(),
-            seeds_delivered: AtomicU64::new(0),
-            verify_rejections: AtomicU64::new(0),
-        }
-    }
-
     /// Publish the reason BEFORE flipping the flag. Callers elsewhere may keep
     /// loading `disable` `Relaxed` (19+ producer/worker sites only care whether
     /// to keep draining, never touch the reason) - the ordering this needs is
@@ -279,12 +262,6 @@ impl GpuHealth {
         // side.
         let _ = self.disable.load(Ordering::Acquire);
         self.reason.get().cloned()
-    }
-}
-
-impl Default for GpuHealth {
-    fn default() -> Self {
-        GpuHealth::new()
     }
 }
 
@@ -435,7 +412,7 @@ mod tests {
 
     #[test]
     fn raise_records_the_first_reason_and_never_overwrites_it() {
-        let h = GpuHealth::new();
+        let h = GpuHealth::default();
         assert!(!h.disable.load(Ordering::Relaxed));
         assert_eq!(h.take_reason(), None);
         h.raise(GpuDisableReason::AuditMismatch { index: 5183 });
@@ -449,10 +426,11 @@ mod tests {
 
     #[test]
     fn take_reason_does_not_consume_the_reason() {
-        let h = GpuHealth::new();
-        h.raise(GpuDisableReason::NoDevice);
-        assert_eq!(h.take_reason(), Some(GpuDisableReason::NoDevice));
-        assert_eq!(h.take_reason(), Some(GpuDisableReason::NoDevice));
+        let h = GpuHealth::default();
+        let r = GpuDisableReason::Backend(GpuError::NoDevice);
+        h.raise(r.clone());
+        assert_eq!(h.take_reason(), Some(r.clone()));
+        assert_eq!(h.take_reason(), Some(r));
     }
 
     /// MTLCommandBufferStatusCompleted == 4 with no error object is the only

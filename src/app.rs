@@ -90,15 +90,12 @@ pub struct App {
     pub thread_pool: Option<rayon::ThreadPool>,
 
     // ---- GPU offload (EVM only). See docs/superpowers/specs/2026-08-26-metal-gpu-pbkdf2-design.md
-    /// From `GpuEngine::probe()` at startup; promoted to `Running`/`Disabled`
+    /// From `gpu::probe()` at startup; promoted to `Running`/`Disabled`
     /// by `drain_matches`. This is the single source of truth the TUI renders.
     pub gpu_status: GpuStatus,
     /// The form toggle. Defaults to "on" iff the probe found a device and the
     /// env lever did not veto it.
     pub gpu_requested: bool,
-    /// `VANADDY_GPU=0` or `VANADDY_NO_GPU=1` was set. Env ALWAYS wins over the
-    /// form; kept as a field so the TUI can say *why* the toggle is stuck off.
-    pub gpu_env_off: bool,
     /// Mirrors `validated_thread_count`: the decision `validate()` made, frozen
     /// so `start_search` acts on what the user saw, not on a status that may
     /// have changed since.
@@ -117,7 +114,7 @@ pub struct App {
 
 impl App {
     /// The no-probe constructor: used by tests and by any caller that has not
-    /// run `GpuEngine::probe()`. Deliberately yields a status that
+    /// run `gpu::probe()`. Deliberately yields a status that
     /// `gpu_effective()` rejects, so nothing can spawn a GPU by accident.
     pub fn new() -> Self {
         App::with_gpu_status(GpuStatus::Unavailable("not probed".to_string()))
@@ -164,7 +161,6 @@ impl App {
             thread_pool: None,
             gpu_status,
             gpu_requested,
-            gpu_env_off: env_off,
             validated_gpu: false,
             gpu_health: Arc::new(GpuHealth::default()),
             gpu_rx: None,
@@ -964,6 +960,10 @@ fn handle_field_input(app: &mut App, key: event::KeyEvent) {
                     // Precedence: no device beats disabled beats wrong chain.
                     let refusal = match &app.gpu_status {
                         GpuStatus::Unavailable(r) => Some(format!("GPU unavailable: {r}")),
+                        // The bare GpuError, as printed before Backend(..) wrapped it.
+                        GpuStatus::Disabled(crate::gpu::GpuDisableReason::Backend(e)) => {
+                            Some(format!("GPU disabled this session: {e:?}"))
+                        }
                         GpuStatus::Disabled(r) => Some(format!("GPU disabled this session: {r:?}")),
                         _ if app.chain != ChainKind::Evm => Some(format!(
                             "GPU offload is EVM-only — {} runs on CPU",
@@ -1263,12 +1263,12 @@ mod tests {
             eprintln!("SKIP: VANADDY_NO_GPU is set");
             return;
         }
-        if let GpuStatus::Unavailable(reason) = GpuEngine::probe() {
+        if let GpuStatus::Unavailable(reason) = crate::gpu::probe() {
             eprintln!("SKIP: no Metal device on this machine ({reason})");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let mut app = App::with_gpu_status(GpuEngine::probe());
+        let mut app = App::with_gpu_status(crate::gpu::probe());
         app.csv_path = dir.path().join("vanity_wallets.csv");
         app.chain = crate::chains::ChainKind::Evm;
         app.vanity_prefix = "aaaaaaaa".into();
@@ -1370,7 +1370,7 @@ mod tests {
         // `gpu_rx` assertion below are vacuous everywhere —
         // `app_new_never_requests_a_gpu_it_has_not_probed` asserts exactly that.
         // Probe for real; the probe result decides whether it takes effect.
-        let mut app = App::with_gpu_status(crate::gpu::GpuEngine::probe());
+        let mut app = App::with_gpu_status(crate::gpu::probe());
         app.gpu_requested = true;
         app.csv_path = dir.path().join("vanity_wallets.csv");
         app.chain = crate::chains::ChainKind::Evm;
@@ -1696,9 +1696,9 @@ mod tests {
     /// round-trip are faithful. It is NOT a second, independent check of the Metal
     /// kernel: `verify_gpu` already ran that same `derive_seed` -> `from_seed`
     /// chain before the row was built, and the row carries ITS output, never the
-    /// GPU's. The kernel's honesty is what `verify_rejections == 0` asserts — a GPU
-    /// seed that matched the prefix but failed re-derivation would have raised
-    /// `VerifyMismatch` and been counted there. The two assertions together are
+    /// GPU's. The kernel's honesty is what `!health.disable` asserts — a GPU seed
+    /// that matched the prefix but failed re-derivation would have raised
+    /// `VerifyMismatch` and disabled the GPU. The two assertions together are
     /// what support the product claim; neither does it alone.
     #[test]
     #[ignore = "requires a Metal device and runs for ~5 s; run with --ignored"]
@@ -1767,7 +1767,6 @@ mod tests {
             "GPU disabled mid-run: {:?}",
             health.take_reason()
         );
-        assert_eq!(health.verify_rejections.load(Ordering::Relaxed), 0);
 
         // 3. The counter is honest.
         let n = counter.load(Ordering::Relaxed);
@@ -2243,7 +2242,7 @@ mod tests {
             eprintln!("SKIP: VANADDY_NO_GPU is set");
             return;
         }
-        if let GpuStatus::Unavailable(reason) = GpuEngine::probe() {
+        if let GpuStatus::Unavailable(reason) = crate::gpu::probe() {
             eprintln!("SKIP: no Metal device on this machine ({reason})");
             return;
         }

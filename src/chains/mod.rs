@@ -208,7 +208,6 @@ fn emit_gpu_match(tx: &Sender<Match>, entropy: &[u8; 16], gpu_addr: &[u8; 20], h
             // GPU fault, never a false positive. Disable the GPU, keep the CPU
             // search alive, and surface it. The candidate is dropped — it is
             // provably not a wallet anyone can open, so there is nothing to save.
-            health.verify_rejections.fetch_add(1, Ordering::Relaxed);
             health.raise(GpuDisableReason::VerifyMismatch {
                 address: Evm::encode_address(gpu_addr),
             });
@@ -414,7 +413,6 @@ pub(crate) mod tests {
             !health.disable.load(Ordering::Relaxed),
             "a clean drain raises no fault"
         );
-        assert_eq!(health.verify_rejections.load(Ordering::Relaxed), 0);
         drop(tx);
         assert!(rx.try_recv().is_err(), "an 8-hex-char prefix cannot match");
     }
@@ -551,7 +549,6 @@ pub(crate) mod tests {
         );
         assert_eq!(counter.load(Ordering::Relaxed), N as u64);
         assert_eq!(health.seeds_delivered.load(Ordering::Relaxed), N as u64);
-        assert_eq!(health.verify_rejections.load(Ordering::Relaxed), 0);
         assert!(!health.disable.load(Ordering::Relaxed));
 
         let got_addrs: Vec<String> = got.iter().map(|m| m.address.clone()).collect();
@@ -616,7 +613,6 @@ pub(crate) mod tests {
         // The counter is honest about work inspected, not work emitted.
         assert_eq!(counter.load(Ordering::Relaxed), N as u64);
         assert_eq!(health.seeds_delivered.load(Ordering::Relaxed), N as u64);
-        assert_eq!(health.verify_rejections.load(Ordering::Relaxed), 1);
         assert!(
             health.disable.load(Ordering::Relaxed),
             "a verify miss must disable the GPU"

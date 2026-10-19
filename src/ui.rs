@@ -171,7 +171,7 @@ fn render_config_form(f: &mut Frame, area: Rect, app: &App) {
 }
 
 /// Flatten a status string for display in a ratatui Buffer.
-/// `GpuDisableReason::ShaderCompile(String)` carries multi-line Metal compiler
+/// `GpuError::ShaderCompile(String)` carries multi-line Metal compiler
 /// diagnostics; a raw newline or tab written into a cell corrupts the frame.
 /// Every control character becomes a space, and the result is truncated on a
 /// CHAR boundary (byte slicing would panic on the '—' this UI is full of).
@@ -194,14 +194,9 @@ fn sanitize_status_text(s: &str, max: usize) -> String {
 fn gpu_reason_label(r: &GpuDisableReason) -> &'static str {
     match r {
         GpuDisableReason::NotSupported => "NotSupported",
-        GpuDisableReason::NoDevice => "NoDevice",
         GpuDisableReason::UserOff => "UserOff",
-        GpuDisableReason::ShaderCompile(_) => "ShaderCompile",
-        GpuDisableReason::PipelineCreate(_) => "PipelineCreate",
-        GpuDisableReason::BufferAlloc => "BufferAlloc",
-        GpuDisableReason::BadConfig(_) => "BadConfig",
+        GpuDisableReason::Backend(e) => e.label(),
         GpuDisableReason::SelfTest(_) => "SelfTest",
-        GpuDisableReason::CommandBuffer { .. } => "CommandBuffer",
         GpuDisableReason::AuditMismatch { .. } => "AuditMismatch",
         GpuDisableReason::VerifyMismatch { .. } => "VerifyMismatch",
         GpuDisableReason::Panicked => "Panicked",
@@ -571,7 +566,7 @@ fn format_duration(secs: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpu::{GpuDisableReason, GpuStatus};
+    use crate::gpu::{GpuDisableReason, GpuError, GpuStatus};
 
     /// Render the whole TUI into an in-memory buffer.
     fn render_buffer(app: &App, width: u16, height: u16) -> ratatui::buffer::Buffer {
@@ -652,9 +647,9 @@ mod tests {
     fn gpu_form_value_never_leaks_a_multi_line_compiler_diagnostic() {
         let mut app = App::new();
         app.chain = ChainKind::Evm;
-        app.gpu_status = GpuStatus::Disabled(GpuDisableReason::ShaderCompile(
+        app.gpu_status = GpuStatus::Disabled(GpuDisableReason::Backend(GpuError::ShaderCompile(
             "program_source:14:3: error: use of undeclared identifier\nnote: here".to_string(),
-        ));
+        )));
         let (text, _) = gpu_form_value(&app);
         assert_eq!(text, "[disabled — ShaderCompile]");
 
@@ -952,8 +947,10 @@ mod tests {
     /// enough to survive a pane that does not wrap.
     #[test]
     fn gpu_stats_line_reports_a_fault_without_the_raw_diagnostic() {
-        let app = searching_app_with_gpu(GpuStatus::Disabled(GpuDisableReason::ShaderCompile(
-            "program_source:14:3: error: use of undeclared identifier\nnote: here".to_string(),
+        let app = searching_app_with_gpu(GpuStatus::Disabled(GpuDisableReason::Backend(
+            GpuError::ShaderCompile(
+                "program_source:14:3: error: use of undeclared identifier\nnote: here".to_string(),
+            ),
         )));
         let (text, color) = gpu_stats_line(&app).expect("a fault always gets a stats row");
         assert!(text.contains("OFF"), "must say the GPU is off: {text}");

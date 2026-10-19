@@ -204,7 +204,7 @@ pub(crate) fn producer(
 
     // Device, library compile (~60-95 ms cold) and pipelines, all HERE, on this
     // thread, never the UI thread.
-    let mut engine = MetalPbkdf2::new()?;
+    let mut engine = MetalPbkdf2::new().map_err(GpuDisableReason::Backend)?;
     if stop.load(Ordering::Relaxed) {
         return Ok(());
     }
@@ -261,13 +261,16 @@ pub(crate) fn producer(
         //      command-buffer boundary and abandoned it; there is deliberately
         //      no partial-success shape, because a partly-iterated wave yields
         //      wrong-but-plausible seeds.
-        let seeds = match engine.run_wave(
-            &keys,
-            &BIP39_SALT_BLOCK,
-            crate::seed::PBKDF2_ROUNDS,
-            Schedule::Production,
-            stop,
-        )? {
+        let seeds = match engine
+            .run_wave(
+                &keys,
+                &BIP39_SALT_BLOCK,
+                crate::seed::PBKDF2_ROUNDS,
+                Schedule::Production,
+                stop,
+            )
+            .map_err(GpuDisableReason::Backend)?
+        {
             Some(seeds) => seeds,
             None => return Ok(()),
         };
@@ -291,38 +294,6 @@ pub(crate) fn producer(
 pub(crate) mod tests {
     use super::*;
     use crate::gpu::GpuError;
-
-    #[test]
-    fn every_gpu_error_maps_to_its_disable_reason() {
-        let reason_from = GpuDisableReason::from;
-        assert_eq!(reason_from(GpuError::NoDevice), GpuDisableReason::NoDevice);
-        assert_eq!(
-            reason_from(GpuError::ShaderCompile("bad token".into())),
-            GpuDisableReason::ShaderCompile("bad token".into())
-        );
-        assert_eq!(
-            reason_from(GpuError::PipelineCreate("no function".into())),
-            GpuDisableReason::PipelineCreate("no function".into())
-        );
-        assert_eq!(
-            reason_from(GpuError::BufferAlloc),
-            GpuDisableReason::BufferAlloc
-        );
-        assert_eq!(
-            reason_from(GpuError::BadConfig("tg 0".into())),
-            GpuDisableReason::BadConfig("tg 0".into())
-        );
-        assert_eq!(
-            reason_from(GpuError::CommandBuffer {
-                status: 5,
-                message: "IOAF code 3".into()
-            }),
-            GpuDisableReason::CommandBuffer {
-                status: 5,
-                message: "IOAF code 3".into()
-            }
-        );
-    }
 
     #[test]
     fn status_read_and_write_survive_a_poisoned_lock() {
@@ -421,18 +392,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// A fresh, clean health cell. `GpuHealth`'s `reason` field is private to
-    /// `crate::gpu`, and this module is a descendant of it, so the literal is
-    /// legal here and needs no constructor on the type itself.
-    pub(crate) fn fresh_health() -> GpuHealth {
-        GpuHealth {
-            disable: std::sync::atomic::AtomicBool::new(false),
-            reason: std::sync::OnceLock::new(),
-            seeds_delivered: std::sync::atomic::AtomicU64::new(0),
-            verify_rejections: std::sync::atomic::AtomicU64::new(0),
-        }
-    }
-
     /// `n` candidates whose entropy and seed both encode their index, so a
     /// re-ordering or a mis-pairing anywhere in the carve is detectable.
     fn marked_wave(n: usize) -> (Vec<[u8; 16]>, Vec<[u8; 64]>) {
@@ -450,7 +409,7 @@ pub(crate) mod tests {
     fn carve_and_send_delivers_sixteen_blocks_of_512_in_pairing_order() {
         let (tx, rx) = crossbeam_channel::bounded(super::super::CHANNEL_CAPACITY);
         let stop = AtomicBool::new(false);
-        let health = fresh_health();
+        let health = GpuHealth::default();
         let (entropy, seeds) = marked_wave(8_192);
 
         assert!(carve_and_send(&tx, &entropy, &seeds, &stop, &health));
@@ -483,7 +442,7 @@ pub(crate) mod tests {
         let (tx, rx) = crossbeam_channel::bounded::<Box<SeedBlock>>(super::super::CHANNEL_CAPACITY);
         drop(rx);
         let stop = AtomicBool::new(false);
-        let health = fresh_health();
+        let health = GpuHealth::default();
         let (entropy, seeds) = marked_wave(8_192);
 
         let started = std::time::Instant::now();
@@ -501,7 +460,7 @@ pub(crate) mod tests {
         // timeout branch and must be RETRIED, never dropped.
         let (tx, _rx) = crossbeam_channel::bounded(2);
         let stop = AtomicBool::new(false);
-        let health = fresh_health();
+        let health = GpuHealth::default();
         let (entropy, seeds) = marked_wave(8_192);
 
         let started = std::time::Instant::now();
@@ -529,7 +488,7 @@ pub(crate) mod tests {
     fn carve_and_send_exits_immediately_when_health_is_already_disabled() {
         let (tx, rx) = crossbeam_channel::bounded(super::super::CHANNEL_CAPACITY);
         let stop = AtomicBool::new(false);
-        let health = fresh_health();
+        let health = GpuHealth::default();
         health.raise(GpuDisableReason::AuditMismatch { index: 5_183 });
         let (entropy, seeds) = marked_wave(8_192);
 
@@ -600,7 +559,7 @@ pub(crate) mod tests {
         let prev_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         for (label, body, want) in cases {
-            let health = fresh_health();
+            let health = GpuHealth::default();
             let finished = Arc::new(AtomicBool::new(false));
             run_guarded(&health, finished.clone(), body);
             assert!(
@@ -626,19 +585,24 @@ pub(crate) mod tests {
         // edge, so it would pass even if `FinishGuard::drop` used `Relaxed` or
         // the store ran before `health.raise` -- moving the store above the
         // `match` in `run_guarded` must turn this test red.
-        let health = Arc::new(fresh_health());
+        let health = Arc::new(GpuHealth::default());
         let finished = Arc::new(AtomicBool::new(false));
         let h = health.clone();
         let f = finished.clone();
         let handle = std::thread::spawn(move || {
-            run_guarded(&h, f, || Err(GpuDisableReason::BufferAlloc));
+            run_guarded(&h, f, || {
+                Err(GpuDisableReason::Backend(GpuError::BufferAlloc))
+            });
         });
 
         while !finished.load(Ordering::Acquire) {
             std::hint::spin_loop();
         }
         assert!(health.disable.load(Ordering::Relaxed));
-        assert_eq!(health.take_reason(), Some(GpuDisableReason::BufferAlloc));
+        assert_eq!(
+            health.take_reason(),
+            Some(GpuDisableReason::Backend(GpuError::BufferAlloc))
+        );
         handle
             .join()
             .expect("guarded thread must not propagate a panic");
@@ -647,7 +611,6 @@ pub(crate) mod tests {
 
 #[cfg(all(test, target_os = "macos", target_arch = "aarch64", feature = "metal"))]
 mod gpu_tests {
-    use super::tests::fresh_health;
     use super::*;
     use crate::gpu::{BLOCK, CHANNEL_CAPACITY, WAVE};
     use rayon::prelude::*;
@@ -673,7 +636,7 @@ mod gpu_tests {
         }
         let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAPACITY);
         let stop = AtomicBool::new(false);
-        let health = fresh_health();
+        let health = GpuHealth::default();
         let status = Mutex::new(GpuStatus::Initializing);
 
         let want = 3 * (WAVE / BLOCK);
@@ -696,7 +659,7 @@ mod gpu_tests {
             }
             stop.store(true, Ordering::Relaxed);
             let outcome = worker.join().expect("producer must not panic");
-            if outcome == Err(GpuDisableReason::NoDevice) {
+            if outcome == Err(GpuDisableReason::Backend(crate::gpu::GpuError::NoDevice)) {
                 return true;
             }
             assert_eq!(outcome, Ok(()), "producer returned a fault");
@@ -782,7 +745,7 @@ mod gpu_tests {
             return;
         }
         let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAPACITY);
-        let health = Arc::new(fresh_health());
+        let health = Arc::new(GpuHealth::default());
         let engine = GpuEngine::start(tx, health.clone());
 
         // Wait for the first block: that puts the ~95 ms shader compile and the
@@ -811,7 +774,7 @@ mod gpu_tests {
             return;
         }
         let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAPACITY);
-        let health = Arc::new(fresh_health());
+        let health = Arc::new(GpuHealth::default());
         let engine = GpuEngine::start(tx, health.clone());
 
         let first = rx
@@ -841,7 +804,7 @@ mod gpu_tests {
             return;
         }
         let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAPACITY);
-        let health = Arc::new(fresh_health());
+        let health = Arc::new(GpuHealth::default());
         let engine = GpuEngine::start(tx, health.clone());
 
         let first = rx
@@ -883,7 +846,7 @@ mod gpu_tests {
             return;
         }
         let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAPACITY);
-        let health = Arc::new(fresh_health());
+        let health = Arc::new(GpuHealth::default());
         let engine = GpuEngine::start(tx, health.clone());
 
         // Discard the first block: it hides the ~95 ms shader compile and the
@@ -891,7 +854,11 @@ mod gpu_tests {
         let first = match rx.recv_timeout(Duration::from_secs(180)) {
             Ok(b) => b,
             Err(e) => {
-                if engine.status() == GpuStatus::Disabled(GpuDisableReason::NoDevice) {
+                if engine.status()
+                    == GpuStatus::Disabled(GpuDisableReason::Backend(
+                        crate::gpu::GpuError::NoDevice,
+                    ))
+                {
                     eprintln!("SKIP: no Metal device on this machine");
                     engine.signal_stop();
                     await_finished(&engine, Duration::from_secs(5), "no-device skip");

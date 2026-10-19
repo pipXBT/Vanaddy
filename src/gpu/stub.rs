@@ -20,10 +20,6 @@ pub fn probe() -> GpuStatus {
 pub struct GpuEngine;
 
 impl GpuEngine {
-    pub fn probe() -> GpuStatus {
-        probe()
-    }
-
     /// Hangs the channel up immediately and records why, so a caller that
     /// ignored `probe()` degrades to CPU-only at once instead of waiting
     /// forever for blocks that can never arrive.

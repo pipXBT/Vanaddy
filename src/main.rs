@@ -20,7 +20,7 @@ fn main() -> io::Result<()> {
     // would otherwise take the process down before try_init's panic hook exists.
     // (An Objective-C exception is NOT catchable — that is why the backend never
     // calls setMathMode and always clamps the threadgroup size.)
-    let gpu_status = std::panic::catch_unwind(gpu::GpuEngine::probe)
+    let gpu_status = std::panic::catch_unwind(gpu::probe)
         .unwrap_or_else(|_| gpu::GpuStatus::Unavailable("Metal probe panicked".to_string()));
 
     // Raw mode + alternate screen, plus a panic hook that restores the terminal
@@ -108,7 +108,7 @@ mod tests {
         // mean "no GPU, forever". The single licensed exception is the env veto,
         // which deliberately rewrites a `Ready` probe into `Disabled(UserOff)` so
         // the config row can show the reason.
-        let status = crate::gpu::GpuEngine::probe();
+        let status = crate::gpu::probe();
         let app = crate::app::App::with_gpu_status(status.clone());
         let vetoed = crate::app::gpu_env_off(
             std::env::var("VANADDY_GPU").ok().as_deref(),

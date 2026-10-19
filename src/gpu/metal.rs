@@ -544,11 +544,6 @@ pub struct GpuEngine {
 }
 
 impl GpuEngine {
-    /// ~1 ms device probe. Called ONCE from `main()`, BEFORE `enable_raw_mode()`.
-    pub fn probe() -> GpuStatus {
-        probe()
-    }
-
     /// Returns IMMEDIATELY with status `Initializing`. Device creation, the
     /// ~60-95 ms cold library compile, pipeline build and the ~300 ms self-test
     /// all run on the spawned thread, so the UI never stalls on them.
@@ -574,8 +569,9 @@ impl GpuEngine {
         if join.is_none() {
             // Out of threads. Degrade exactly like every other failure: sticky
             // reason, GPU off, CPU search untouched.
-            let reason =
-                GpuDisableReason::BadConfig("could not spawn the vanaddy-gpu thread".into());
+            let reason = GpuDisableReason::Backend(GpuError::BadConfig(
+                "could not spawn the vanaddy-gpu thread".into(),
+            ));
             health.raise(reason.clone());
             set_status(&status, GpuStatus::Disabled(reason));
             finished.store(true, Ordering::Release);
