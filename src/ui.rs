@@ -39,6 +39,13 @@ pub fn ui(f: &mut Frame, app: &App) {
     }
 }
 
+fn panel(title: &str) -> Block<'_> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(title)
+}
+
 fn render_banner(f: &mut Frame, area: Rect) {
     let logo = vec![
         Line::from("██╗   ██╗ █████╗ ███╗   ██╗ █████╗ ██████╗ ██████╗ ██╗   ██╗"),
@@ -54,10 +61,7 @@ fn render_banner(f: &mut Frame, area: Rect) {
         )),
     ];
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(" Vanaddy ");
+    let block = panel(" Vanaddy ");
     let paragraph = Paragraph::new(logo)
         .block(block)
         .alignment(ratatui::layout::Alignment::Center);
@@ -100,76 +104,44 @@ fn render_config_form(f: &mut Frame, area: Rect, app: &App) {
 
     let case_str = if app.case_sensitive { "Yes" } else { "No" };
 
-    let both = matches!(app.match_position, MatchPosition::StartsAndEndsWith);
+    let blank = |s: &str| {
+        if s.is_empty() {
+            "_".to_string()
+        } else {
+            s.to_string()
+        }
+    };
 
-    let mut lines: Vec<Line> = vec![
-        Line::from(vec![
-            Span::styled(" Chain:    ", style_for(0)),
-            Span::styled(format!("[{}]", chain_str), style_for(0)),
-        ]),
-        Line::from(vec![
-            Span::styled(" Match:    ", style_for(1)),
-            Span::styled(format!("[{}]", position_str), style_for(1)),
-        ]),
+    // Row index == App field index; the GPU and Threads rows take theirs from
+    // `lines.len()`, so the one- and two-pattern layouts share one code path.
+    let mut rows = vec![
+        (" Chain:    ", format!("[{}]", chain_str)),
+        (" Match:    ", format!("[{}]", position_str)),
     ];
-
-    if both {
-        lines.push(Line::from(vec![
-            Span::styled(" Prefix:   ", style_for(2)),
-            Span::styled(
-                if app.vanity_prefix.is_empty() { "_".to_string() } else { app.vanity_prefix.clone() },
-                style_for(2),
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled(" Suffix:   ", style_for(3)),
-            Span::styled(
-                if app.vanity_suffix.is_empty() { "_".to_string() } else { app.vanity_suffix.clone() },
-                style_for(3),
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled(" Case:     ", style_for(4)),
-            Span::styled(format!("[{}]", case_str), style_for(4)),
-        ]));
-        lines.push(gpu_form_line(app, style_for(5)));
-        lines.push(Line::from(vec![
-            Span::styled(" Threads:  ", style_for(6)),
-            Span::styled(
-                if app.thread_count.is_empty() { "_".to_string() } else { app.thread_count.clone() },
-                style_for(6),
-            ),
-        ]));
-    } else {
-        let vanity_label = match app.match_position {
-            MatchPosition::StartsWith => " Prefix:   ",
-            MatchPosition::EndsWith => " Suffix:   ",
-            _ => " Vanity:   ",
-        };
-        let vanity_val = match app.match_position {
-            MatchPosition::EndsWith => &app.vanity_suffix,
-            _ => &app.vanity_prefix,
-        };
-        lines.push(Line::from(vec![
-            Span::styled(vanity_label, style_for(2)),
-            Span::styled(
-                if vanity_val.is_empty() { "_".to_string() } else { vanity_val.clone() },
-                style_for(2),
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled(" Case:     ", style_for(3)),
-            Span::styled(format!("[{}]", case_str), style_for(3)),
-        ]));
-        lines.push(gpu_form_line(app, style_for(4)));
-        lines.push(Line::from(vec![
-            Span::styled(" Threads:  ", style_for(5)),
-            Span::styled(
-                if app.thread_count.is_empty() { "_".to_string() } else { app.thread_count.clone() },
-                style_for(5),
-            ),
-        ]));
+    if !matches!(app.match_position, MatchPosition::EndsWith) {
+        rows.push((" Prefix:   ", blank(&app.vanity_prefix)));
     }
+    if !matches!(app.match_position, MatchPosition::StartsWith) {
+        rows.push((" Suffix:   ", blank(&app.vanity_suffix)));
+    }
+    rows.push((" Case:     ", format!("[{}]", case_str)));
+
+    let mut lines: Vec<Line> = rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, (label, value))| {
+            Line::from(vec![
+                Span::styled(label, style_for(i)),
+                Span::styled(value, style_for(i)),
+            ])
+        })
+        .collect();
+    lines.push(gpu_form_line(app, style_for(lines.len())));
+    let threads = style_for(lines.len());
+    lines.push(Line::from(vec![
+        Span::styled(" Threads:  ", threads),
+        Span::styled(blank(&app.thread_count), threads),
+    ]));
 
     let hint = match app.chain {
         ChainKind::Solana | ChainKind::Evm => None,
@@ -193,10 +165,7 @@ fn render_config_form(f: &mut Frame, area: Rect, app: &App) {
         )));
     }
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(" Config ");
+    let block = panel(" Config ");
     let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, area);
 }
@@ -376,10 +345,7 @@ fn render_stats(f: &mut Frame, area: Rect, app: &App) {
         )));
     }
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(" Stats ");
+    let block = panel(" Stats ");
     let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, area);
 }
@@ -459,10 +425,7 @@ fn render_help_popup(f: &mut Frame, area: Rect) {
 
 fn render_right_panel(f: &mut Frame, area: Rect, app: &App) {
     if app.state == AppState::Configuring && app.matches.is_empty() {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(" Results ");
+        let block = panel(" Results ");
         let placeholder = Paragraph::new(Line::from(Span::styled(
             "  Configure and press Enter to start searching",
             Style::default().fg(Color::DarkGray),
@@ -516,12 +479,7 @@ fn render_match_table(f: &mut Frame, area: Rect, app: &App) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray))
-                .title(" Matches "),
-        )
+        .block(panel(" Matches "))
         .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
 
     let mut table_state = TableState::default();
@@ -532,10 +490,7 @@ fn render_match_table(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_detail_view(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(" Detail ");
+    let block = panel(" Detail ");
 
     if app.matches.is_empty() || app.selected_match >= app.matches.len() {
         let paragraph = Paragraph::new(Line::from(Span::styled(
@@ -618,15 +573,20 @@ mod tests {
     use super::*;
     use crate::gpu::{GpuDisableReason, GpuStatus};
 
-    /// Render the whole TUI into an in-memory buffer and return it as one
-    /// newline-separated String, so a test can assert on what the user sees.
-    fn render_to_string(app: &App, width: u16, height: u16) -> String {
+    /// Render the whole TUI into an in-memory buffer.
+    fn render_buffer(app: &App, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).expect("TestBackend never fails");
         terminal
             .draw(|f| ui(f, app))
             .expect("TestBackend never fails");
-        let buf = terminal.backend().buffer();
+        terminal.backend().buffer().clone()
+    }
+
+    /// The rendered frame as one newline-separated String, so a test can
+    /// assert on what the user sees.
+    fn render_to_string(app: &App, width: u16, height: u16) -> String {
+        let buf = render_buffer(app, width, height);
         let w = buf.area.width as usize;
         let mut out = String::new();
         for (i, cell) in buf.content.iter().enumerate() {
@@ -713,45 +673,6 @@ mod tests {
         assert_eq!(text, "[n/a — no Metal device found]");
     }
 
-    #[test]
-    fn config_form_puts_the_gpu_row_between_case_and_threads() {
-        let mut app = App::new();
-        app.chain = ChainKind::Evm;
-        app.gpu_status = GpuStatus::Ready {
-            device: "Apple M1".to_string(),
-        };
-        app.gpu_requested = true;
-
-        for pos in [
-            MatchPosition::StartsWith,
-            MatchPosition::EndsWith,
-            MatchPosition::StartsAndEndsWith,
-        ] {
-            app.match_position = pos;
-            let frame = render_to_string(&app, 100, 40);
-            let rows: Vec<&str> = frame.lines().collect();
-            let case = rows
-                .iter()
-                .position(|r| r.contains("Case:"))
-                .expect("Case row");
-            // `GPU:` is the CONFIG row's label. The Stats pane's row is
-            // labelled `GPU rate:` (Task 7.5) precisely so this substring
-            // stays unambiguous — do not rename either one to match.
-            let gpu = rows
-                .iter()
-                .position(|r| r.contains("GPU:"))
-                .expect("GPU row");
-            let threads = rows
-                .iter()
-                .position(|r| r.contains("Threads:"))
-                .expect("Threads row");
-            assert!(
-                case < gpu && gpu < threads,
-                "row order must be Case, GPU, Threads; got {case}, {gpu}, {threads}\n{frame}"
-            );
-        }
-    }
-
     /// The row whose cells carry the highlight style (yellow + bold).
     ///
     /// `render_to_string` reads only `cell.symbol()`, so it is blind to WHICH
@@ -760,12 +681,7 @@ mod tests {
     /// keystrokes go elsewhere — survives every symbol-only test in this file.
     /// Reading the style back is the only thing that pins it.
     fn highlighted_row(app: &App, width: u16, height: u16) -> String {
-        let backend = ratatui::backend::TestBackend::new(width, height);
-        let mut terminal = ratatui::Terminal::new(backend).expect("TestBackend never fails");
-        terminal
-            .draw(|f| ui(f, app))
-            .expect("TestBackend never fails");
-        let buf = terminal.backend().buffer();
+        let buf = render_buffer(app, width, height);
         let w = buf.area.width as usize;
         let mut found: Option<String> = None;
         for row in 0..buf.area.height as usize {
@@ -871,7 +787,8 @@ mod tests {
     /// checked at Milestone 6 because `src/ui.rs` had no GPU surface at all.
     /// Two GPU rows in one frame would mean two engines were being reported.
     /// Note `"GPU rate:"` does not contain `"GPU:"`, so the two labels count
-    /// separately and neither can mask the other.
+    /// separately and neither can mask the other. Also pins the config row
+    /// order Case, GPU, Threads for every match position.
     #[test]
     fn one_gpu_row_per_frame_never_two() {
         let mut app = App::new();
@@ -900,46 +817,55 @@ mod tests {
                     stats_rows <= 1,
                     "never two GPU rate rows in one frame, got {stats_rows}\n{frame}"
                 );
+
+                let rows: Vec<&str> = frame.lines().collect();
+                let case = rows
+                    .iter()
+                    .position(|r| r.contains("Case:"))
+                    .expect("Case row");
+                // `GPU:` is the CONFIG row's label. The Stats pane's row is
+                // labelled `GPU rate:` (Task 7.5) precisely so this substring
+                // stays unambiguous — do not rename either one to match.
+                let gpu = rows
+                    .iter()
+                    .position(|r| r.contains("GPU:"))
+                    .expect("GPU row");
+                let threads = rows
+                    .iter()
+                    .position(|r| r.contains("Threads:"))
+                    .expect("Threads row");
+                assert!(
+                    case < gpu && gpu < threads,
+                    "row order must be Case, GPU, Threads; got {case}, {gpu}, {threads}\n{frame}"
+                );
             }
         }
     }
 
     #[test]
-    fn format_count_small() {
-        assert_eq!(format_count(0), "0");
-        assert_eq!(format_count(999), "999");
+    fn format_count_cases() {
+        for (n, want) in [
+            (0, "0"),
+            (999, "999"),
+            (1_500, "1.5K"),
+            (999_999, "1000.0K"),
+            (12_300_000, "12.3M"),
+        ] {
+            assert_eq!(format_count(n), want, "format_count({n})");
+        }
     }
 
     #[test]
-    fn format_count_thousands() {
-        assert_eq!(format_count(1_500), "1.5K");
-        assert_eq!(format_count(999_999), "1000.0K");
-    }
-
-    #[test]
-    fn format_count_millions() {
-        assert_eq!(format_count(12_300_000), "12.3M");
-    }
-
-    #[test]
-    fn format_duration_seconds() {
-        assert_eq!(format_duration(0.5), "< 1s");
-        assert_eq!(format_duration(45.0), "45s");
-    }
-
-    #[test]
-    fn format_duration_minutes() {
-        assert_eq!(format_duration(125.0), "2m 5s");
-    }
-
-    #[test]
-    fn format_duration_hours() {
-        assert_eq!(format_duration(3665.0), "1h 1m");
-    }
-
-    #[test]
-    fn format_duration_days() {
-        assert_eq!(format_duration(90_000.0), "1d 1h");
+    fn format_duration_cases() {
+        for (secs, want) in [
+            (0.5, "< 1s"),
+            (45.0, "45s"),
+            (125.0, "2m 5s"),
+            (3665.0, "1h 1m"),
+            (90_000.0, "1d 1h"),
+        ] {
+            assert_eq!(format_duration(secs), want, "format_duration({secs})");
+        }
     }
 
     /// A `gpu_rx` for the Stats-pane tests. `gpu_stats_line` only asks whether
