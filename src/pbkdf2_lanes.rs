@@ -31,7 +31,7 @@ pub fn pbkdf2_hmac_sha512<const L: usize>(
             return unsafe { hw::pbkdf2_lanes::<L>(&passwords, salt, iterations) };
         }
     }
-    fallback(&passwords, salt, iterations)
+    passwords.map(|password| ring_pbkdf2_sha512(password, salt, iterations))
 }
 
 /// SHA-512's HMAC block size. A key longer than this is SHA-512 pre-hashed
@@ -45,18 +45,17 @@ pub const HMAC_BLOCK_LEN: usize = 128;
 /// `pub` so `gpu::pack::pack_salt_block` rejects exactly what this path rejects.
 pub const MAX_SALT_LEN: usize = 107;
 
-/// Portable path: one `ring` derivation per lane.
-fn fallback<const L: usize>(passwords: &[&[u8]; L], salt: &[u8], iterations: u32) -> [[u8; 64]; L] {
-    let mut out = [[0u8; 64]; L];
-    for (password, lane) in passwords.iter().zip(out.iter_mut()) {
-        ring::pbkdf2::derive(
-            ring::pbkdf2::PBKDF2_HMAC_SHA512,
-            std::num::NonZeroU32::new(iterations).expect("checked above"),
-            salt,
-            password,
-            lane,
-        );
-    }
+/// Single-stream PBKDF2-HMAC-SHA512 via `ring`: the portable path, and the
+/// reference the lanes are tested against. `iterations` must be at least 1.
+pub fn ring_pbkdf2_sha512(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 64] {
+    let mut out = [0u8; 64];
+    ring::pbkdf2::derive(
+        ring::pbkdf2::PBKDF2_HMAC_SHA512,
+        std::num::NonZeroU32::new(iterations).expect("iterations must be at least 1"),
+        salt,
+        password,
+        &mut out,
+    );
     out
 }
 
@@ -286,7 +285,7 @@ mod hw {
             u = outer_init;
             compress::<L>(&mut u, &msg);
             for (t_lane, u_lane) in t.iter_mut().zip(u.iter()) {
-                for (tw, uw) in t_lane.iter_mut().zip(uw_iter(u_lane)) {
+                for (tw, uw) in t_lane.iter_mut().zip(u_lane) {
                     *tw ^= uw;
                 }
             }
@@ -298,32 +297,14 @@ mod hw {
         }
         out
     }
-
-    #[inline(always)]
-    fn uw_iter(lane: &State) -> impl Iterator<Item = u64> + '_ {
-        lane.iter().copied()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::num::NonZeroU32;
 
     const BIP39_VECTOR_PHRASE: &[u8] = b"abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     const BIP39_VECTOR_SEED: &str = "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4";
-
-    fn ring_reference(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 64] {
-        let mut out = [0u8; 64];
-        ring::pbkdf2::derive(
-            ring::pbkdf2::PBKDF2_HMAC_SHA512,
-            NonZeroU32::new(iterations).unwrap(),
-            salt,
-            password,
-            &mut out,
-        );
-        out
-    }
 
     #[test]
     fn every_lane_matches_bip39_canonical_vector() {
@@ -345,7 +326,7 @@ mod tests {
         assert!(pws[2].len() > 128);
         let out = pbkdf2_hmac_sha512::<4>(pws, b"mnemonic", 2048);
         for (pw, lane) in pws.iter().zip(out.iter()) {
-            assert_eq!(lane, &ring_reference(pw, b"mnemonic", 2048));
+            assert_eq!(lane, &ring_pbkdf2_sha512(pw, b"mnemonic", 2048));
         }
     }
 
@@ -362,25 +343,23 @@ mod tests {
         let basic = pbkdf2_hmac_sha512::<LANES>(pws, b"TON seed version", 390);
         let seed = pbkdf2_hmac_sha512::<LANES>(pws, b"TON default seed", 100_000);
         for i in 0..LANES {
-            assert_eq!(basic[i], ring_reference(pws[i], b"TON seed version", 390));
-            assert_eq!(seed[i], ring_reference(pws[i], b"TON default seed", 100_000));
+            assert_eq!(
+                basic[i],
+                ring_pbkdf2_sha512(pws[i], b"TON seed version", 390)
+            );
+            assert_eq!(
+                seed[i],
+                ring_pbkdf2_sha512(pws[i], b"TON default seed", 100_000)
+            );
         }
     }
 
     #[test]
     fn single_lane_and_single_iteration_match_ring() {
         let one = pbkdf2_hmac_sha512::<1>([b"password".as_slice()], b"salt", 1);
-        assert_eq!(one[0], ring_reference(b"password", b"salt", 1));
+        assert_eq!(one[0], ring_pbkdf2_sha512(b"password", b"salt", 1));
         let two = pbkdf2_hmac_sha512::<1>([b"password".as_slice()], b"salt", 2);
-        assert_eq!(two[0], ring_reference(b"password", b"salt", 2));
-    }
-
-    #[test]
-    fn exactly_128_byte_password_matches_ring() {
-        // HMAC key == block size: must not be pre-hashed.
-        let pw = [0x61u8; 128];
-        let out = pbkdf2_hmac_sha512::<1>([pw.as_slice()], b"mnemonic", 16);
-        assert_eq!(out[0], ring_reference(&pw, b"mnemonic", 16));
+        assert_eq!(two[0], ring_pbkdf2_sha512(b"password", b"salt", 2));
     }
 
     /// The GPU kernel has no HMAC key pre-hash path, so `gpu::pack::pack_key_block`
@@ -398,13 +377,13 @@ mod tests {
         let over_boundary = vec![0x6bu8; HMAC_BLOCK_LEN + 1];
         for pw in [at_boundary.as_slice(), over_boundary.as_slice()] {
             let out = pbkdf2_hmac_sha512::<1>([pw], b"mnemonic", 8);
-            assert_eq!(out[0], ring_reference(pw, b"mnemonic", 8));
+            assert_eq!(out[0], ring_pbkdf2_sha512(pw, b"mnemonic", 8));
         }
 
         // The longest salt that still fits one padded block is accepted.
         let salt = vec![0x73u8; MAX_SALT_LEN];
         let out = pbkdf2_hmac_sha512::<1>([b"password".as_slice()], &salt, 4);
-        assert_eq!(out[0], ring_reference(b"password", &salt, 4));
+        assert_eq!(out[0], ring_pbkdf2_sha512(b"password", &salt, 4));
     }
 
     #[test]

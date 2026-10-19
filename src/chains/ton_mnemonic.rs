@@ -9,11 +9,10 @@
 //!
 //! Reference: https://github.com/toncenter/tonweb-mnemonic/blob/master/src/functions/generate.ts
 
-use crate::pbkdf2_lanes::{pbkdf2_hmac_sha512, LANES};
+use crate::pbkdf2_lanes::{pbkdf2_hmac_sha512, ring_pbkdf2_sha512, LANES};
 use bip39::{Language, Mnemonic, MnemonicType};
 use ed25519_dalek::SigningKey;
-use ring::{hmac, pbkdf2};
-use std::num::NonZeroU32;
+use ring::hmac;
 
 /// PBKDF2 rounds used for the fast "basic_seed" acceptance check (~100_000 / 256).
 const PBKDF2_BASIC_ITER: u32 = 390;
@@ -33,19 +32,6 @@ fn hmac_sha512_empty_key(phrase: &[u8]) -> [u8; 64] {
     out
 }
 
-/// PBKDF2-HMAC-SHA512 using ring (already a repo dependency).
-fn pbkdf2_sha512(password: &[u8], salt: &[u8], iter: u32, out_len: usize) -> Vec<u8> {
-    let mut out = vec![0u8; out_len];
-    pbkdf2::derive(
-        pbkdf2::PBKDF2_HMAC_SHA512,
-        NonZeroU32::new(iter).unwrap(),
-        salt,
-        password,
-        &mut out,
-    );
-    out
-}
-
 /// Generate a TON wallet compatible with Tonkeeper / @ton/crypto.
 ///
 /// Loops until a candidate 24-word phrase passes the TON acceptance filter
@@ -60,25 +46,11 @@ pub fn generate_ton_wallet() -> (String, SigningKey) {
         let phrase = mnemonic.phrase().to_string();
 
         let entropy = hmac_sha512_empty_key(phrase.as_bytes());
-        let basic_seed = pbkdf2_sha512(
-            &entropy,
-            b"TON seed version",
-            PBKDF2_BASIC_ITER,
-            64,
-        );
-        if basic_seed[0] != 0 {
+        if ring_pbkdf2_sha512(&entropy, b"TON seed version", PBKDF2_BASIC_ITER)[0] != 0 {
             continue;
         }
 
-        let seed_bytes = pbkdf2_sha512(
-            &entropy,
-            b"TON default seed",
-            PBKDF2_SEED_ITER,
-            32,
-        );
-        let mut seed_arr = [0u8; 32];
-        seed_arr.copy_from_slice(&seed_bytes);
-        let signing_key = SigningKey::from_bytes(&seed_arr);
+        let signing_key = mnemonic_to_signing_key(&phrase);
         return (phrase, signing_key);
     }
 }
@@ -117,42 +89,37 @@ pub fn generate_ton_wallets() -> [(String, SigningKey); LANES] {
     })
 }
 
-/// Recover the Ed25519 signing key from an existing TON mnemonic phrase.
-/// Used for round-trip determinism tests.
-#[cfg(test)]
+/// Recover the Ed25519 signing key from a TON mnemonic phrase: the first 32
+/// bytes of the 100k-iteration PBKDF2 over its entropy.
 pub fn mnemonic_to_signing_key(phrase: &str) -> SigningKey {
     let entropy = hmac_sha512_empty_key(phrase.as_bytes());
-    let seed_bytes = pbkdf2_sha512(
-        &entropy,
-        b"TON default seed",
-        PBKDF2_SEED_ITER,
-        32,
-    );
-    let mut seed_arr = [0u8; 32];
-    seed_arr.copy_from_slice(&seed_bytes);
-    SigningKey::from_bytes(&seed_arr)
+    let seed = ring_pbkdf2_sha512(&entropy, b"TON default seed", PBKDF2_SEED_ITER);
+    SigningKey::from_bytes(seed[..32].try_into().unwrap())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// One single-path wallet: 24 words, round-trips through
+    /// `mnemonic_to_signing_key`, and passes the acceptance filter
+    /// (basic_seed[0] == 0) that `generate_ton_wallet` loops on.
     #[test]
-    fn generate_produces_24_word_phrase() {
-        let (phrase, _sk) = generate_ton_wallet();
+    fn generate_ton_wallet_is_24_words_round_trips_and_passes_filter() {
+        let (phrase, sk1) = generate_ton_wallet();
         let words: Vec<&str> = phrase.split_whitespace().collect();
         assert_eq!(words.len(), 24, "TON phrase must be 24 words, got {}", words.len());
-    }
 
-    #[test]
-    fn round_trip_deterministic() {
-        let (phrase, sk1) = generate_ton_wallet();
         let sk2 = mnemonic_to_signing_key(&phrase);
         assert_eq!(
             sk1.to_bytes(),
             sk2.to_bytes(),
             "re-deriving from the same phrase must yield identical signing key"
         );
+
+        let entropy = hmac_sha512_empty_key(phrase.as_bytes());
+        let basic_seed = ring_pbkdf2_sha512(&entropy, b"TON seed version", PBKDF2_BASIC_ITER);
+        assert_eq!(basic_seed[0], 0, "accepted phrase must satisfy basic_seed[0] == 0");
     }
 
     #[test]
@@ -163,27 +130,11 @@ mod tests {
             assert_eq!(phrase.split_whitespace().count(), 24);
             assert_eq!(sk.to_bytes(), mnemonic_to_signing_key(phrase).to_bytes());
             let entropy = hmac_sha512_empty_key(phrase.as_bytes());
-            let basic = pbkdf2_sha512(&entropy, b"TON seed version", PBKDF2_BASIC_ITER, 64);
+            let basic = ring_pbkdf2_sha512(&entropy, b"TON seed version", PBKDF2_BASIC_ITER);
             assert_eq!(basic[0], 0, "every batch phrase must pass the acceptance filter");
         }
         phrases.sort_unstable();
         phrases.dedup();
         assert_eq!(phrases.len(), wallets.len(), "phrases must be distinct");
-    }
-
-    #[test]
-    fn generated_phrase_passes_basic_seed_filter() {
-        // By construction, generate_ton_wallet only returns phrases whose
-        // basic_seed[0] == 0. Re-run the filter on a freshly generated phrase
-        // to confirm that invariant holds.
-        let (phrase, _sk) = generate_ton_wallet();
-        let entropy = hmac_sha512_empty_key(phrase.as_bytes());
-        let basic_seed = pbkdf2_sha512(
-            &entropy,
-            b"TON seed version",
-            PBKDF2_BASIC_ITER,
-            64,
-        );
-        assert_eq!(basic_seed[0], 0, "accepted phrase must satisfy basic_seed[0] == 0");
     }
 }

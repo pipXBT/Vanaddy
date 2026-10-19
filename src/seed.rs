@@ -1,6 +1,5 @@
-use crate::pbkdf2_lanes::pbkdf2_hmac_sha512;
+use crate::pbkdf2_lanes::{pbkdf2_hmac_sha512, ring_pbkdf2_sha512};
 use bip39::Mnemonic;
-use std::num::NonZeroU32;
 
 /// BIP-39 PBKDF2 iteration count. `pub` so `crate::gpu` can dispatch the GPU
 /// kernel for exactly the number of rounds the CPU reference uses.
@@ -12,16 +11,7 @@ pub const BIP39_SALT: &[u8; 8] = b"mnemonic";
 
 /// BIP-39 seed derivation using ring's optimized PBKDF2-HMAC-SHA512.
 pub fn derive_seed(mnemonic: &Mnemonic) -> [u8; 64] {
-    let password = mnemonic.phrase().as_bytes();
-    let mut seed = [0u8; 64];
-    ring::pbkdf2::derive(
-        ring::pbkdf2::PBKDF2_HMAC_SHA512,
-        NonZeroU32::new(PBKDF2_ROUNDS).unwrap(),
-        BIP39_SALT,
-        password,
-        &mut seed,
-    );
-    seed
+    ring_pbkdf2_sha512(mnemonic.phrase().as_bytes(), BIP39_SALT, PBKDF2_ROUNDS)
 }
 
 /// BIP-39 seeds for `L` mnemonics at once, PBKDF2 streams interleaved.
@@ -45,26 +35,6 @@ mod tests {
         let seed = derive_seed(&m);
         let expected = hex::decode("5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4").unwrap();
         assert_eq!(seed.as_slice(), expected.as_slice());
-    }
-
-    /// The GPU dispatches `PBKDF2_ROUNDS` rounds over a salt block packed from
-    /// `BIP39_SALT`. Pin that those two exported constants, fed to the *other*
-    /// CPU implementation, still reproduce the canonical BIP-39 vector - so a
-    /// drift in either is caught here rather than in a wallet nobody can open.
-    #[test]
-    fn exported_constants_reproduce_the_pinned_bip39_vector() {
-        use crate::pbkdf2_lanes::pbkdf2_hmac_sha512;
-        assert_eq!(PBKDF2_ROUNDS, 2048);
-        assert_eq!(BIP39_SALT, b"mnemonic");
-        let m = Mnemonic::from_phrase(
-            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-            Language::English,
-        ).unwrap();
-        let seeds = pbkdf2_hmac_sha512::<1>([m.phrase().as_bytes()], BIP39_SALT, PBKDF2_ROUNDS);
-        assert_eq!(
-            hex::encode(seeds[0]),
-            "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4"
-        );
     }
 
     #[test]

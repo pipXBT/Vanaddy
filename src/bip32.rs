@@ -1,19 +1,20 @@
 use ring::hmac;
 use secp256k1::{PublicKey, Scalar, SecretKey};
 
+/// HMAC-SHA512 of `data` under `key`, split into its left and right halves.
+fn hmac512(key: &[u8], data: &[u8]) -> ([u8; 32], [u8; 32]) {
+    let tag = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA512, key), data);
+    let (l, r) = tag.as_ref().split_at(32);
+    (l.try_into().unwrap(), r.try_into().unwrap())
+}
+
 /// BIP-32 child key derivation for secp256k1.
 /// `path` is a slice of indices; indices ≥ 0x80000000 are hardened.
 pub fn bip32_derive_secp256k1(seed: &[u8], path: &[u32]) -> SecretKey {
-    let master_key = hmac::Key::new(hmac::HMAC_SHA512, b"Bitcoin seed");
-    let result = hmac::sign(&master_key, seed);
-    let result = result.as_ref();
-    let mut key = SecretKey::from_byte_array(result[..32].try_into().expect("32 bytes"))
-        .expect("valid master key");
-    let mut chain_code = [0u8; 32];
-    chain_code.copy_from_slice(&result[32..]);
+    let (master, mut chain_code) = hmac512(b"Bitcoin seed", seed);
+    let mut key = SecretKey::from_byte_array(&master).expect("valid master key");
 
     for &index in path {
-        let hmac_key = hmac::Key::new(hmac::HMAC_SHA512, &chain_code);
         let mut data = [0u8; 37];
         if index >= 0x80000000 {
             data[0] = 0x00;
@@ -22,12 +23,11 @@ pub fn bip32_derive_secp256k1(seed: &[u8], path: &[u32]) -> SecretKey {
             data[..33].copy_from_slice(&PublicKey::from_secret_key_global(&key).serialize());
         }
         data[33..].copy_from_slice(&index.to_be_bytes());
-        let result = hmac::sign(&hmac_key, &data);
-        let result = result.as_ref();
+        let (il, child_chain_code) = hmac512(&chain_code, &data);
 
-        let il = Scalar::from_be_bytes(result[..32].try_into().expect("32 bytes")).expect("valid IL");
+        let il = Scalar::from_be_bytes(il).expect("valid IL");
         key = key.add_tweak(&il).expect("valid tweak");
-        chain_code.copy_from_slice(&result[32..]);
+        chain_code = child_chain_code;
     }
 
     key

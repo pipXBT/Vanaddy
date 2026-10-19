@@ -1,17 +1,18 @@
 use ring::hmac;
 
+/// HMAC-SHA512 of `data` under `key`, split into its left and right halves.
+fn hmac512(key: &[u8], data: &[u8]) -> ([u8; 32], [u8; 32]) {
+    let tag = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA512, key), data);
+    let (l, r) = tag.as_ref().split_at(32);
+    (l.try_into().unwrap(), r.try_into().unwrap())
+}
+
 /// SLIP-0010 Ed25519 child-key derivation.
 /// All indices in `path` MUST be hardened (>= 0x80000000); Ed25519 does not support
 /// non-hardened derivation. Panics if a non-hardened index is supplied.
 pub fn slip10_derive_ed25519(seed: &[u8], path: &[u32]) -> [u8; 32] {
     // Master key
-    let key = hmac::Key::new(hmac::HMAC_SHA512, b"ed25519 seed");
-    let master = hmac::sign(&key, seed);
-    let master = master.as_ref();
-    let mut key_bytes = [0u8; 32];
-    let mut chain_code = [0u8; 32];
-    key_bytes.copy_from_slice(&master[..32]);
-    chain_code.copy_from_slice(&master[32..]);
+    let (mut key_bytes, mut chain_code) = hmac512(b"ed25519 seed", seed);
 
     for &index in path {
         assert!(
@@ -19,15 +20,11 @@ pub fn slip10_derive_ed25519(seed: &[u8], path: &[u32]) -> [u8; 32] {
             "SLIP-0010 Ed25519 requires hardened indices (>= 0x80000000); got {:#x}",
             index
         );
-        let hmac_key = hmac::Key::new(hmac::HMAC_SHA512, &chain_code);
         let mut data = [0u8; 37];
         data[0] = 0x00;
         data[1..33].copy_from_slice(&key_bytes);
         data[33..].copy_from_slice(&index.to_be_bytes());
-        let result = hmac::sign(&hmac_key, &data);
-        let result = result.as_ref();
-        key_bytes.copy_from_slice(&result[..32]);
-        chain_code.copy_from_slice(&result[32..]);
+        (key_bytes, chain_code) = hmac512(&chain_code, &data);
     }
 
     key_bytes
