@@ -167,13 +167,3 @@ kernel void pbkdf2_iterate(device Pbkdf2State *states [[buffer(0)]],
         }
     }
 }
-
-// Self-test 0: SHA-512("abc") -- isolates the general compression path.
-kernel void sha512_abc(device ulong *out [[buffer(0)]], uint tid [[thread_position_in_grid]]) {
-    ulong w[16]; for (uint i=0;i<16;i++) w[i]=0;
-    w[0]=0x6162638000000000UL; w[15]=24;
-    ulong st[8]; for (uint i=0;i<8;i++) st[i]=H0[i];
-    sha512_compress(st, w);
-    if (tid==0) for (uint i=0;i<8;i++) out[i]=st[i];
-}
-

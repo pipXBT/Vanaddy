@@ -37,6 +37,9 @@ pub const CANONICAL_SEED_HEX: &str = "5eb00bbddcf069084889a8ab9155568165f5c453cc
 /// schedule.
 pub const IRREGULAR_SCHEDULE: Schedule = Schedule::Irregular(&[1, 1000, 46, 1000]);
 
+/// All 2047 follow-up iterations in one dispatch.
+const ONE_SHOT_SCHEDULE: Schedule = Schedule::Irregular(&[crate::seed::PBKDF2_ROUNDS - 1]);
+
 /// The byte `run_wave` fills `seeds` with before every wave.
 const POISON: u8 = 0xA5;
 
@@ -91,8 +94,8 @@ impl From<GpuError> for SelfTestError {
 ///      `ring`-first check would be circular;
 ///   4. no output all-zero, no output still poisoned;
 ///   5. every output against `crate::seed::derive_seed` (`ring`);
-///   6. a count=511 ragged wave, and chunk-schedule invariance over three
-///      schedules.
+///   6. a count=511 ragged wave against the ring-checked count=512 outputs,
+///      and chunk-schedule invariance over three schedules.
 ///
 /// `stop` is read before the first phase and after each one. One run is ~154 ms
 /// of GPU plus ~133 ms of `ring` — long enough that a quit issued during startup
@@ -164,7 +167,16 @@ where
     }
 
     for (i, seed) in full.iter().enumerate() {
-        check_ring_match(i, seed, &mnemonics[i], phrases[i])?;
+        let want = hex::encode(crate::seed::derive_seed(&mnemonics[i]));
+        let got = hex::encode(**seed);
+        if got != want {
+            return Err(SelfTestError::RingMismatch {
+                index: i,
+                phrase: phrases[i].to_string(),
+                got,
+                want,
+            });
+        }
     }
 
     if stop.load(Ordering::Relaxed) {
@@ -182,11 +194,19 @@ where
             want: SELF_TEST_RAGGED_COUNT,
         });
     }
-    for (i, seed) in ragged.iter().enumerate() {
+    // `full` already matched `ring` slot for slot, so it is the reference here.
+    for (i, (seed, want)) in ragged.iter().zip(full.iter()).enumerate() {
         if seed.iter().all(|&b| b == POISON) {
             return Err(SelfTestError::Poisoned { index: i });
         }
-        check_ring_match(i, seed, &mnemonics[i], phrases[i])?;
+        if seed != want {
+            return Err(SelfTestError::RingMismatch {
+                index: i,
+                phrase: phrases[i].to_string(),
+                got: hex::encode(**seed),
+                want: hex::encode(**want),
+            });
+        }
     }
 
     if stop.load(Ordering::Relaxed) {
@@ -194,10 +214,7 @@ where
     }
 
     for (label, schedule) in [
-        (
-            "one-shot",
-            Schedule::Uniform(crate::seed::PBKDF2_ROUNDS - 1),
-        ),
+        ("one-shot", ONE_SHOT_SCHEDULE),
         ("production", Schedule::Production),
         ("irregular", IRREGULAR_SCHEDULE),
     ] {
@@ -219,54 +236,46 @@ where
     Ok(())
 }
 
-/// Compare one derived seed against `crate::seed::derive_seed` (`ring`) for
-/// the mnemonic at the same index. Shared by the full-wave and ragged-wave
-/// loops above so the `RingMismatch` payload (index, phrase, got, want) is
-/// assembled in exactly one place.
-fn check_ring_match(
-    index: usize,
-    seed: &Zeroizing<[u8; 64]>,
-    mnemonic: &Mnemonic,
-    phrase: &str,
-) -> Result<(), SelfTestError> {
-    let want = hex::encode(crate::seed::derive_seed(mnemonic));
-    let got = hex::encode(**seed);
-    if got != want {
-        return Err(SelfTestError::RingMismatch {
-            index,
-            phrase: phrase.to_string(),
-            got,
-            want,
-        });
-    }
-    Ok(())
+/// PBKDF2-HMAC-SHA512 over `crate::seed::BIP39_SALT` via `ring` — the same
+/// primitive `src/seed.rs` uses, but with `iters` free. The reference every GPU
+/// test compares against.
+#[cfg(test)]
+pub(crate) fn ring_reference(phrase: &str, iters: u32) -> [u8; 64] {
+    let mut out = [0u8; 64];
+    ring::pbkdf2::derive(
+        ring::pbkdf2::PBKDF2_HMAC_SHA512,
+        std::num::NonZeroU32::new(iters).expect("iters >= 1"),
+        crate::seed::BIP39_SALT,
+        phrase.as_bytes(),
+        &mut out,
+    );
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    type Seeds = Vec<Zeroizing<[u8; 64]>>;
+
     /// A correct backend: `ring`, ignoring the schedule (a correct GPU produces
     /// the same bytes under every schedule — that is the property being tested).
-    fn reference(
-        phrases: &[&str],
-        iters: u32,
-        _schedule: Schedule,
-    ) -> Result<Vec<Zeroizing<[u8; 64]>>, GpuError> {
+    fn reference(phrases: &[&str], iters: u32, _schedule: Schedule) -> Result<Seeds, GpuError> {
         Ok(phrases
             .iter()
-            .map(|p| {
-                let mut out = [0u8; 64];
-                ring::pbkdf2::derive(
-                    ring::pbkdf2::PBKDF2_HMAC_SHA512,
-                    std::num::NonZeroU32::new(iters).expect("iters >= 1"),
-                    crate::seed::BIP39_SALT,
-                    p.as_bytes(),
-                    &mut out,
-                );
-                Zeroizing::new(out)
-            })
+            .map(|p| Zeroizing::new(ring_reference(p, iters)))
             .collect())
+    }
+
+    /// Run the self-test over `reference`, with `mutate` corrupting each
+    /// call's output, and return the error it must report.
+    fn fails_with(mut mutate: impl FnMut(&[&str], Schedule, &mut Seeds)) -> SelfTestError {
+        self_test(&AtomicBool::new(false), |p, i, s| {
+            let mut o = reference(p, i, s)?;
+            mutate(p, s, &mut o);
+            Ok(o)
+        })
+        .unwrap_err()
     }
 
     #[test]
@@ -275,85 +284,128 @@ mod tests {
     }
 
     #[test]
-    fn detects_single_bit_flip() {
-        let e = self_test(&AtomicBool::new(false), |p, i, s| {
-            let mut o = reference(p, i, s)?;
-            if o.len() > 7 {
-                o[7][0] ^= 0x01;
-            }
-            Ok(o)
-        })
-        .unwrap_err();
-        assert!(
-            matches!(e, SelfTestError::RingMismatch { index: 7, .. }),
-            "{e:?}"
-        );
-    }
-
-    /// A permutation: every seed is individually valid, but paired with the
-    /// wrong phrase. This is the mis-pairing class, and it is the one a
-    /// count=1 self-test can never see.
-    #[test]
-    fn detects_swapped_outputs() {
-        let e = self_test(&AtomicBool::new(false), |p, i, s| {
-            let mut o = reference(p, i, s)?;
-            if o.len() > 4 {
-                o.swap(3, 4);
-            }
-            Ok(o)
-        })
-        .unwrap_err();
-        assert!(
-            matches!(e, SelfTestError::RingMismatch { index: 3, .. }),
-            "{e:?}"
-        );
-    }
-
-    #[test]
-    fn detects_all_zero_output() {
-        let e = self_test(&AtomicBool::new(false), |p, i, s| {
-            let mut o = reference(p, i, s)?;
-            if o.len() > 9 {
-                o[9] = Zeroizing::new([0u8; 64]);
-            }
-            Ok(o)
-        })
-        .unwrap_err();
-        assert_eq!(e, SelfTestError::AllZero { index: 9 });
-    }
-
-    #[test]
-    fn detects_surviving_poison() {
-        let e = self_test(&AtomicBool::new(false), |p, i, s| {
-            let mut o = reference(p, i, s)?;
-            if o.len() > 12 {
-                o[12] = Zeroizing::new([0xA5u8; 64]);
-            }
-            Ok(o)
-        })
-        .unwrap_err();
-        assert_eq!(e, SelfTestError::Poisoned { index: 12 });
+    fn detects_every_corruption() {
+        type Mutate = fn(&[&str], Schedule, &mut Seeds);
+        type Check = fn(&SelfTestError) -> bool;
+        let cases: [(&str, Mutate, Check); 8] = [
+            // The same flip on every wave, so the ragged wave agrees with the
+            // full one: only the full-wave `ring` loop can see it.
+            (
+                "single bit flip",
+                |_, _, o| {
+                    if o.len() > 7 {
+                        o[7][0] ^= 0x01;
+                    }
+                },
+                |e| matches!(e, SelfTestError::RingMismatch { index: 7, .. }),
+            ),
+            // A permutation: every seed is individually valid, but paired with
+            // the wrong phrase. This is the mis-pairing class, and it is the one
+            // a count=1 self-test can never see.
+            (
+                "swapped outputs",
+                |_, _, o| {
+                    if o.len() > 4 {
+                        o.swap(3, 4);
+                    }
+                },
+                |e| matches!(e, SelfTestError::RingMismatch { index: 3, .. }),
+            ),
+            (
+                "all-zero output",
+                |_, _, o| {
+                    if o.len() > 9 {
+                        o[9] = Zeroizing::new([0u8; 64]);
+                    }
+                },
+                |e| *e == SelfTestError::AllZero { index: 9 },
+            ),
+            (
+                "surviving poison",
+                |_, _, o| {
+                    if o.len() > 12 {
+                        o[12] = Zeroizing::new([0xA5u8; 64]);
+                    }
+                },
+                |e| *e == SelfTestError::Poisoned { index: 12 },
+            ),
+            (
+                "short output vec",
+                |_, _, o| {
+                    o.pop();
+                },
+                |e| {
+                    *e == SelfTestError::WrongLength {
+                        got: SELF_TEST_COUNT - 1,
+                        want: SELF_TEST_COUNT,
+                    }
+                },
+            ),
+            (
+                "schedule divergence",
+                |_, s, o| {
+                    if s == ONE_SHOT_SCHEDULE {
+                        o[0][63] ^= 0x80;
+                    }
+                },
+                |e| {
+                    *e == SelfTestError::ScheduleDivergence {
+                        schedule: "one-shot",
+                        index: 0,
+                    }
+                },
+            ),
+            // Corrupts only the canonical slot (index 0), before any ring
+            // cross-check runs. This is the self-test's only non-circular anchor
+            // to an external BIP-39 fact — `reference()` and `derive_seed` both
+            // call `ring::pbkdf2::derive` identically, so everywhere else a
+            // fault that disagrees with `ring` also disagrees with `ring`, which
+            // proves nothing about `ring` itself being right. If the
+            // `CanonicalVectorMismatch` check were ever deleted, execution would
+            // fall through to the ring cross-check, which would (correctly, but
+            // for the wrong reason) report `RingMismatch` instead — so this
+            // case's exact-variant check catches the regression.
+            (
+                "canonical vector mismatch",
+                |_, _, o| o[0][0] ^= 0x01,
+                |e| {
+                    let mut bytes = hex::decode(CANONICAL_SEED_HEX).expect("valid hex constant");
+                    bytes[0] ^= 0x01;
+                    *e == SelfTestError::CanonicalVectorMismatch {
+                        got: hex::encode(bytes),
+                    }
+                },
+            ),
+            // Corrupts index 250 ONLY on the count=512 wave, leaving the
+            // count=511 ragged wave and the single-phrase schedule calls
+            // untouched, so the full and ragged waves disagree there.
+            (
+                "full-wave-only ring mismatch",
+                |p, _, o| {
+                    if p.len() == SELF_TEST_COUNT {
+                        o[250][0] ^= 0x01;
+                    }
+                },
+                |e| matches!(e, SelfTestError::RingMismatch { index: 250, .. }),
+            ),
+        ];
+        for (label, mutate, check) in cases {
+            let e = fails_with(mutate);
+            assert!(check(&e), "{label}: {e:?}");
+        }
     }
 
     /// The backend serves a previous wave's results, shifted by one — the shape
-    /// a stale `seeds` buffer takes when `finalize` silently did not run.
+    /// a stale `seeds` buffer takes when `finalize` silently did not run. The
+    /// first (full) wave is served honestly, so it is the ragged-vs-full check
+    /// that reports it.
     #[test]
     fn detects_stale_previous_result() {
-        let mut previous: Option<Vec<Zeroizing<[u8; 64]>>> = None;
-        let e = self_test(&AtomicBool::new(false), |p, i, s| {
-            let fresh = reference(p, i, s)?;
-            match previous.take() {
-                None => {
-                    previous = Some(fresh.clone());
-                    Ok(fresh)
-                }
-                Some(old) => {
-                    previous = Some(old.clone());
-                    Ok(old[1..=p.len()].to_vec())
-                }
-            }
-        })
-        .unwrap_err();
+        let mut previous: Option<Seeds> = None;
+        let e = fails_with(|p, _, o| match &previous {
+            None => previous = Some(o.clone()),
+            Some(old) => *o = old[1..=p.len()].to_vec(),
+        });
         assert!(
             matches!(
                 &e,
@@ -364,97 +416,12 @@ mod tests {
     }
 
     #[test]
-    fn detects_short_output_vec() {
-        let e = self_test(&AtomicBool::new(false), |p, i, s| {
-            let mut o = reference(p, i, s)?;
-            o.pop();
-            Ok(o)
-        })
-        .unwrap_err();
-        assert_eq!(
-            e,
-            SelfTestError::WrongLength {
-                got: SELF_TEST_COUNT - 1,
-                want: SELF_TEST_COUNT
-            }
-        );
-    }
-
-    #[test]
-    fn detects_schedule_divergence() {
-        let e = self_test(&AtomicBool::new(false), |p, i, s| {
-            let mut o = reference(p, i, s)?;
-            if s == Schedule::Uniform(crate::seed::PBKDF2_ROUNDS - 1) {
-                o[0][63] ^= 0x80;
-            }
-            Ok(o)
-        })
-        .unwrap_err();
-        assert_eq!(
-            e,
-            SelfTestError::ScheduleDivergence {
-                schedule: "one-shot",
-                index: 0
-            }
-        );
-    }
-
-    #[test]
     fn detects_backend_error() {
         let e = self_test(&AtomicBool::new(false), |_, _, _| {
             Err(GpuError::BufferAlloc)
         })
         .unwrap_err();
         assert_eq!(e, SelfTestError::Backend("BufferAlloc".to_string()));
-    }
-
-    /// Corrupts only the canonical slot (index 0), before any ring cross-check
-    /// runs. This is the self-test's only non-circular anchor to an external
-    /// BIP-39 fact — `reference()` and `derive_seed` both call
-    /// `ring::pbkdf2::derive` identically, so everywhere else a fault that
-    /// disagrees with `ring` also disagrees with `ring`, which proves nothing
-    /// about `ring` itself being right. If the `CanonicalVectorMismatch` check
-    /// were ever deleted, execution would fall through to the ring
-    /// cross-check, which would (correctly, but for the wrong reason) also
-    /// catch this corruption and report `RingMismatch` instead — so this test
-    /// would fail its exact-variant assertion and catch the regression.
-    #[test]
-    fn detects_canonical_vector_mismatch() {
-        let e = self_test(&AtomicBool::new(false), |p, i, s| {
-            let mut o = reference(p, i, s)?;
-            o[0][0] ^= 0x01;
-            Ok(o)
-        })
-        .unwrap_err();
-        let want_got = {
-            let mut bytes = hex::decode(CANONICAL_SEED_HEX).expect("valid hex constant");
-            bytes[0] ^= 0x01;
-            hex::encode(bytes)
-        };
-        assert_eq!(e, SelfTestError::CanonicalVectorMismatch { got: want_got });
-    }
-
-    /// Corrupts index 250 ONLY on the count=512 wave (`p.len() ==
-    /// SELF_TEST_COUNT`), leaving the count=511 ragged wave and the
-    /// single-phrase schedule calls untouched. The ragged wave redundantly
-    /// re-checks indices 0-510 and would mask a fault there, so this is the
-    /// only test whose failure is unique to the full-wave ring loop: if that
-    /// loop were deleted, the (uncorrupted) ragged wave would find nothing
-    /// wrong and `self_test` would incorrectly return `Ok(())`.
-    #[test]
-    fn detects_full_wave_ring_mismatch_at_an_index_the_ragged_wave_never_sees() {
-        let e = self_test(&AtomicBool::new(false), |p, i, s| {
-            let mut o = reference(p, i, s)?;
-            if p.len() == SELF_TEST_COUNT {
-                o[250][0] ^= 0x01;
-            }
-            Ok(o)
-        })
-        .unwrap_err();
-        assert!(
-            matches!(e, SelfTestError::RingMismatch { index: 250, .. }),
-            "{e:?}"
-        );
     }
 
     /// The spec requires `stop` to be observed between self-test phases. A flag

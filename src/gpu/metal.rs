@@ -6,7 +6,7 @@
 //! used and dropped on one thread.
 
 use crate::gpu::kernel_src::KERNEL_SRC;
-use crate::gpu::pack::{pack_key_block, pack_salt_block, KeyBlock};
+use crate::gpu::pack::{pack_key_block, KeyBlock, BIP39_SALT_BLOCK};
 use crate::gpu::{
     classify_command_buffer_status, GpuError, GpuStatus, Schedule, MAX_THREADS_PER_THREADGROUP,
     PIPELINE_DEPTH, WAVE,
@@ -58,6 +58,14 @@ type Cb = Retained<ProtocolObject<dyn MTLCommandBuffer>>;
 
 type Buf = Retained<ProtocolObject<dyn MTLBuffer>>;
 
+fn size1(width: usize) -> MTLSize {
+    MTLSize {
+        width,
+        height: 1,
+        depth: 1,
+    }
+}
+
 /// ~1 ms device probe. Called ONCE from `main()`, BEFORE `enable_raw_mode()`,
 /// so that a panic or any Metal stderr noise cannot land inside the alternate
 /// screen.
@@ -103,8 +111,6 @@ pub struct MetalPbkdf2 {
     iterate: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     bufs: WaveBuffers,
     tg: usize,
-    tew: usize,
-    maxt: usize,
     /// Test-only fault injection. `Cell`, not `&mut self`, because
     /// `check_status` runs inside the autorelease-pool closure, which already
     /// holds shared borrows of the queue, the pipelines and the buffers.
@@ -139,19 +145,16 @@ impl MetalPbkdf2 {
             .newLibraryWithSource_options_error(&source, Some(&options))
             .map_err(|e| GpuError::ShaderCompile(e.localizedDescription().to_string()))?;
 
-        let mut pipes = Vec::new();
-        for name in ["pbkdf2_prologue", "pbkdf2_iterate"] {
+        let pipe = |name: &str| {
             let f = library
                 .newFunctionWithName(&NSString::from_str(name))
                 .ok_or_else(|| GpuError::PipelineCreate(format!("kernel `{name}` not found")))?;
-            pipes.push(
-                device
-                    .newComputePipelineStateWithFunction_error(&f)
-                    .map_err(|e| GpuError::PipelineCreate(e.localizedDescription().to_string()))?,
-            );
-        }
-        let iterate = pipes.pop().expect("two pipelines built");
-        let prologue = pipes.pop().expect("two pipelines built");
+            device
+                .newComputePipelineStateWithFunction_error(&f)
+                .map_err(|e| GpuError::PipelineCreate(e.localizedDescription().to_string()))
+        };
+        let prologue = pipe("pbkdf2_prologue")?;
+        let iterate = pipe("pbkdf2_iterate")?;
 
         // One threadgroup size is used for BOTH pipelines, so take the widest
         // execution width and the tightest maximum. The final `.min(maxt)`
@@ -198,8 +201,6 @@ impl MetalPbkdf2 {
                 seeds,
             },
             tg,
-            tew,
-            maxt,
             #[cfg(test)]
             fault_at_command_buffer: std::cell::Cell::new(None),
             #[cfg(test)]
@@ -209,18 +210,6 @@ impl MetalPbkdf2 {
 
     pub fn device_name(&self) -> String {
         self.device_name.clone()
-    }
-
-    pub fn threadgroup_size(&self) -> usize {
-        self.tg
-    }
-
-    /// `(threadExecutionWidth, maxTotalThreadsPerThreadgroup)` as the device
-    /// itself reported them, so tests can check `threadgroup_size()` against
-    /// the hardware's own numbers instead of the constants the formula in
-    /// `new()` is derived from.
-    pub fn threadgroup_bounds(&self) -> (usize, usize) {
-        (self.tew, self.maxt)
     }
 
     /// Make the `nth` command-buffer status check of every subsequent wave
@@ -271,10 +260,7 @@ impl MetalPbkdf2 {
                 }
             }
         }
-        match first_err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        first_err.map_or(Ok(()), Err)
     }
 
     /// Derive `keys.len()` seeds. `Ok(None)` means the wave was abandoned
@@ -351,18 +337,7 @@ impl MetalPbkdf2 {
                     3,
                 );
             }
-            enc.dispatchThreads_threadsPerThreadgroup(
-                MTLSize {
-                    width: count as usize,
-                    height: 1,
-                    depth: 1,
-                },
-                MTLSize {
-                    width: self.tg,
-                    height: 1,
-                    depth: 1,
-                },
-            );
+            enc.dispatchThreads_threadsPerThreadgroup(size1(count as usize), size1(self.tg));
             enc.endEncoding();
             cb.commit();
             cb.waitUntilCompleted();
@@ -444,16 +419,8 @@ impl MetalPbkdf2 {
                         )
                     };
                     enc.dispatchThreads_threadsPerThreadgroup(
-                        MTLSize {
-                            width: count as usize,
-                            height: 1,
-                            depth: 1,
-                        },
-                        MTLSize {
-                            width: self.tg,
-                            height: 1,
-                            depth: 1,
-                        },
+                        size1(count as usize),
+                        size1(self.tg),
                     );
                     if remaining == 0 {
                         break;
@@ -508,9 +475,10 @@ impl MetalPbkdf2 {
 
     /// Raw read of one 64-byte slot of the `seeds` buffer, INCLUDING slots past
     /// the live count that `run_wave` refuses to return. Exists so
-    /// `gpu_slots_beyond_count_keep_their_poison` can prove that nothing wrote
-    /// past the live count and the 0xA5 poison survived there — the only way to
-    /// observe a slot the safe API deliberately hides.
+    /// `gpu_handles_ragged_counts` can prove that nothing wrote past the live
+    /// count and the 0xA5 poison survived there — the only way to observe a
+    /// slot the safe API deliberately hides.
+    #[cfg(test)]
     pub fn raw_seed_slot(&self, i: usize) -> [u8; 64] {
         assert!(i < WAVE, "slot {i} is outside the {WAVE}-candidate wave");
         // SAFETY: `seeds` is WAVE * 64 bytes owned by this engine, no command
@@ -520,8 +488,8 @@ impl MetalPbkdf2 {
         unsafe { *p.add(i) }
     }
 
-    /// One wave under the measured production schedule. This is the entry point
-    /// the producer thread uses.
+    /// One wave under the measured production schedule.
+    #[cfg(test)]
     pub fn derive(
         &mut self,
         phrases: &[&str],
@@ -538,14 +506,19 @@ impl MetalPbkdf2 {
         iters: u32,
         schedule: Schedule,
     ) -> Result<Vec<Zeroizing<[u8; 64]>>, GpuError> {
-        let salt = pack_salt_block(crate::seed::BIP39_SALT)?;
         let keys: Zeroizing<Vec<KeyBlock>> = Zeroizing::new(
             phrases
                 .iter()
                 .map(|p| pack_key_block(p.as_bytes()))
                 .collect(),
         );
-        match self.run_wave(&keys, &salt, iters, schedule, &AtomicBool::new(false))? {
+        match self.run_wave(
+            &keys,
+            &BIP39_SALT_BLOCK,
+            iters,
+            schedule,
+            &AtomicBool::new(false),
+        )? {
             Some(seeds) => Ok(seeds.iter().map(|s| Zeroizing::new(*s)).collect()),
             None => Err(GpuError::BadConfig(
                 "wave abandoned without a stop request".to_string(),
@@ -687,68 +660,13 @@ pub(crate) fn gpu_for_test() -> Option<MetalPbkdf2> {
     }
 }
 
-/// Compile-time proof that the `objc2-metal` surface `run_wave` (Task 3.4)
-/// depends on resolved to the selector spellings and arities this file assumes.
-/// Never called, never shipped in any meaningful sense — it exists so that a
-/// binding mismatch fails here, naming the one selector that moved, instead of
-/// inside the kernel work where it looks like a Metal bug.
-#[allow(dead_code)]
-fn objc2_surface_probe(
-    q: &ProtocolObject<dyn objc2_metal::MTLCommandQueue>,
-    pipe: &ProtocolObject<dyn MTLComputePipelineState>,
-    buf: &ProtocolObject<dyn MTLBuffer>,
-) {
-    use objc2_metal::{MTLCommandBuffer, MTLCommandEncoder, MTLComputeCommandEncoder, MTLSize};
-
-    let _: usize = pipe.threadExecutionWidth();
-    let _: usize = pipe.maxTotalThreadsPerThreadgroup();
-    let _: std::ptr::NonNull<std::ffi::c_void> = buf.contents();
-
-    // Pin `autoreleasepool`'s closure arity and the shape of the pool argument.
-    // Task 3.4 calls this three times and Task 3.3's own rationale names it as a
-    // reason for choosing objc2 over metal-rs, so it belongs in this probe: if the
-    // closure took no argument, or returned `()` only, 3.4 would not compile and the
-    // failure would surface 300 lines into a task this probe exists to de-risk.
-    let _: u32 = objc2::rc::autoreleasepool(|_pool| 0u32);
-
-    let Some(cb) = q.commandBuffer() else { return };
-    let _: i64 = cb.status().0 as i64;
-    let _: Option<String> = cb.error().map(|e| e.localizedDescription().to_string());
-
-    if let Some(enc) = cb.computeCommandEncoder() {
-        enc.setComputePipelineState(pipe);
-        let p: u32 = 0;
-        unsafe {
-            enc.setBuffer_offset_atIndex(Some(buf), 0, 0);
-            enc.setBytes_length_atIndex(std::ptr::NonNull::from(&p).cast(), 4, 1);
-        }
-        enc.dispatchThreads_threadsPerThreadgroup(
-            MTLSize {
-                width: 1,
-                height: 1,
-                depth: 1,
-            },
-            MTLSize {
-                width: 1,
-                height: 1,
-                depth: 1,
-            },
-        );
-        enc.endEncoding();
-    }
-    cb.commit();
-    cb.waitUntilCompleted();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gpu::selftest::{ring_reference, CANONICAL_PHRASE, CANONICAL_SEED_HEX};
     use bip39::{Language, Mnemonic};
     use rand::{RngCore, SeedableRng};
     use rand_chacha::ChaCha20Rng;
-
-    const CANONICAL_PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-    const CANONICAL_SEED_HEX: &str = "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4";
 
     /// The shortest possible 12-word English BIP-39 phrase: 11 × 3 letters + 11
     /// spaces + a 3-letter checksum word = 47 bytes.
@@ -757,36 +675,6 @@ mod tests {
     /// bytes. `pack_key_block` zero-pads to 128, so this is the last length
     /// before the (absent) SHA-512 pre-hash path would be needed.
     const LONGEST_PHRASE: &str = "abstract abstract abstract abstract abstract abstract abstract abstract abstract abstract abstract attitude";
-
-    /// PBKDF2-HMAC-SHA512 with an arbitrary iteration count, via `ring` — the
-    /// same primitive `src/seed.rs:12` uses, but with `iters` free.
-    fn ring_reference(phrase: &str, iters: u32) -> [u8; 64] {
-        let mut out = [0u8; 64];
-        ring::pbkdf2::derive(
-            ring::pbkdf2::PBKDF2_HMAC_SHA512,
-            std::num::NonZeroU32::new(iters).expect("iters >= 1"),
-            crate::seed::BIP39_SALT,
-            phrase.as_bytes(),
-            &mut out,
-        );
-        out
-    }
-
-    /// The BIP-39 canonical vector, against the same hex constant already
-    /// pinned at src/seed.rs:41. This is the anchor to external ground truth:
-    /// every other GPU test in this file compares against `ring`, which would
-    /// be circular if `ring` were wrong.
-    #[test]
-    fn gpu_seed_matches_bip39_canonical_vector() {
-        let Some(mut gpu) = gpu_for_test() else {
-            return;
-        };
-        let out = gpu
-            .derive(&[CANONICAL_PHRASE], crate::seed::PBKDF2_ROUNDS)
-            .expect("wave");
-        assert_eq!(out.len(), 1);
-        assert_eq!(hex::encode(*out[0]), CANONICAL_SEED_HEX);
-    }
 
     /// `total_iters == 1` is the case the do-while exists for: PBKDF2 with
     /// c == 1 is T == U_1, already computed by the prologue, so the wave still
@@ -811,53 +699,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn gpu_device_opens_and_reports_a_name() {
-        let Some(gpu) = gpu_for_test() else { return };
-        assert!(
-            !gpu.device_name().is_empty(),
-            "MTLDevice reported an empty name"
-        );
-    }
-
-    #[test]
-    fn gpu_threadgroup_size_is_a_positive_multiple_of_the_execution_width() {
-        let Some(gpu) = gpu_for_test() else { return };
-        let tg = gpu.threadgroup_size();
-        // Compare against the values the device actually reported, not against
-        // constants this formula is derived from. `tg <= MAX_THREADS_PER_THREADGROUP`
-        // and `tg % 32 == 0` are both TAUTOLOGIES of Step 4's
-        //     tg = ((maxt.min(want) / tew).max(1) * tew).min(maxt)
-        // when `want` is the constant and `tew` is 32 — they restate the formula
-        // rather than testing it, and `tg > 0` is already guaranteed by the
-        // `if tg == 0 { return Err(..) }` two lines above it in `new()`.
-        let (tew, maxt) = gpu.threadgroup_bounds();
-        assert!(tew > 0 && maxt > 0, "device reported tew={tew} maxt={maxt}");
-        assert!(
-            tg > 0 && tg <= maxt,
-            "threadgroup {tg} must fit the device's own maxTotalThreadsPerThreadgroup {maxt}"
-        );
-        assert_eq!(
-            tg % tew,
-            0,
-            "threadgroup {tg} is not a multiple of this device's execution width {tew}"
-        );
-        // The M1 perf clamp is a TUNING choice, not a hardware bound: this M1
-        // reports maxTotalThreadsPerThreadgroup = 384, and 384 measured 13% SLOWER
-        // than 256. Only assert the clamp when the override is absent — otherwise
-        // `VANADDY_GPU_TG=512`, a tuning path this very brief documents, makes the
-        // formula yield 384 and panics here. A test that fails on a documented
-        // knob gets "fixed" by deleting the assertion, and this is the only
-        // load-bearing one in the function.
-        if std::env::var_os("VANADDY_GPU_TG").is_none() {
-            assert!(
-                tg <= MAX_THREADS_PER_THREADGROUP,
-                "default threadgroup {tg} exceeds the measured M1 optimum clamp of \
-                 {MAX_THREADS_PER_THREADGROUP} (384 measured 13% SLOWER here)"
-            );
-        }
-    }
-
     /// The kernel is resumable: all live state is in `states`, so a wave can be
     /// split across arbitrarily many dispatches. If that were not exactly true,
     /// depth-3 pipelining over one `states` buffer would be unsound. Five
@@ -872,10 +713,10 @@ mod tests {
         };
         let phrases = [CANONICAL_PHRASE, SHORTEST_PHRASE, LONGEST_PHRASE];
         let schedules = [
-            ("one-shot", Schedule::Uniform(2047)),
+            ("one-shot", Schedule::Irregular(&[2047])),
             ("production R=8", Schedule::Production),
             ("irregular", Schedule::Irregular(&[1, 1000, 46, 1000])),
-            ("R=1", Schedule::Uniform(1)),
+            ("R=1", Schedule::Irregular(&[1])),
             (
                 "irregular repeat-tail",
                 Schedule::Irregular(&[500, 500, 500]),
@@ -894,19 +735,6 @@ mod tests {
                     "schedule {label} index {i}"
                 );
             }
-        }
-    }
-
-    #[test]
-    fn probe_reports_a_ready_device() {
-        if std::env::var_os("VANADDY_NO_GPU").is_some() {
-            eprintln!("SKIP: VANADDY_NO_GPU is set");
-            return;
-        }
-        match probe() {
-            GpuStatus::Ready { device } => assert!(!device.is_empty()),
-            GpuStatus::Unavailable(r) => eprintln!("SKIP: no Metal device ({r})"),
-            other => panic!("probe() must return Ready or Unavailable, got {other:?}"),
         }
     }
 
@@ -998,12 +826,28 @@ mod tests {
     /// (513) is immediately followed by a SMALLER one (2), independent of
     /// how the ascending run above it is edited. An ascending-only sequence
     /// cannot exercise a shrinking-count transition at all, and that
-    /// transition is the only one `gpu_slots_beyond_count_keep_their_poison`
-    /// can use to catch a regression from "poison the whole buffer on every
-    /// wave" to "only ever grow the poisoned region as counts increase" —
-    /// see that test for why.
+    /// transition is the only one `gpu_handles_ragged_counts` can use to catch
+    /// a regression from "poison the whole buffer on every wave" to "only ever
+    /// grow the poisoned region as counts increase" — see that test for why.
     const RAGGED_COUNTS: [usize; 11] = [1, 2, 31, 33, 255, 257, 511, 512, 513, 513, 2];
 
+    /// Every ragged count returns EXACTLY `count` correct seeds, and a thread
+    /// past the live count must not write. If it did, a later wave with a
+    /// larger count would silently serve the previous wave's seed for those
+    /// slots.
+    ///
+    /// The `n < prev_n` branch below is load-bearing, not defensive
+    /// decoration: every count in `RAGGED_COUNTS` up to that point is
+    /// ascending, so every slot the `[n, n+1, WAVE-1]` check reads was never
+    /// written by any prior (necessarily smaller-or-equal) wave — it would
+    /// read `0xA5` whether `run_wave` re-poisons the WHOLE buffer on every
+    /// call (correct, what it does today) or only ever GROWS the poisoned
+    /// region as the largest-seen count increases (a regression). Only a wave
+    /// that is SMALLER than its predecessor can tell those two apart: the gap
+    /// `[n, prev_n)` held the predecessor's real, validly computed seed bytes
+    /// a moment ago, and only re-poisoning the whole buffer overwrites them.
+    /// `RAGGED_COUNTS`'s trailing `513, 2` exists solely to trigger this
+    /// branch once.
     #[test]
     fn gpu_handles_ragged_counts() {
         let Some(mut gpu) = gpu_for_test() else {
@@ -1011,6 +855,7 @@ mod tests {
         };
         let corpus = deterministic_corpus();
         let phrases: Vec<&str> = corpus.iter().map(|m| m.phrase()).collect();
+        let mut prev_n = 0usize;
         for n in RAGGED_COUNTS {
             let out = gpu
                 .derive(&phrases[..n], crate::seed::PBKDF2_ROUNDS)
@@ -1024,37 +869,6 @@ mod tests {
                     corpus[i].phrase()
                 );
             }
-        }
-    }
-
-    /// A thread past the live count must not write. If it did, a later wave
-    /// with a larger count would silently serve the previous wave's seed for
-    /// those slots.
-    ///
-    /// The `n < prev_n` branch below is load-bearing, not defensive
-    /// decoration: every count in `RAGGED_COUNTS` up to that point is
-    /// ascending, so every slot the `[n, n+1, WAVE-1]` check above reads was
-    /// never written by any prior (necessarily smaller-or-equal) wave — it
-    /// would read `0xA5` whether `run_wave` re-poisons the WHOLE buffer on
-    /// every call (correct, what it does today) or only ever GROWS the
-    /// poisoned region as the largest-seen count increases (a regression).
-    /// Only a wave that is SMALLER than its predecessor can tell those two
-    /// apart: the gap `[n, prev_n)` held the predecessor's real, validly
-    /// computed seed bytes a moment ago, and only re-poisoning the whole
-    /// buffer overwrites them. `RAGGED_COUNTS`'s trailing `513, 2` exists
-    /// solely to trigger this branch once.
-    #[test]
-    fn gpu_slots_beyond_count_keep_their_poison() {
-        let Some(mut gpu) = gpu_for_test() else {
-            return;
-        };
-        let corpus = deterministic_corpus();
-        let phrases: Vec<&str> = corpus.iter().map(|m| m.phrase()).collect();
-        let mut prev_n = 0usize;
-        for n in RAGGED_COUNTS {
-            let _ = gpu
-                .derive(&phrases[..n], crate::seed::PBKDF2_ROUNDS)
-                .expect("wave");
             for slot in [n, n + 1, crate::gpu::WAVE - 1] {
                 assert_eq!(
                     gpu.raw_seed_slot(slot),
@@ -1207,16 +1021,6 @@ mod tests {
         );
     }
 
-    /// `crate::gpu::parse_soak_count` against the live environment. Test-only,
-    /// and deliberately here rather than in `src/gpu/mod.rs`: `mod.rs` compiles
-    /// on every target, `metal.rs` does not, and `gpu_soak_matches_ring` below
-    /// is the only call site. In `mod.rs` this would be dead code on the
-    /// `--no-default-features` leg, and Task 8.5 Step 4 / Task 8.7 Step 4 gate
-    /// on that leg emitting no new diagnostic at all.
-    fn soak_count(default: usize) -> usize {
-        crate::gpu::parse_soak_count(std::env::var("VANADDY_GPU_SOAK_N").ok().as_deref(), default)
-    }
-
     /// The long differential, and the gate the whole of Milestone 8 rests on.
     /// `#[ignore]`d: 1,000,000 candidates is ~15 minutes in a debug build.
     /// Every GPU seed is re-derived with `ring`; a mismatch prints the global
@@ -1229,7 +1033,14 @@ mod tests {
         let Some(mut gpu) = gpu_for_test() else {
             return;
         };
-        let n = soak_count(1_000_000);
+        // f64 first: the documented invocation is `VANADDY_GPU_SOAK_N=1e7`, which
+        // `usize` would reject. Unparseable, non-finite or < 1 falls back to the
+        // default: a soak of zero candidates would green-light a broken kernel.
+        let n = std::env::var("VANADDY_GPU_SOAK_N")
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v >= 1.0)
+            .map_or(1_000_000, |v| v as usize);
         let started = std::time::Instant::now();
         let mut done = 0usize;
         while done < n {

@@ -25,11 +25,8 @@ mod tests {
     const TID_ALLOWLIST: &[&str] = &[
         // Kernel parameter declarations — the only place the attribute appears.
         "uint tid [[thread_position_in_grid]])",
-        "kernel void sha512_abc(device ulong *out [[buffer(0)]], uint tid [[thread_position_in_grid]]) {",
         // Bounds guard: threads past the live count of the wave do nothing.
         "if (tid >= p.count) return;",
-        // Lane guard: only lane 0 publishes the self-test digest.
-        "if (tid==0) for (uint i=0;i<8;i++) out[i]=st[i];",
         // Slot offsets: base + stride * tid, and nothing else.
         "device const ulong *kb = keyblocks + 16 * (ulong)tid;",
         "device Pbkdf2State *s = states + tid;",
@@ -39,19 +36,8 @@ mod tests {
     /// True when `line` contains `tid` as a whole identifier (so `Pbkdf2State`
     /// and similar do not count).
     fn mentions_tid(line: &str) -> bool {
-        let b = line.as_bytes();
-        let mut i = 0;
-        while let Some(p) = line[i..].find("tid") {
-            let s = i + p;
-            let e = s + 3;
-            let before_ok = s == 0 || !(b[s - 1].is_ascii_alphanumeric() || b[s - 1] == b'_');
-            let after_ok = e == b.len() || !(b[e].is_ascii_alphanumeric() || b[e] == b'_');
-            if before_ok && after_ok {
-                return true;
-            }
-            i = e;
-        }
-        false
+        line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(|w| w == "tid")
     }
 
     /// Every thread is an independent PBKDF2 with zero cross-thread
@@ -83,20 +69,19 @@ mod tests {
                 n + 1
             );
         }
-        assert_eq!(seen, 10, "expected exactly 10 lines mentioning `tid`");
+        assert_eq!(seen, 8, "expected exactly 8 lines mentioning `tid`");
         assert_eq!(
             KERNEL_SRC.matches("thread_position_in_grid").count(),
-            3,
-            "`thread_position_in_grid` may appear only in the three kernel parameter lists"
+            2,
+            "`thread_position_in_grid` may appear only in the two kernel parameter lists"
         );
     }
 
     #[test]
-    fn kernel_source_declares_exactly_the_two_shipped_kernels_plus_the_sha_probe() {
-        assert_eq!(KERNEL_SRC.matches("kernel void ").count(), 3);
+    fn kernel_source_declares_exactly_the_two_shipped_kernels() {
+        assert_eq!(KERNEL_SRC.matches("kernel void ").count(), 2);
         assert!(KERNEL_SRC.contains("kernel void pbkdf2_prologue("));
         assert!(KERNEL_SRC.contains("kernel void pbkdf2_iterate("));
-        assert!(KERNEL_SRC.contains("kernel void sha512_abc("));
         assert!(
             !KERNEL_SRC.contains("pbkdf2_iterate_noacc"),
             "the measurement-only A/B kernel must not ship"

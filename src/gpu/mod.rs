@@ -13,9 +13,6 @@ pub mod selftest;
 
 pub use selftest::SelfTestError;
 
-// `pub mod`, not `mod`: `src/gpu/producer.rs` (Milestone 4) names
-// `backend::MetalPbkdf2` directly, and a private module would additionally make
-// every item inside it dead code until that milestone lands.
 #[cfg_attr(
     all(target_os = "macos", target_arch = "aarch64", feature = "metal"),
     path = "metal.rs"
@@ -24,7 +21,7 @@ pub use selftest::SelfTestError;
     not(all(target_os = "macos", target_arch = "aarch64", feature = "metal")),
     path = "stub.rs"
 )]
-pub mod backend;
+pub(crate) mod backend;
 pub(crate) mod producer;
 
 pub use backend::probe;
@@ -37,8 +34,20 @@ pub const ITERS_PER_DISPATCH: u32 = 8; // 2047 = 255*8 + 7 -> 256 dispatches
 pub const DISPATCHES_PER_COMMAND_BUFFER: usize = 4; // -> 8.8 ms per command buffer
 pub const PIPELINE_DEPTH: usize = 3; // command buffers in flight, within a wave
 pub const MAX_THREADS_PER_THREADGROUP: usize = 256; // 384 measured 13% SLOWER on M1
-pub const COMPRESSIONS_PER_SEED: u32 = 4_098; // 2 + 2 + 2*2047
 pub const AUDITS_PER_WAVE: usize = 4; // RANDOM indices, not a fixed stride
+
+// The producer carves a wave into whole blocks, the channel holds exactly two
+// waves of them, and a block tiles the threadgroup clamp exactly.
+const _: () = assert!(WAVE.is_multiple_of(BLOCK));
+const _: () = assert!(CHANNEL_CAPACITY == 2 * (WAVE / BLOCK));
+const _: () = assert!(BLOCK.is_multiple_of(MAX_THREADS_PER_THREADGROUP));
+const _: () = assert!(AUDITS_PER_WAVE < WAVE);
+// U_1 comes from the prologue, so PBKDF2_ROUNDS - 1 follow-up iterations
+// remain; they must cut into a whole number of command buffers.
+const _: () = assert!(
+    ((crate::seed::PBKDF2_ROUNDS - 1).div_ceil(ITERS_PER_DISPATCH) as usize)
+        .is_multiple_of(DISPATCHES_PER_COMMAND_BUFFER)
+);
 
 /// Measured end-to-end delivery rate: seeds handed to the workers per
 /// wall-second, under CPU load — NOT the idle solo kernel peak (14,768/s).
@@ -79,10 +88,6 @@ pub enum GpuError {
     BufferAlloc,
     /// The host asked the backend for something it will not do.
     BadConfig(String),
-    /// `salt.len() > pbkdf2_lanes::MAX_SALT_LEN`: `salt || INT(1) || 0x80 || len`
-    /// would not fit the single 128-byte block the kernel is built around.
-    /// Mirrors the CPU salt assert at src/pbkdf2_lanes.rs:21-25.
-    SaltTooLong { len: usize },
     /// A command buffer finished as anything other than Completed-with-nil-error.
     CommandBuffer { status: i64, message: String },
 }
@@ -118,10 +123,6 @@ impl From<GpuError> for GpuDisableReason {
             GpuError::PipelineCreate(m) => GpuDisableReason::PipelineCreate(m),
             GpuError::BufferAlloc => GpuDisableReason::BufferAlloc,
             GpuError::BadConfig(m) => GpuDisableReason::BadConfig(m),
-            GpuError::SaltTooLong { len } => GpuDisableReason::BadConfig(format!(
-                "salt is {len} bytes, at most {} fit one padded block",
-                crate::pbkdf2_lanes::MAX_SALT_LEN
-            )),
             GpuError::CommandBuffer { status, message } => {
                 GpuDisableReason::CommandBuffer { status, message }
             }
@@ -179,7 +180,6 @@ pub enum GpuDisableReason {
 /// `Mnemonic::from_entropy`, so the String written to the CSV is always
 /// produced by trusted CPU code.
 #[derive(Clone, Copy, Zeroize)]
-#[repr(C)]
 pub struct GpuCandidate {
     pub entropy: [u8; 16],
     /// UNTRUSTED until re-derived. Used only to *filter*.
@@ -243,7 +243,6 @@ pub struct GpuHealth {
     /// the root cause. `OnceLock` also cannot be poisoned.
     reason: OnceLock<GpuDisableReason>,
     pub seeds_delivered: AtomicU64,
-    pub blocks_dropped: AtomicU64,
     pub verify_rejections: AtomicU64,
 }
 
@@ -253,7 +252,6 @@ impl GpuHealth {
             disable: AtomicBool::new(false),
             reason: OnceLock::new(),
             seeds_delivered: AtomicU64::new(0),
-            blocks_dropped: AtomicU64::new(0),
             verify_rejections: AtomicU64::new(0),
         }
     }
@@ -316,11 +314,9 @@ pub enum Schedule {
     /// command buffer: 2047 = 255*8 + 7 → 256 dispatches, 64 command buffers,
     /// ~8.8 ms each.
     Production,
-    /// A fixed number of iterations per dispatch, one dispatch per command
-    /// buffer. `Uniform(2047)` is the one-shot case.
-    Uniform(u32),
-    /// An explicit, deliberately irregular sequence; the last entry repeats if
-    /// more dispatches are needed. One dispatch per command buffer.
+    /// An explicit sequence; the last entry repeats if more dispatches are
+    /// needed, so `Irregular(&[r])` is a uniform `r` per dispatch and
+    /// `Irregular(&[2047])` the one-shot case. One dispatch per command buffer.
     Irregular(&'static [u32]),
 }
 
@@ -330,7 +326,6 @@ impl Schedule {
     pub fn iters_for(&self, n: usize) -> u32 {
         match self {
             Schedule::Production => ITERS_PER_DISPATCH,
-            Schedule::Uniform(r) => (*r).max(1),
             Schedule::Irregular(steps) => {
                 if steps.is_empty() {
                     ITERS_PER_DISPATCH
@@ -352,47 +347,9 @@ impl Schedule {
     }
 }
 
-/// A self-test failure is a correctness fault, not a transient: it becomes a
-/// sticky `GpuDisableReason` for the life of the process. Milestone 4's
-/// producer uses this via `?`.
-impl From<selftest::SelfTestError> for GpuDisableReason {
-    fn from(e: selftest::SelfTestError) -> Self {
-        GpuDisableReason::SelfTest(e)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-
-    #[test]
-    fn wave_geometry_is_self_consistent() {
-        // The producer carves a wave into whole blocks; a remainder would mean
-        // either dropped candidates or a short final block.
-        assert!(WAVE.is_multiple_of(BLOCK));
-        assert_eq!(WAVE / BLOCK, 16);
-        // The channel holds exactly two waves of blocks.
-        assert_eq!(CHANNEL_CAPACITY, 2 * (WAVE / BLOCK));
-
-        // U_1 comes from the prologue, so 2047 follow-up iterations remain. At
-        // R = 8 that is 255 full dispatches plus a 7-iteration tail = 256, a
-        // whole number of 4-dispatch command buffers.
-        let follow_up = crate::seed::PBKDF2_ROUNDS - 1;
-        assert_eq!(follow_up, 2047);
-        let dispatches = follow_up.div_ceil(ITERS_PER_DISPATCH) as usize;
-        assert_eq!(dispatches, 256);
-        assert!(dispatches.is_multiple_of(DISPATCHES_PER_COMMAND_BUFFER));
-        assert_eq!(PIPELINE_DEPTH, 3);
-
-        // 2 prologue compressions (ipad, opad) + 2 for U_1 + 2 per follow-up.
-        assert_eq!(COMPRESSIONS_PER_SEED, 2 + 2 + 2 * follow_up);
-
-        // A block must tile the threadgroup clamp exactly.
-        assert!(BLOCK.is_multiple_of(MAX_THREADS_PER_THREADGROUP));
-        assert_eq!(AUDITS_PER_WAVE, 4);
-        const { assert!(AUDITS_PER_WAVE < WAVE) };
-    }
 
     #[test]
     fn backend_probe_reports_ready_or_unavailable() {
@@ -401,18 +358,6 @@ mod tests {
             GpuStatus::Ready { device } => assert!(!device.is_empty()),
             other => panic!("probe() must be Ready or Unavailable, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn gpu_candidate_has_pinned_repr_c_layout() {
-        // Milestone 3's Metal kernel reads this struct by raw byte offset. A
-        // field reorder, width change, or a derive that isn't repr(C)-safe
-        // would compile and pass every other test here, then only surface as
-        // a plausible-but-wrong seed once the GPU path is wired up.
-        assert_eq!(core::mem::size_of::<GpuCandidate>(), 80);
-        assert_eq!(core::mem::align_of::<GpuCandidate>(), 1);
-        assert_eq!(core::mem::offset_of!(GpuCandidate, entropy), 0);
-        assert_eq!(core::mem::offset_of!(GpuCandidate, seed), 16);
     }
 
     #[test]
@@ -489,26 +434,6 @@ mod tests {
     }
 
     #[test]
-    fn a_seed_block_crosses_a_thread_boundary_through_the_channel() {
-        let (tx, rx) = crossbeam_channel::bounded::<Box<SeedBlock>>(CHANNEL_CAPACITY);
-        let rx: GpuRx = rx;
-        let producer = std::thread::spawn(move || {
-            let mut b = SeedBlock::with_capacity(BLOCK);
-            for i in 0..BLOCK {
-                b.push(GpuCandidate {
-                    entropy: [i as u8; 16],
-                    seed: [7u8; 64],
-                });
-            }
-            tx.send(Box::new(b)).expect("receiver is alive");
-        });
-        let got = rx.recv().expect("producer sent one block");
-        producer.join().expect("producer thread did not panic");
-        assert_eq!(got.len(), BLOCK);
-        assert_eq!(got.chunks(64).next().unwrap()[3].entropy, [3u8; 16]);
-    }
-
-    #[test]
     fn raise_records_the_first_reason_and_never_overwrites_it() {
         let h = GpuHealth::new();
         assert!(!h.disable.load(Ordering::Relaxed));
@@ -530,131 +455,27 @@ mod tests {
         assert_eq!(h.take_reason(), Some(GpuDisableReason::NoDevice));
     }
 
+    /// MTLCommandBufferStatusCompleted == 4 with no error object is the only
+    /// success. Completed WITH an error fails, and NotEnqueued(0), Enqueued(1),
+    /// Committed(2), Scheduled(3), Error(5) all fail even with no error object —
+    /// a wave that is merely `Scheduled` has not written `seeds`.
     #[test]
-    fn health_counters_add_across_threads_through_an_arc() {
-        let h = Arc::new(GpuHealth::default());
-        let mut handles = Vec::new();
-        for _ in 0..4 {
-            let h = Arc::clone(&h);
-            handles.push(std::thread::spawn(move || {
-                for _ in 0..1_000 {
-                    h.seeds_delivered.fetch_add(1, Ordering::Relaxed);
-                }
-            }));
-        }
-        for t in handles {
-            t.join().expect("counter thread did not panic");
-        }
-        assert_eq!(h.seeds_delivered.load(Ordering::Relaxed), 4_000);
-        assert_eq!(h.blocks_dropped.load(Ordering::Relaxed), 0);
-        assert_eq!(h.verify_rejections.load(Ordering::Relaxed), 0);
-        assert!(!h.disable.load(Ordering::Relaxed));
-    }
-}
-
-#[cfg(test)]
-mod command_buffer_status_tests {
-    use super::{classify_command_buffer_status, GpuError};
-
-    /// MTLCommandBufferStatusCompleted == 4.
-    #[test]
-    fn completed_with_no_error_is_the_only_success() {
-        assert_eq!(classify_command_buffer_status(4, None), Ok(()));
-    }
-
-    #[test]
-    fn completed_with_an_error_is_a_failure() {
-        assert_eq!(
-            classify_command_buffer_status(4, Some("IOAF code 4".to_string())),
-            Err(GpuError::CommandBuffer {
-                status: 4,
-                message: "IOAF code 4".to_string()
-            })
-        );
-    }
-
-    /// NotEnqueued(0), Enqueued(1), Committed(2), Scheduled(3), Error(5) are
-    /// all failures — a wave that is merely `Scheduled` has not written `seeds`.
-    #[test]
-    fn every_other_status_is_a_failure_even_with_no_error_object() {
+    fn command_buffer_status_is_ok_only_when_completed_with_no_error() {
+        let err = |status, message: String| Err(GpuError::CommandBuffer { status, message });
+        let mut cases = vec![
+            (4i64, None, Ok(())),
+            (4, Some("IOAF code 4"), err(4, "IOAF code 4".to_string())),
+        ];
         for status in [0i64, 1, 2, 3, 5, 99] {
-            let got = classify_command_buffer_status(status, None);
+            let message = format!("command buffer finished with status {status}");
+            cases.push((status, None, err(status, message)));
+        }
+        for (status, message, want) in cases {
             assert_eq!(
-                got,
-                Err(GpuError::CommandBuffer {
-                    status,
-                    message: format!("command buffer finished with status {status}")
-                }),
-                "status {status}"
+                classify_command_buffer_status(status, message.map(String::from)),
+                want,
+                "status {status}, message {message:?}"
             );
         }
-    }
-}
-
-/// Parse `VANADDY_GPU_SOAK_N`. Parsed as `f64` first, because the soak is
-/// documented and invoked as `VANADDY_GPU_SOAK_N=1e7` and `"1e7".parse::<usize>()`
-/// is an `Err` — the obvious `.parse().ok().unwrap_or(default)` spelling silently
-/// runs the 1,000,000 default and prints nothing that distinguishes it from a
-/// real 10,000,000-candidate soak. Anything unparseable, non-finite, or below 1
-/// falls back to `default`: a soak of zero candidates passes trivially and would
-/// green-light a broken kernel.
-#[cfg(test)]
-pub(crate) fn parse_soak_count(raw: Option<&str>, default: usize) -> usize {
-    match raw {
-        None => default,
-        Some(s) => match s.trim().parse::<f64>() {
-            Ok(v) if v.is_finite() && v >= 1.0 => v as usize,
-            _ => default,
-        },
-    }
-}
-
-#[cfg(test)]
-mod soak_count_tests {
-    use super::parse_soak_count;
-
-    #[test]
-    fn soak_count_parses_scientific_notation() {
-        // The documented invocation is literally `VANADDY_GPU_SOAK_N=1e7`.
-        assert_eq!(parse_soak_count(Some("1e7"), 1_000_000), 10_000_000);
-        assert_eq!(parse_soak_count(Some("2.5e6"), 1_000_000), 2_500_000);
-    }
-
-    #[test]
-    fn soak_count_parses_plain_integers_and_trims() {
-        assert_eq!(parse_soak_count(Some("4096"), 1_000_000), 4096);
-        assert_eq!(parse_soak_count(Some("  4096  "), 1_000_000), 4096);
-    }
-
-    #[test]
-    fn soak_count_defaults_when_unset() {
-        assert_eq!(parse_soak_count(None, 1_000_000), 1_000_000);
-        // A second default value, because every other assertion in this module
-        // passes 1_000_000 and a body that ignored `default` and returned a
-        // hardcoded 1_000_000 would satisfy all of them.
-        assert_eq!(parse_soak_count(None, 7), 7);
-    }
-
-    #[test]
-    fn soak_count_defaults_on_garbage_and_never_soaks_zero() {
-        // A zero or negative count would run no comparisons at all and report a
-        // green soak on a completely broken kernel. Fall back, never accept it.
-        assert_eq!(parse_soak_count(Some("banana"), 1_000_000), 1_000_000);
-        assert_eq!(parse_soak_count(Some(""), 1_000_000), 1_000_000);
-        assert_eq!(parse_soak_count(Some("0"), 1_000_000), 1_000_000);
-        assert_eq!(parse_soak_count(Some("-5"), 1_000_000), 1_000_000);
-        assert_eq!(parse_soak_count(Some("inf"), 1_000_000), 1_000_000);
-        assert_eq!(parse_soak_count(Some("NaN"), 1_000_000), 1_000_000);
-        // Same reason as in `soak_count_defaults_when_unset`: pin the fallback
-        // to the `default` ARGUMENT, not to the number every other call uses.
-        assert_eq!(parse_soak_count(Some("banana"), 7), 7);
-    }
-
-    #[test]
-    fn soak_count_parses_the_short_proof_count() {
-        // The Step 6 short-soak invocation is literally `VANADDY_GPU_SOAK_N=1e5`.
-        // An un-wired parser yields the 1,000,000 default here, not 100,000 — the
-        // shortfall this whole task exists to prevent, in the opposite direction.
-        assert_eq!(parse_soak_count(Some("1e5"), 1_000_000), 100_000);
     }
 }

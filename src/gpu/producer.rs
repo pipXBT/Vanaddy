@@ -4,70 +4,32 @@
 //! target, so the fault plumbing, the `ring` audit, the block carving and the
 //! panic guard are unit-tested on Linux and under `--no-default-features` too.
 //! Only `producer()` itself is `cfg`-gated.
+//!
+//! `producer()` is the only production caller of everything else here, so on
+//! the stub leg the whole file is dead outside its tests.
+#![cfg_attr(
+    not(all(target_os = "macos", target_arch = "aarch64", feature = "metal")),
+    allow(dead_code)
+)]
 
 use super::{
-    GpuCandidate, GpuDisableReason, GpuError, GpuHealth, GpuStatus, SeedBlock, AUDITS_PER_WAVE,
-    BLOCK,
+    GpuCandidate, GpuDisableReason, GpuHealth, GpuStatus, SeedBlock, AUDITS_PER_WAVE, BLOCK,
 };
 use crossbeam_channel::{SendTimeoutError, Sender};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
-
-/// Funnel every backend failure into the one sticky reason the UI reports.
-///
-/// This is a ONE-LINE DELEGATE to `impl From<GpuError> for GpuDisableReason`
-/// (`src/gpu/mod.rs`, Task 3.2) on purpose: that impl is what `?` already uses,
-/// so writing the match again here would give the fault-classification table
-/// two copies free to drift. This wrapper exists only so `producer()` can say
-/// `.map_err(reason_from)` at call sites where `?` cannot convert, and so the
-/// tests below pin the mapping from inside this module.
-///
-/// Milestone 3 must therefore land before Milestone 4: Task 3.2 is where the
-/// `From` impl comes from, and without it this function does not compile.
-///
-/// `SaltTooLong` has no `GpuDisableReason` twin because it is a programming
-/// error in the caller, not a property of the device: it can only fire if a
-/// future chain feeds a salt longer than `pbkdf2_lanes::MAX_SALT_LEN` (107),
-/// so the `From` impl degrades it to `BadConfig`
-/// carrying both the offending length and the limit.
-// The `#[allow(dead_code)]` attributes below are UNCONDITIONAL, which means they
-// also suppress detection on the metal leg, where every one of these items is
-// live. The narrower
-// `#[cfg_attr(not(all(target_os = "macos", target_arch = "aarch64", feature = "metal")), allow(dead_code))]`
-// was considered and rejected as unreadable at 10 sites. The trade: if one of
-// these genuinely dies on the metal leg, nothing will warn. Re-check them by
-// hand if this module is ever substantially reworked.
-// no production consumer on the stub leg as of Milestone 6: `producer()` is the
-// only production caller and it is metal-only; the portable `#[cfg(test)]`
-// block below exercises this directly instead.
-#[allow(dead_code)]
-pub(crate) fn reason_from(e: GpuError) -> GpuDisableReason {
-    GpuDisableReason::from(e)
-}
 
 /// Poison-immune write. The UI thread reads this cell every 100 ms; a worker
 /// that panicked while holding the lock must not make the GPU status
 /// permanently unreadable, so a poisoned lock is recovered, never unwrapped.
-// no production consumer on the stub leg as of Milestone 6: same reasoning as
-// `reason_from` above.
-#[allow(dead_code)]
 pub(crate) fn set_status(cell: &Mutex<GpuStatus>, next: GpuStatus) {
-    match cell.lock() {
-        Ok(mut guard) => *guard = next,
-        Err(poisoned) => *poisoned.into_inner() = next,
-    }
+    *cell.lock().unwrap_or_else(PoisonError::into_inner) = next;
 }
 
 /// Poison-immune read. Same reasoning as `set_status`.
-// no production consumer on the stub leg as of Milestone 6: same reasoning as
-// `reason_from` above.
-#[allow(dead_code)]
 pub(crate) fn read_status(cell: &Mutex<GpuStatus>) -> GpuStatus {
-    match cell.lock() {
-        Ok(guard) => guard.clone(),
-        Err(poisoned) => poisoned.into_inner().clone(),
-    }
+    cell.lock().unwrap_or_else(PoisonError::into_inner).clone()
 }
 
 /// Re-derive `indices` of a finished wave with `ring` and compare.
@@ -80,33 +42,17 @@ pub(crate) fn read_status(cell: &Mutex<GpuStatus>) -> GpuStatus {
 /// `ring` is the reference because `crate::seed::derive_seed` (src/seed.rs:8)
 /// is what every pinned vector in CLAUDE.md already pins.
 ///
-/// An out-of-range index or a `from_entropy` failure is a CALLER bug, not a
-/// property of the device — `audit_indices` only ever draws `0..wave`, and 16
-/// bytes is always valid 12-word BIP-39 entropy — so both degrade to
-/// `BadConfig`, never `AuditMismatch`, following the same principle
-/// `reason_from`'s doc comment states for `SaltTooLong` above: a programming
-/// error must not be reported as a hardware fault the user goes on to debug.
-// no production consumer on the stub leg as of Milestone 6: same reasoning as
-// `reason_from` above.
-#[allow(dead_code)]
+/// `indices` come from `audit_indices`, which only draws `0..wave`, and 16
+/// bytes is always valid 12-word entropy, so a bad index or entropy is a caller
+/// bug: it panics, and `run_guarded` turns that into `Panicked`.
 pub(crate) fn audit_wave(
     entropy: &[[u8; 16]],
     seeds: &[[u8; 64]],
     indices: &[usize],
 ) -> Result<(), GpuDisableReason> {
     for &i in indices {
-        if i >= entropy.len() || i >= seeds.len() {
-            return Err(GpuDisableReason::BadConfig(format!(
-                "audit index {i} is out of range for a wave of {} candidates",
-                entropy.len().min(seeds.len())
-            )));
-        }
-        let m =
-            bip39::Mnemonic::from_entropy(&entropy[i], bip39::Language::English).map_err(|e| {
-                GpuDisableReason::BadConfig(format!(
-                    "audit index {i}: 16-byte entropy must always be valid BIP-39, got {e}"
-                ))
-            })?;
+        let m = bip39::Mnemonic::from_entropy(&entropy[i], bip39::Language::English)
+            .expect("16 bytes is always valid 12-word BIP-39 entropy");
         if crate::seed::derive_seed(&m) != seeds[i] {
             return Err(GpuDisableReason::AuditMismatch { index: i });
         }
@@ -120,9 +66,6 @@ pub(crate) fn audit_wave(
 /// same `tid` on every wave forever and is blind to every tid-dependent kernel
 /// bug — exactly the bug class the per-thread indexing (`states + tid`,
 /// `seeds + 64*tid`) can produce.
-// no production consumer on the stub leg as of Milestone 6: same reasoning as
-// `reason_from` above.
-#[allow(dead_code)]
 pub(crate) fn audit_indices<R: rand::Rng>(rng: &mut R, wave: usize) -> [usize; AUDITS_PER_WAVE] {
     assert!(wave > 0, "cannot audit an empty wave");
     std::array::from_fn(|_| rng.gen_range(0..wave))
@@ -137,13 +80,9 @@ pub(crate) fn audit_indices<R: rand::Rng>(rng: &mut R, wave: usize) -> [usize; A
 ///
 /// Backpressure is a 100 ms `send_timeout` RETRY, never a drop. A full queue
 /// means the CPU workers are the binding constraint, and self-throttling to
-/// exactly the rate they can absorb is the correct response; `blocks_dropped`
-/// therefore stays 0 by construction. `send` is never called bare and never
-/// unwrapped: a `Disconnected` is a clean exit, not a panic on a background
-/// thread writing a backtrace across the Ratatui frame.
-// no production consumer on the stub leg as of Milestone 6: same reasoning as
-// `reason_from` above.
-#[allow(dead_code)]
+/// exactly the rate they can absorb is the correct response. `send` is never
+/// called bare and never unwrapped: a `Disconnected` is a clean exit, not a
+/// panic on a background thread writing a backtrace across the Ratatui frame.
 pub(crate) fn carve_and_send(
     tx: &Sender<Box<SeedBlock>>,
     entropy: &[[u8; 16]],
@@ -160,19 +99,14 @@ pub(crate) fn carve_and_send(
                 seed: *s,
             });
         }
-        let mut pending = Some(block);
-        while let Some(b) = pending.take() {
+        loop {
             if stop.load(Ordering::Relaxed) || health.disable.load(Ordering::Relaxed) {
-                drop(b);
                 return false;
             }
-            match tx.send_timeout(b, Duration::from_millis(100)) {
-                Ok(()) => {}
-                Err(SendTimeoutError::Timeout(b)) => pending = Some(b),
-                Err(SendTimeoutError::Disconnected(b)) => {
-                    drop(b);
-                    return false;
-                }
+            match tx.send_timeout(block, Duration::from_millis(100)) {
+                Ok(()) => break,
+                Err(SendTimeoutError::Timeout(b)) => block = b,
+                Err(SendTimeoutError::Disconnected(_)) => return false,
             }
         }
     }
@@ -189,27 +123,15 @@ pub(crate) fn carve_and_send(
 /// `QOS_CLASS_USER_INITIATED = 0x19` and the signature
 /// `int pthread_set_qos_class_self_np(qos_class_t, int)` are from
 /// `<sys/qos.h>` and `<pthread/qos.h>`; `qos_class_t` is an `unsigned int` enum.
-// no production consumer on the stub leg as of Milestone 6: same reasoning as
-// `reason_from` above.
-#[allow(dead_code)]
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
 pub(crate) fn set_thread_qos_user_initiated() -> i32 {
     const QOS_CLASS_USER_INITIATED: u32 = 0x19;
     extern "C" {
-        // no production consumer on the stub leg as of Milestone 6: dead
-        // alongside the function above that calls it.
-        #[allow(dead_code)]
         fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
     }
     // SAFETY: a libSystem call taking two scalars, valid on any thread, with no
     // pointer arguments and no ownership transfer.
     unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0) }
-}
-
-/// No QoS classes off macOS; the producer runs at the default priority.
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn set_thread_qos_user_initiated() -> i32 {
-    0
 }
 
 /// Sets `finished` on every exit path — clean return, `?` bail, or unwind.
@@ -218,9 +140,6 @@ pub(crate) fn set_thread_qos_user_initiated() -> i32 {
 /// would hang the UI thread forever with the terminal in raw mode), so the app
 /// reaps by polling `is_finished()`. A flag set only at the end of a function
 /// would strand a panicked engine as un-reapable forever.
-// no production consumer on the stub leg as of Milestone 6: constructed only
-// inside `run_guarded`, which is itself dead there for the same reason.
-#[allow(dead_code)]
 struct FinishGuard(Arc<AtomicBool>);
 
 impl Drop for FinishGuard {
@@ -245,9 +164,6 @@ impl Drop for FinishGuard {
 /// touches is read again after it unwinds. `health` is atomics plus a set-once
 /// `OnceLock`, the channel `Sender` is dropped with the body, and the Metal
 /// objects are created inside the body and die with it.
-// no production consumer on the stub leg as of Milestone 6: same reasoning as
-// `reason_from` above.
-#[allow(dead_code)]
 pub(crate) fn run_guarded<F>(health: &GpuHealth, finished: Arc<AtomicBool>, body: F)
 where
     F: FnOnce() -> Result<(), GpuDisableReason>,
@@ -275,7 +191,7 @@ pub(crate) fn producer(
     status: &Mutex<GpuStatus>,
 ) -> Result<(), GpuDisableReason> {
     use super::backend::MetalPbkdf2;
-    use super::pack::{pack_key_block, pack_salt_block, KeyBlock};
+    use super::pack::{pack_key_block, KeyBlock, BIP39_SALT_BLOCK};
     use super::{selftest, Schedule, WAVE};
     use bip39::{Language, Mnemonic, MnemonicType};
     use zeroize::Zeroizing;
@@ -288,7 +204,7 @@ pub(crate) fn producer(
 
     // Device, library compile (~60-95 ms cold) and pipelines, all HERE, on this
     // thread, never the UI thread.
-    let mut engine = MetalPbkdf2::new().map_err(reason_from)?;
+    let mut engine = MetalPbkdf2::new()?;
     if stop.load(Ordering::Relaxed) {
         return Ok(());
     }
@@ -316,8 +232,6 @@ pub(crate) fn producer(
             device: engine.device_name(),
         },
     );
-
-    let salt = pack_salt_block(crate::seed::BIP39_SALT).map_err(reason_from)?;
 
     // 8192 x 16 B of raw entropy - the most valuable object in the process.
     // Zeroizing, and overwritten in place every wave, so the resident backlog
@@ -347,16 +261,13 @@ pub(crate) fn producer(
         //      command-buffer boundary and abandoned it; there is deliberately
         //      no partial-success shape, because a partly-iterated wave yields
         //      wrong-but-plausible seeds.
-        let seeds = match engine
-            .run_wave(
-                &keys,
-                &salt,
-                crate::seed::PBKDF2_ROUNDS,
-                Schedule::Production,
-                stop,
-            )
-            .map_err(reason_from)?
-        {
+        let seeds = match engine.run_wave(
+            &keys,
+            &BIP39_SALT_BLOCK,
+            crate::seed::PBKDF2_ROUNDS,
+            Schedule::Production,
+            stop,
+        )? {
             Some(seeds) => seeds,
             None => return Ok(()),
         };
@@ -379,9 +290,11 @@ pub(crate) fn producer(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::gpu::GpuError;
 
     #[test]
     fn every_gpu_error_maps_to_its_disable_reason() {
+        let reason_from = GpuDisableReason::from;
         assert_eq!(reason_from(GpuError::NoDevice), GpuDisableReason::NoDevice);
         assert_eq!(
             reason_from(GpuError::ShaderCompile("bad token".into())),
@@ -409,20 +322,6 @@ pub(crate) mod tests {
                 message: "IOAF code 3".into()
             }
         );
-    }
-
-    #[test]
-    fn salt_too_long_becomes_a_bad_config_naming_the_length() {
-        match reason_from(GpuError::SaltTooLong { len: 200 }) {
-            GpuDisableReason::BadConfig(m) => {
-                assert!(
-                    m.contains("200"),
-                    "message must name the offending length, got {m:?}"
-                );
-                assert!(m.contains("107"), "message must name the limit, got {m:?}");
-            }
-            other => panic!("expected BadConfig, got {other:?}"),
-        }
     }
 
     #[test]
@@ -473,52 +372,31 @@ pub(crate) mod tests {
         (entropy, seeds)
     }
 
+    /// Accepts honest `ring` seeds, rejects one flipped bit at a sampled index,
+    /// and — the honest statement of the detector's limit — ignores corruption
+    /// at an unsampled one: it is probabilistic, and a bug confined to a
+    /// handful of tids can survive a wave. This is the reason the indices are
+    /// re-drawn every wave rather than fixed.
     #[test]
-    fn audit_wave_accepts_ring_derived_seeds() {
-        let (entropy, seeds) = honest_wave(8);
-        assert_eq!(audit_wave(&entropy, &seeds, &[0, 3, 5, 7]), Ok(()));
-    }
-
-    #[test]
-    fn audit_wave_rejects_one_flipped_seed_bit() {
-        let (entropy, mut seeds) = honest_wave(8);
-        seeds[3][63] ^= 0x01;
-        assert_eq!(
-            audit_wave(&entropy, &seeds, &[0, 3, 5, 7]),
-            Err(GpuDisableReason::AuditMismatch { index: 3 })
-        );
-    }
-
-    #[test]
-    fn audit_wave_ignores_corruption_at_unsampled_indices() {
-        // Honest statement of the detector's limit: it is probabilistic, and a
-        // bug confined to a handful of tids can survive a wave. This is the
-        // reason the indices are re-drawn every wave rather than fixed.
-        let (entropy, mut seeds) = honest_wave(8);
-        seeds[6][0] ^= 0xFF;
-        assert_eq!(audit_wave(&entropy, &seeds, &[0, 3, 5, 7]), Ok(()));
-    }
-
-    #[test]
-    fn audit_wave_rejects_an_out_of_range_index() {
-        // An out-of-range index can only come from a caller bug -
-        // `audit_indices` never draws outside `0..wave` - so this must be
-        // reported as `BadConfig`, not `AuditMismatch`: a real device fault
-        // and a programming error must not share a reason, or the reason
-        // stops telling anyone what to go debug.
-        let (entropy, seeds) = honest_wave(8);
-        match audit_wave(&entropy, &seeds, &[9]) {
-            Err(GpuDisableReason::BadConfig(m)) => {
-                assert!(
-                    m.contains('9'),
-                    "message must name the bad index, got {m:?}"
-                );
-                assert!(
-                    m.contains('8'),
-                    "message must name the wave length, got {m:?}"
-                );
+    fn audit_wave_checks_only_the_sampled_indices() {
+        let cases = [
+            (None, Ok(())),
+            (
+                Some((3, 63, 0x01)),
+                Err(GpuDisableReason::AuditMismatch { index: 3 }),
+            ),
+            (Some((6, 0, 0xFF)), Ok(())),
+        ];
+        for (flip, want) in cases {
+            let (entropy, mut seeds) = honest_wave(8);
+            if let Some((i, byte, mask)) = flip {
+                seeds[i][byte] ^= mask;
             }
-            other => panic!("expected BadConfig, got {other:?}"),
+            assert_eq!(
+                audit_wave(&entropy, &seeds, &[0, 3, 5, 7]),
+                want,
+                "{flip:?}"
+            );
         }
     }
 
@@ -551,7 +429,6 @@ pub(crate) mod tests {
             disable: std::sync::atomic::AtomicBool::new(false),
             reason: std::sync::OnceLock::new(),
             seeds_delivered: std::sync::atomic::AtomicU64::new(0),
-            blocks_dropped: std::sync::atomic::AtomicU64::new(0),
             verify_rejections: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -646,11 +523,6 @@ pub(crate) mod tests {
             "must notice stop within one timeout, took {:?}",
             started.elapsed()
         );
-        assert_eq!(
-            health.blocks_dropped.load(Ordering::Relaxed),
-            0,
-            "backpressure throttles, it never discards"
-        );
     }
 
     #[test]
@@ -670,7 +542,7 @@ pub(crate) mod tests {
         assert!(started.elapsed() < std::time::Duration::from_millis(500));
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
     #[test]
     fn qos_call_promotes_the_calling_thread_to_user_initiated() {
         // On a fresh thread so the harness thread's QoS is not mutated under
@@ -706,67 +578,43 @@ pub(crate) mod tests {
         );
     }
 
-    #[cfg(not(target_os = "macos"))]
+    /// A clean return, a fault return and an unwind all set `finished` (or
+    /// the UI can never reap), and the exact reason — `Panicked` for the
+    /// unwind — survives to the UI.
     #[test]
-    fn qos_call_is_an_infallible_no_op_off_macos() {
-        assert_eq!(set_thread_qos_user_initiated(), 0);
-    }
-
-    #[test]
-    fn a_clean_body_finishes_without_disabling_the_gpu() {
-        let health = fresh_health();
-        let finished = Arc::new(AtomicBool::new(false));
-        run_guarded(&health, finished.clone(), || Ok(()));
-
-        assert!(
-            finished.load(Ordering::Acquire),
-            "finished must be set on a clean return"
-        );
-        assert!(!health.disable.load(Ordering::Relaxed));
-        assert_eq!(health.take_reason(), None);
-    }
-
-    #[test]
-    fn an_injected_audit_mismatch_disables_the_gpu_with_that_reason() {
-        let health = fresh_health();
-        let finished = Arc::new(AtomicBool::new(false));
-        run_guarded(&health, finished.clone(), || {
-            Err(GpuDisableReason::AuditMismatch { index: 5_183 })
-        });
-
-        assert!(
-            health.disable.load(Ordering::Relaxed),
-            "a fault must disable the GPU"
-        );
-        assert_eq!(
-            health.take_reason(),
-            Some(GpuDisableReason::AuditMismatch { index: 5_183 }),
-            "the exact reason must survive to the UI"
-        );
-        assert!(
-            finished.load(Ordering::Acquire),
-            "finished must be set on a fault return"
-        );
-    }
-
-    #[test]
-    fn a_panicking_body_becomes_panicked_and_still_finishes() {
-        let health = fresh_health();
-        let finished = Arc::new(AtomicBool::new(false));
-
+    fn run_guarded_finishes_and_reports_the_exact_reason() {
+        type Body = fn() -> Result<(), GpuDisableReason>;
+        let cases: [(&str, Body, Option<GpuDisableReason>); 3] = [
+            ("clean", || Ok(()), None),
+            (
+                "fault",
+                || Err(GpuDisableReason::AuditMismatch { index: 5_183 }),
+                Some(GpuDisableReason::AuditMismatch { index: 5_183 }),
+            ),
+            (
+                "panic",
+                || panic!("simulated kernel-side unwrap"),
+                Some(GpuDisableReason::Panicked),
+            ),
+        ];
         let prev_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        run_guarded(&health, finished.clone(), || {
-            panic!("simulated kernel-side unwrap")
-        });
+        for (label, body, want) in cases {
+            let health = fresh_health();
+            let finished = Arc::new(AtomicBool::new(false));
+            run_guarded(&health, finished.clone(), body);
+            assert!(
+                finished.load(Ordering::Acquire),
+                "{label}: finished not set"
+            );
+            assert_eq!(
+                health.disable.load(Ordering::Relaxed),
+                want.is_some(),
+                "{label}: disable flag"
+            );
+            assert_eq!(health.take_reason(), want, "{label}: reason");
+        }
         std::panic::set_hook(prev_hook);
-
-        assert!(health.disable.load(Ordering::Relaxed));
-        assert_eq!(health.take_reason(), Some(GpuDisableReason::Panicked));
-        assert!(
-            finished.load(Ordering::Acquire),
-            "finished must be set even when the body unwinds, or the UI can never reap"
-        );
     }
 
     #[test]
@@ -805,14 +653,22 @@ mod gpu_tests {
     use rayon::prelude::*;
     use std::time::{Duration, Instant};
 
+    /// The explicit `VANADDY_NO_GPU=1` skip, loud on stderr.
+    fn no_gpu() -> bool {
+        let skip = std::env::var_os("VANADDY_NO_GPU").is_some();
+        if skip {
+            eprintln!("SKIP: VANADDY_NO_GPU is set");
+        }
+        skip
+    }
+
     /// Consume three full waves and re-derive EVERY seed with `ring`.
     ///
     /// 3 x 8192 = 24,576 candidates. Run with --release: in a debug build the
     /// per-wave fill is slow enough to starve the GPU and the test drags.
     #[test]
     fn producer_delivers_three_waves_whose_every_seed_matches_ring() {
-        if std::env::var_os("VANADDY_NO_GPU").is_some() {
-            eprintln!("SKIP: VANADDY_NO_GPU is set");
+        if no_gpu() {
             return;
         }
         let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAPACITY);
@@ -922,8 +778,7 @@ mod gpu_tests {
 
     #[test]
     fn signal_stop_finishes_the_producer_within_200ms() {
-        if std::env::var_os("VANADDY_NO_GPU").is_some() {
-            eprintln!("SKIP: VANADDY_NO_GPU is set");
+        if no_gpu() {
             return;
         }
         let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAPACITY);
@@ -952,8 +807,7 @@ mod gpu_tests {
 
     #[test]
     fn dropping_the_receiver_exits_the_producer_cleanly() {
-        if std::env::var_os("VANADDY_NO_GPU").is_some() {
-            eprintln!("SKIP: VANADDY_NO_GPU is set");
+        if no_gpu() {
             return;
         }
         let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAPACITY);
@@ -983,8 +837,7 @@ mod gpu_tests {
 
     #[test]
     fn status_reports_disabled_once_health_carries_a_reason() {
-        if std::env::var_os("VANADDY_NO_GPU").is_some() {
-            eprintln!("SKIP: VANADDY_NO_GPU is set");
+        if no_gpu() {
             return;
         }
         let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAPACITY);
@@ -1021,14 +874,12 @@ mod gpu_tests {
     /// compositor-contention floor, not the target: below it means something
     /// is broken; a spread above 15% between the three windows means the run
     /// was not clean (compositor busy, thermal throttling) and must be
-    /// re-run with the display otherwise quiescent. On success, appends
-    /// `rate,device_name,timestamp` to `/tmp/vanaddy-rate/measured.txt` for
-    /// Step 5 to read back — this test never edits the constant itself.
+    /// re-run with the display otherwise quiescent. This test never edits the
+    /// constant itself.
     #[test]
     #[ignore = "measurement; run with --release --nocapture, see Task 4.8 Step 4"]
     fn gpu_seed_rate_end_to_end() {
-        if std::env::var_os("VANADDY_NO_GPU").is_some() {
-            eprintln!("SKIP: VANADDY_NO_GPU is set");
+        if no_gpu() {
             return;
         }
         let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAPACITY);
@@ -1070,11 +921,6 @@ mod gpu_tests {
             rates.push(rate);
         }
 
-        let device_name = match engine.status() {
-            GpuStatus::Running { device } => device,
-            other => format!("{other:?}"),
-        };
-
         engine.signal_stop();
         await_finished(&engine, Duration::from_secs(5), "measurement stop");
         engine.reap();
@@ -1105,22 +951,5 @@ mod gpu_tests {
             None,
             "no fault during the measurement"
         );
-
-        std::fs::create_dir_all("/tmp/vanaddy-rate").expect("create /tmp/vanaddy-rate");
-        let timestamp = std::process::Command::new("date")
-            .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "unknown-time".to_string());
-        let line = format!("{mean:.0},{device_name},{timestamp}\n");
-        use std::io::Write;
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/vanaddy-rate/measured.txt")
-            .and_then(|mut f| f.write_all(line.as_bytes()))
-            .expect("append /tmp/vanaddy-rate/measured.txt");
     }
 }
