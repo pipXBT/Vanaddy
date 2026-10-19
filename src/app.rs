@@ -486,7 +486,7 @@ impl App {
             let (gpu_tx, rx) = crossbeam_channel::bounded(crate::gpu::CHANNEL_CAPACITY);
             let engine = GpuEngine::start(gpu_tx, self.gpu_health.clone());
             // Initializing: the device, the ~60-95 ms shader compile and the
-            // ~300 ms self-test all run on the spawned thread, not here.
+            // ~1 s self-test all run on the spawned thread, not here.
             self.gpu_status = engine.status();
             self.gpu_engines.push(engine);
             self.gpu_rx = Some(rx.clone());
@@ -536,8 +536,11 @@ impl App {
         // NON-BLOCKING. signal_stop() is a flag store. The engines stay PARKED
         // in gpu_engines and are reaped by the next start_search or by
         // shutdown_gpu at process exit. Joining here would stall the 100 ms
-        // render tick for up to a whole wave (~135 ms in steady state, ~400 ms
-        // during startup) and forever if the GPU has wedged.
+        // render tick until the producer next checks its stop flag: ~100 ms in
+        // steady state (one send_timeout; a stop inside a wave waits out one
+        // command buffer plus the in-flight ring, ~35 ms), ~450 ms during the
+        // self-test (its last phase runs three ~145 ms derives without a
+        // check), and forever if the GPU has wedged.
         for engine in &self.gpu_engines {
             engine.signal_stop();
         }

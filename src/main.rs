@@ -62,9 +62,11 @@ fn main() -> io::Result<()> {
     app.drain_matches();
 
     // Restore the terminal FIRST, then wind the GPU down. Worst case in steady
-    // state is ~135 ms (one command buffer + the in-flight ring + one
-    // send_timeout); ~400 ms during startup. 600 ms covers both. Anything still
-    // running past that is abandoned rather than hanging the exit.
+    // state is ~100 ms (one send_timeout; a stop inside a wave waits out one
+    // command buffer plus the in-flight ring, ~35 ms, and the two never stack);
+    // ~450 ms during the self-test (its last phase runs three ~145 ms derives
+    // without a check). 600 ms covers both. Anything still running past that
+    // is abandoned rather than hanging the exit.
     app.shutdown_gpu(Duration::from_millis(600));
 
     // Second drain, and not redundant: a worker that had not yet seen

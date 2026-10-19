@@ -7,8 +7,9 @@
 //! this file: it compiles, and its tests run, on Linux and under
 //! `--no-default-features`.
 //!
-//! Measured cost of one real run: ~154 ms of GPU plus ~512 × 260 µs = 133 ms of
-//! `ring`, i.e. ~300 ms one-time on the GPU thread, off the UI thread.
+//! Measured cost of one real run (M1, release, 2026-10-19): ~770 ms of GPU over
+//! five derives plus ~512 × 534 µs = 275 ms of `ring`, i.e. ~1 s one-time on
+//! the GPU thread, off the UI thread.
 
 use crate::gpu::{GpuError, Schedule};
 use crate::seed::{CANONICAL_PHRASE, CANONICAL_SEED_HEX};
@@ -92,9 +93,9 @@ impl From<GpuError> for SelfTestError {
 ///   6. a count=511 ragged wave against the ring-checked count=512 outputs,
 ///      and chunk-schedule invariance over three schedules.
 ///
-/// `stop` is read before the first phase and after each one. One run is ~154 ms
-/// of GPU plus ~133 ms of `ring` — long enough that a quit issued during startup
-/// would otherwise go unobserved for ~300 ms. A raised flag returns `Ok(())`,
+/// `stop` is read before the first phase and after each one. One run is ~770 ms
+/// of GPU plus ~275 ms of `ring` — long enough that a quit issued during startup
+/// would otherwise go unobserved for ~1 s. A raised flag returns `Ok(())`,
 /// not an error: nothing was proven faulty, and reporting a
 /// `GpuDisableReason::SelfTest` on the way out would be a lie.
 pub fn self_test<F>(stop: &AtomicBool, mut derive: F) -> Result<(), SelfTestError>

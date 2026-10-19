@@ -209,13 +209,13 @@ pub(crate) fn producer(
         return Ok(());
     }
 
-    // ~300 ms: 154 ms of GPU plus 133 ms of `ring`. Nothing is published to the
-    // workers until it passes.
+    // ~1 s: five GPU derives (~145-170 ms each) plus ~275 ms of `ring`.
+    // Nothing is published to the workers until it passes.
     //
     // `stop` is threaded IN, not just checked around the call: the spec's
     // termination table requires the flag to be observed between the
     // self-test's phases, and a `signal_stop()` during startup must not go
-    // unseen for the whole ~300 ms. The schedule is threaded THROUGH, not
+    // unseen for the whole ~1 s. The schedule is threaded THROUGH, not
     // dropped: `self_test`'s chunk-schedule invariance check — the property the
     // entire resumable-wave design rests on — passes vacuously if every call it
     // makes runs the production schedule.
@@ -749,8 +749,8 @@ mod gpu_tests {
         let engine = GpuEngine::start(tx, health.clone());
 
         // Wait for the first block: that puts the ~95 ms shader compile and the
-        // ~300 ms self-test behind us, so the 135 ms steady-state termination
-        // bound is the one under test.
+        // ~1 s self-test behind us, so the ~100 ms steady-state termination
+        // bound (one send_timeout) is the one under test.
         let first = rx
             .recv_timeout(Duration::from_secs(180))
             .expect("no block within 180 s of start");
@@ -850,7 +850,7 @@ mod gpu_tests {
         let engine = GpuEngine::start(tx, health.clone());
 
         // Discard the first block: it hides the ~95 ms shader compile and the
-        // ~300 ms self-test, which are startup cost, not steady-state rate.
+        // ~1 s self-test, which are startup cost, not steady-state rate.
         let first = match rx.recv_timeout(Duration::from_secs(180)) {
             Ok(b) => b,
             Err(e) => {

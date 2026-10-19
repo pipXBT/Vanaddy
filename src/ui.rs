@@ -985,7 +985,7 @@ mod tests {
         let (text, _) = gpu_stats_line(&app).expect("initialising gets a stats row");
         assert!(
             text.contains("initialising"),
-            "the ~300 ms self-test must be visible: {text}"
+            "the ~1 s self-test must be visible: {text}"
         );
     }
 

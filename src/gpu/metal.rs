@@ -552,7 +552,7 @@ pub struct GpuEngine {
 
 impl GpuEngine {
     /// Returns IMMEDIATELY with status `Initializing`. Device creation, the
-    /// ~60-95 ms cold library compile, pipeline build and the ~300 ms self-test
+    /// ~60-95 ms cold library compile, pipeline build and the ~1 s self-test
     /// all run on the spawned thread, so the UI never stalls on them.
     pub fn start(tx: Sender<Box<SeedBlock>>, health: Arc<GpuHealth>) -> GpuEngine {
         let stop = Arc::new(AtomicBool::new(false));
