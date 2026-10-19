@@ -702,6 +702,21 @@ mod tests {
     /// irregular schedule sums to less than 2047, so it also exercises the
     /// "last entry repeats" branch of `Schedule::iters_for` and the
     /// `.min(remaining)` clamp on the repeated, over-long tail.
+    /// The BIP-39 canonical vector, against `seed::CANONICAL_SEED_HEX`. This is
+    /// the anchor to external ground truth: every other GPU test in this file
+    /// compares against `ring`, which would be circular if `ring` were wrong.
+    #[test]
+    fn gpu_seed_matches_bip39_canonical_vector() {
+        let Some(mut gpu) = gpu_for_test() else {
+            return;
+        };
+        let out = gpu
+            .derive(&[CANONICAL_PHRASE], crate::seed::PBKDF2_ROUNDS)
+            .expect("wave");
+        assert_eq!(out.len(), 1);
+        assert_eq!(hex::encode(*out[0]), CANONICAL_SEED_HEX);
+    }
+
     #[test]
     fn gpu_chunk_schedule_invariance() {
         let Some(mut gpu) = gpu_for_test() else {
