@@ -4,7 +4,7 @@ use curve25519_dalek::constants::ED25519_BASEPOINT_TABLE;
 use curve25519_dalek::scalar::Scalar;
 use rand::rngs::OsRng;
 use rand::RngCore;
-use tiny_keccak::{Hasher, Keccak};
+use sha3::{Digest, Keccak256};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::monero_wordlist::MONERO_WORDLIST;
@@ -14,17 +14,13 @@ pub struct Monero;
 const NETWORK_BYTE_MAINNET: u8 = 0x12;
 
 /// Monero uses the original Keccak-256 (not FIPS-202 SHA3-256 — they differ in padding).
-/// tiny-keccak's Keccak::v256() is the Monero variant.
+/// sha3's Keccak256 is that variant (the one EVM addresses use too).
 fn keccak256(data: &[u8]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    let mut k = Keccak::v256();
-    k.update(data);
-    k.finalize(&mut out);
-    out
+    Keccak256::digest(data).into()
 }
 
 /// Raw Monero keypair: spend_sec, spend_pub, view_sec, view_pub.
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct MoneroKeypair {
     pub spend_sec: [u8; 32],
     pub view_sec: [u8; 32],

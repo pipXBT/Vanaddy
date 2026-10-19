@@ -5,14 +5,14 @@ use crate::pbkdf2_lanes::LANES;
 use super::Chain;
 use bech32::{u5, ToBase32, Variant};
 use bip39::{Language, Mnemonic, MnemonicType};
-use ripemd::Ripemd160;
-use sha2::{Digest as Sha2Digest, Sha256};
+use ring::digest::{digest, SHA256};
+use ripemd::{Digest, Ripemd160};
 
 pub struct Bitcoin;
 
 /// HASH160 = RIPEMD160(SHA256(compressed_pubkey))
 fn hash160(pubkey_compressed: &[u8]) -> [u8; 20] {
-    let sha = Sha256::digest(pubkey_compressed);
+    let sha = digest(&SHA256, pubkey_compressed);
     let rip = Ripemd160::digest(&sha);
     let mut out = [0u8; 20];
     out.copy_from_slice(&rip);
