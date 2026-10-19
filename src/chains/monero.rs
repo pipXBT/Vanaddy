@@ -32,18 +32,22 @@ pub struct MoneroKeypair {
 fn generate_keys() -> (MoneroKeypair, [u8; 32], [u8; 32]) {
     let mut spend_raw = [0u8; 32];
     OsRng.fill_bytes(&mut spend_raw);
-    let spend_scalar = Scalar::from_bytes_mod_order(spend_raw);
+    let mut spend_scalar = Scalar::from_bytes_mod_order(spend_raw);
     spend_raw.zeroize();
-    let spend_sec = spend_scalar.to_bytes();
     let spend_pub = (&spend_scalar * ED25519_BASEPOINT_TABLE).compress().to_bytes();
 
-    let mut view_raw = keccak256(&spend_sec);
-    let view_scalar = Scalar::from_bytes_mod_order(view_raw);
+    let mut view_raw = keccak256(spend_scalar.as_bytes());
+    let mut view_scalar = Scalar::from_bytes_mod_order(view_raw);
     view_raw.zeroize();
-    let view_sec = view_scalar.to_bytes();
     let view_pub = (&view_scalar * ED25519_BASEPOINT_TABLE).compress().to_bytes();
 
-    (MoneroKeypair { spend_sec, view_sec }, spend_pub, view_pub)
+    let keypair = MoneroKeypair {
+        spend_sec: spend_scalar.to_bytes(),
+        view_sec: view_scalar.to_bytes(),
+    };
+    spend_scalar.zeroize();
+    view_scalar.zeroize();
+    (keypair, spend_pub, view_pub)
 }
 
 /// Encode a Monero spend key as a 25-word Electrum-style mnemonic.
@@ -52,7 +56,9 @@ pub fn monero_seed_phrase(spend_sec: &[u8; 32]) -> String {
     const N: u32 = 1626;
     const PREFIX_LEN: usize = 3;
 
-    let mut words: Vec<&'static str> = Vec::with_capacity(25);
+    // Word indices (and `trimmed`) encode spend_sec losslessly, so both are
+    // wiped; a Vec<&str> of the words themselves could not be.
+    let mut words: Vec<usize> = Vec::with_capacity(25);
 
     for i in 0..8 {
         let chunk = &spend_sec[i * 4..i * 4 + 4];
@@ -60,23 +66,35 @@ pub fn monero_seed_phrase(spend_sec: &[u8; 32]) -> String {
         let w1 = x % N;
         let w2 = (x / N + w1) % N;
         let w3 = (x / N / N + w2) % N;
-        words.push(MONERO_WORDLIST[w1 as usize]);
-        words.push(MONERO_WORDLIST[w2 as usize]);
-        words.push(MONERO_WORDLIST[w3 as usize]);
+        words.push(w1 as usize);
+        words.push(w2 as usize);
+        words.push(w3 as usize);
     }
 
     // Checksum: CRC32 over concatenation of first PREFIX_LEN chars of each word.
     // All Monero English words are ASCII and length >= 4, so byte-slicing is safe.
     let mut trimmed = String::with_capacity(24 * PREFIX_LEN);
-    for w in &words {
+    for &i in &words {
+        let w = MONERO_WORDLIST[i];
         trimmed.push_str(&w[..PREFIX_LEN.min(w.len())]);
     }
 
     let cksum = crc32fast::hash(trimmed.as_bytes());
+    trimmed.zeroize();
     let checksum_idx = (cksum as usize) % 24;
     words.push(words[checksum_idx]);
 
-    words.join(" ")
+    // Sized up front: a realloc would free an unwiped partial copy.
+    let len = words.iter().map(|&i| MONERO_WORDLIST[i].len() + 1).sum();
+    let mut phrase = String::with_capacity(len);
+    for &i in &words {
+        if !phrase.is_empty() {
+            phrase.push(' ');
+        }
+        phrase.push_str(MONERO_WORDLIST[i]);
+    }
+    words.zeroize();
+    phrase
 }
 
 /// Monero Base58 encodes in 8-byte blocks → 11 chars each (last block may be shorter).
@@ -287,6 +305,32 @@ mod tests {
         let encoded = monero_base58_encode(&all_ff);
         assert_eq!(encoded.len(), 11);
         assert_eq!(encoded, "jpXCZedGfVQ");
+    }
+
+    /// Non-degenerate pin: all-zeros cannot catch a word-order or checksum-index
+    /// slip. Captured from the encoder before it switched to wipeable indices.
+    #[test]
+    fn monero_seed_phrase_sequential_bytes_pinned() {
+        let k: [u8; 32] = std::array::from_fn(|i| i as u8);
+        assert_eq!(
+            monero_seed_phrase(&k),
+            "amaze buffet cake entrance symptoms tiger lamb maze nestle python dusted \
+             faxed update vague zinger boxes ornament renting glass gained island \
+             nabbing afield calamity boxes"
+        );
+    }
+
+    /// The address must belong to the phrase: view_sec = H(spend_sec) mod l and
+    /// each pub is its secret times G. Catches a wipe that lands too early.
+    #[test]
+    fn monero_generate_keys_are_consistent() {
+        let (payload, kp, _) = Monero::generate();
+        let spend = Scalar::from_bytes_mod_order(kp.spend_sec);
+        let view = Scalar::from_bytes_mod_order(keccak256(&kp.spend_sec));
+        assert_eq!(view.to_bytes(), kp.view_sec);
+        let pub_of = |s: &Scalar| (s * ED25519_BASEPOINT_TABLE).compress().to_bytes();
+        assert_eq!(payload[1..33], pub_of(&spend));
+        assert_eq!(payload[33..], pub_of(&view));
     }
 
     #[test]

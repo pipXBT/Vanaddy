@@ -12,6 +12,7 @@ use crate::gpu::{GpuDisableReason, GpuHealth};
 use evm::Evm;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
+use zeroize::Zeroize;
 
 /// Channel payload emitted when a vanity address is found.
 pub struct Match {
@@ -105,11 +106,12 @@ impl ChainKind {
     }
 }
 
-/// The unchanged CPU batch, factored out so `search` and `search_hybrid` share
-/// ONE body and cannot drift. Byte-identical to today's loop interior.
+/// The CPU batch, factored out so `search` and `search_hybrid` share
+/// ONE body and cannot drift. Every CPU candidate of every chain passes through
+/// here, so this is where a non-matching phrase (the whole wallet) is wiped.
 #[inline(always)]
 fn search_cpu_step<C: Chain>(matcher: &Matcher, counter: &AtomicU64, tx: &Sender<Match>) {
-    C::generate_batch(|addr_bytes, secret_raw, phrase| {
+    C::generate_batch(|addr_bytes, secret_raw, mut phrase| {
         if C::matches_raw(matcher, &addr_bytes) {
             let _ = tx.send(Match {
                 chain: C::LABEL.to_string(),
@@ -117,6 +119,8 @@ fn search_cpu_step<C: Chain>(matcher: &Matcher, counter: &AtomicU64, tx: &Sender
                 secret_hex: C::encode_secret(&secret_raw),
                 mnemonic: phrase,
             });
+        } else {
+            phrase.zeroize();
         }
     });
     counter.fetch_add(C::BATCH as u64, Ordering::Relaxed);
