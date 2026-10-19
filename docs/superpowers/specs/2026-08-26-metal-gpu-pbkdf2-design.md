@@ -34,19 +34,15 @@ The adopted kernel was independently re-validated before this spec was written:
 SHA-512("abc") correct; the BIP-39 canonical vector reproduced under six chunk
 schedules including irregular ones (`[1,1000,46,1000]`, `[2046,1]`, `[1,1,2045]`);
 and 2,048 distinct passwords of length 1-128 matched CommonCrypto with 0
-mismatches. The kernel and its two validation harnesses are preserved verbatim
-under `docs/superpowers/specs/prototype/`:
+mismatches. The kernel and its two validation harnesses lived under
+`docs/superpowers/specs/prototype/` and have since been removed: the kernel
+ships as `src/gpu/pbkdf2_bip39.metal`, and the Rust GPU tests plus the startup
+self-test cover what the harnesses checked. Recover any of them with
+`git show c979d32:docs/superpowers/specs/prototype/<file>`:
 
 - `pbkdf2_bip39.metal` - the kernel this spec adopts
 - `verifyC.m` - correctness harness (vectors, chunk-schedule invariance, CommonCrypto differential)
 - `verify7.m` - the dispatch-granularity tuning grid
-
-Build and run either with:
-
-```sh
-cd docs/superpowers/specs/prototype
-clang -O2 -fobjc-arc -framework Foundation -framework Metal -o verifyC verifyC.m && ./verifyC
-```
 
 ---
 
@@ -54,7 +50,7 @@ clang -O2 -fobjc-arc -framework Foundation -framework Metal -o verifyC verifyC.m
 
 **Reviewer verdict roll-up.** Three of four dimension designs came back `sound_with_fixes`. **The `ffi` dimension came back `broken`** on its central choice: a *persistent-slot, rotating-group* GPU topology (`keys/cur/acc/rem` buffers, harvest group `launch % groups` every launch). Two independent reviewers reproduced the same fatal result — the slot pool is never primed, launch 0 harvests 512 slots that have received zero PBKDF2 iterations, the 1-in-256 `ring` audit fires immediately, and **the feature self-disables within 36 ms of every start, on every machine, having produced zero usable seeds**. Its self-test (one R=2048 dispatch on a fresh pool) structurally cannot exercise the rotating schedule, so the bug is invisible to it. That topology is **rejected outright**.
 
-The adopted topology is the `kernel` dimension's **resumable wave model**, which exists as working, independently re-verified code at `docs/superpowers/specs/prototype/pbkdf2_bip39.metal` (2,048 distinct passwords, lengths 1–128, 0 mismatches vs CommonCrypto at count=2048 across 8 threadgroups; chunk-schedule invariance verified at R ∈ {2047,1024,…,1} and under irregular schedules).
+The adopted topology is the `kernel` dimension's **resumable wave model**, which existed as working, independently re-verified code at `docs/superpowers/specs/prototype/pbkdf2_bip39.metal` (since removed; recover with `git show c979d32:docs/superpowers/specs/prototype/pbkdf2_bip39.metal`) (2,048 distinct passwords, lengths 1–128, 0 mismatches vs CommonCrypto at count=2048 across 8 threadgroups; chunk-schedule invariance verified at R ∈ {2047,1024,…,1} and under irregular schedules).
 
 Everything else below is the merge, with every high- and medium-severity defect folded in as the design.
 
