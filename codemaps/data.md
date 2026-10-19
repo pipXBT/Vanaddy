@@ -7,9 +7,9 @@
 | Type | Defined in | Notes |
 |------|------------|-------|
 | `App` / `AppState` | `src/app.rs:42` / `:37` | TUI + search + GPU fields / `Configuring \| Searching` |
-| `Chain` | `src/chains/mod.rs:24` | `LABEL`, `CHARSET`, `MAX_VANITY`, `BATCH` (default 1), `AddressBytes`, `SecretRaw`; `generate`, `generate_batch`, `encode_address`, `encode_secret`, `matches_raw` |
-| `ChainKind` | `src/chains/mod.rs:49` | `Solana \| Evm \| Bitcoin \| Ton \| Monero`. `search(.., gpu: Option<&GpuRx>, &GpuHealth)`: Evm → `search_hybrid`, others → `search::<C>` |
-| `Match` | `src/chains/mod.rs:17` | `{ chain, address, secret_hex, mnemonic }`, all `String`. No derives |
+| `Chain` | `src/chains/mod.rs:25` | `LABEL`, `CHARSET`, `MAX_VANITY`, `BATCH` (default 1), `AddressBytes`, `SecretRaw`; `generate`, `generate_batch`, `encode_address`, `encode_secret`, `matches_raw` |
+| `ChainKind` | `src/chains/mod.rs:50` | `Solana \| Evm \| Bitcoin \| Ton \| Monero`. `search(.., gpu: Option<&GpuRx>, &GpuHealth)`: Evm → `search_hybrid`, others → `search::<C>` |
+| `Match` | `src/chains/mod.rs:18` | `{ chain, address, secret_hex, mnemonic }`, all `String`. No derives |
 | `Matcher` / `MatchPosition` | `src/matcher.rs:11` / `:5` | see below / `StartsWith \| EndsWith \| StartsAndEndsWith`, `Copy` |
 | `MoneroKeypair` | `src/chains/monero.rs:24` | `{ spend_sec, view_sec }: [u8; 32]`, `Zeroize + ZeroizeOnDrop` |
 | `GpuCandidate` | `src/gpu/mod.rs:161` | `{ entropy: [u8; 16], seed: [u8; 64] }`, `Clone + Copy + Zeroize`. `seed` untrusted, filter only |
@@ -17,8 +17,8 @@
 | `GpuHealth` | `src/gpu/mod.rs:211` | `Default`. `disable: AtomicBool`, private `reason: OnceLock<GpuDisableReason>`, `seeds_delivered: AtomicU64` |
 | `Schedule` | `src/gpu/mod.rs:268` | `Production \| Irregular(&'static [u32])`. Last entry repeats; non-production = 1 dispatch per command buffer |
 | `KeyBlock` | `src/gpu/pack.rs:12` | `#[repr(C, align(16))] [u64; 16]` big-endian, 128 B, `Copy + Zeroize` |
-| `SelfTestError` | `src/gpu/selftest.rs:42` | `WrongLength \| CanonicalVectorMismatch \| RingMismatch \| AllZero \| Poisoned \| ScheduleDivergence \| DuplicateEntropy \| Backend(String)` |
-| `GpuEngine` | `gpu/metal.rs:533`, `gpu/stub.rs:21` | `start(tx, health)`, `status`, `signal_stop`, `is_finished`, `reap`. Holds no ObjC type |
+| `SelfTestError` | `src/gpu/selftest.rs:43` | `WrongLength \| CanonicalVectorMismatch \| RingMismatch \| AllZero \| Poisoned \| ScheduleDivergence \| DuplicateEntropy \| Backend(String)` |
+| `GpuEngine` | `gpu/metal.rs:541`, `gpu/stub.rs:21` | `start(tx, health)`, `status`, `signal_stop`, `is_finished`, `reap`. Holds no ObjC type |
 
 ## GPU State Enums (`src/gpu/mod.rs`)
 
@@ -129,9 +129,9 @@ pub fn new(prefix: String, suffix: String, case_sensitive: bool, chain: ChainKin
 | `MAX_THREADS_PER_THREADGROUP` | 256 | default; `VANADDY_GPU_TG` overrides; rounded to exec width, clamped to pipeline max (`metal.rs:166-177`) |
 | `AUDITS_PER_WAVE` | 4 | random indices (`audit_indices`), ring re-derive |
 | `EVM_GPU_SEEDS_PER_SEC` | 13_600.0 | pre-search ETA only |
-| `GPU_CHUNK_BATCHES` | 16 | `chains/mod.rs:140`. Stop check every 64 candidates |
-| `SELF_TEST_COUNT` / `_RAGGED_COUNT` / `IRREGULAR_SCHEDULE` | 512 / 511 / `[1, 1000, 46, 1000]` | `selftest.rs:25-33` |
-| seeds poison | `0xA5` | filled every wave (`metal.rs:295`) |
+| `GPU_CHUNK_BATCHES` | 16 | `chains/mod.rs:144`. Stop check every 64 candidates |
+| `SELF_TEST_COUNT` / `_RAGGED_COUNT` / `IRREGULAR_SCHEDULE` | 512 / 511 / `[1, 1000, 46, 1000]` | `selftest.rs:26-34` |
+| seeds poison | `0xA5` | filled every wave (`metal.rs:303`) |
 
 Compile-time asserts (`mod.rs:41-50`): `WAVE % BLOCK == 0`, `CHANNEL_CAPACITY == 2·(WAVE/BLOCK)`, `BLOCK % MAX_THREADS_PER_THREADGROUP == 0`, `AUDITS_PER_WAVE < WAVE`, `ceil(2047/8) % 4 == 0`. `metal.rs:54-55`: `size_of::<KeyBlock>() == 128`, `Params` == 16.
 
@@ -141,7 +141,7 @@ Metal buffers (`WaveBuffers`, `metal.rs:85`): keys `WAVE×128`, states `WAVE×25
 
 | Chain | Display (`encode_address`) | Hot `matches_raw` | Vanity slice |
 |-------|----------------------------|-------------------|--------------|
-| Solana | `bs58::encode` → `String` | same heap encode, both helpers on full addr | `addr[..]` |
+| Solana | `bs58::encode` → `String` | stack `[u8; 44]` encode, both helpers on full addr | `addr[..]` |
 | EVM | `0x` + `hex::encode` | `matches_evm_raw`; case-sensitive adds both helpers on `[u8; 40]` EIP-55 | hex from index 0 (`0x` display only) |
 | Bitcoin | `bech32::encode("bc", ..)` | `expand_5bit` vs `bech32_prefix_5bit` (miss returns pre-encode), then stack `AddrBuf` (64 B) + `encode_to_fmt` | `addr[4..]` (skip `bc1q`) |
 | TON | `user_friendly_ascii` → `String` | `[u8; 48]` via `encode_slice` | `encoded[2..]` (skip `UQ`) |
@@ -152,7 +152,8 @@ Suffix always checks the full string. TON: 36 B = tag `0x51` ‖ workchain `0x00
 ## Memory & Secrets
 
 - Solana / TON: ed25519-dalek `SigningKey` zeroizes on drop. EVM / Bitcoin: secp256k1 `SecretKey` is `Copy`, not wiped; hex built only on a match.
-- Monero: `MoneroKeypair` wipes on drop; raw scalars zeroized after reduction.
+- Monero: `MoneroKeypair` wipes on drop; `generate_keys` wipes raw bytes and both `Scalar`s; `monero_seed_phrase` wipes word indices and checksum input.
+- CPU search: `search_cpu_step` zeroizes every non-matching candidate's phrase (all chains).
 - GPU: `SeedBlock` zeroizes on drop. Producer `entropy` / `keys` are `Zeroizing<Vec<_>>`, overwritten each wave. `pack_key_block` wipes its stack copy. `WaveBuffers` zeroed on drop. The GPU seed is a filter, never a CSV field.
 - Entropy: `Mnemonic::new` for BIP-39, TON and the GPU fill; `OsRng` for Monero. Kernel `tid` only in `kernel_src::TID_ALLOWLIST` lines (slot offsets, bounds guard, params).
 
@@ -160,17 +161,17 @@ Suffix always checks the full string. TON: 36 B = tag `0x51` ‖ workchain `0x00
 
 | Item | Value |
 |------|-------|
-| Path | `CSV_PATH = "vanity_wallets.csv"` (`app.rs:698`), cwd. `App::csv_path` overridable (tests) |
+| Path | `CSV_PATH = "vanity_wallets.csv"` (`app.rs:712`), cwd. `App::csv_path` overridable (tests) |
 | Header | `Chain,Address,Private Key (hex),Seed Phrase`. Written when file length is 0; failure aborts `start_search` |
 | Row | `[chain, address, secret_hex, mnemonic]` via `write_match_row` → `write_row` (`has_headers(false)`, flush per record) |
 | Secret | Solana 64 B keypair hex (secret ‖ pubkey); EVM / Bitcoin 32 B hex; TON 32 B Ed25519 seed hex; Monero `spend_sec:view_sec` hex |
 | Phrase | BIP-39 12 words (Solana / EVM / Bitcoin); TON 24 words; Monero 24 + CRC32 checksum word (1626-word list) |
-| Perms | `open_csv_secure` (`app.rs:709`): `mode(0o600)` at create + `set_permissions(0o600)` every open |
-| Writers | held `File` from `start_search`; `append_match_row` (`app.rs:750`) when none. `stop_search` compares dev/ino, warns if replaced or deleted |
+| Perms | `open_csv_secure` (`app.rs:723`): `mode(0o600)` at create + `file.set_permissions(0o600)` (fchmod on the handle, error propagates) every open |
+| Writers | held `File` from `start_search`; `append_match_row` (`app.rs:762`) when none. `stop_search` compares dev/ino, warns if replaced or deleted |
 
 ## Test Vectors (pinned)
 
-173 `#[test]` fns, 4 `#[ignore]`. Load-bearing:
+179 `#[test]` fns, 4 `#[ignore]`. Load-bearing:
 
 | Test | What it pins |
 |------|--------------|
@@ -186,12 +187,13 @@ Suffix always checks the full string. TON: 36 B = tag `0x51` ‖ workchain `0x00
 | `ton::ton_tonkeeper_round_trip_vector` | `UQAkFCMtkN0Q1TNP6Gk9SqYWsBFc6Aglwckj6ES4AeBEzWja` |
 | `ton_cell::wallet_v5r1_matches_tonkeeper_vector`, `wallet_v5r1_data_cell_zero_pubkey_pins_hash` | state_init hash `2414232d…01e044cd`; data-cell layout |
 | `monero::keccak256_empty_vector` | original Keccak, not SHA3 |
-| `bitcoin::matches_raw_agrees_with_encode_address_for_one_char_prefix_and_suffix`, `ton::matches_raw_agrees_with_encode_address_for_one_char_affix`, `monero::monero_matches_raw_agrees_with_encode_address` | stack encode == `encode_address` |
+| `monero::monero_seed_phrase_sequential_bytes_pinned`, `monero_generate_keys_are_consistent` | self-captured 25 words (no external vector); view = H(spend), pubs = secret·G |
+| `bitcoin::matches_raw_agrees_with_encode_address_for_one_char_prefix_and_suffix`, `ton::matches_raw_agrees_with_encode_address_for_one_char_affix`, `monero::monero_matches_raw_agrees_with_encode_address`, `{solana,evm}::matches_raw_agrees_with_encode_address_on_random_candidates` | stack encode == `encode_address` |
 | `chains::chain_kind_search_with_no_gpu_source_is_unchanged`, `corrupted_gpu_seed_raises_fault_and_emits_nothing` | counter steps by `BATCH`; verify miss → `VerifyMismatch`, no row |
 | `verify::verify_gpu_accepts_the_bip39_canonical_vector` | entropy 0 → MetaMask account |
 | `gpu::pack::pack_key_block_matches_the_cpu_ipad_and_opad_blocks` | GPU key block == CPU HMAC pads |
 | `gpu::selftest::detects_every_corruption` | 8 fault shapes each caught |
-| `gpu::metal::gpu_seed_matches_bip39_canonical_vector` | GPU vs BIP-39 vector |
-| `gpu::metal::gpu_chunk_schedule_invariance` | 5 schedules incl. production R=8, `[1,1000,46,1000]` |
-| `gpu::metal::gpu_ring_and_4lane_agree_over_512_deterministic_phrases` | GPU == ring == 4-lane |
+| `gpu::backend::gpu_seed_matches_bip39_canonical_vector` | GPU vs BIP-39 vector |
+| `gpu::backend::gpu_chunk_schedule_invariance` | 5 schedules incl. production R=8, `[1,1000,46,1000]` |
+| `gpu::backend::gpu_ring_and_4lane_agree_over_512_deterministic_phrases` | GPU == ring == 4-lane |
 | `gpu::kernel_src` `kernel_source_uses_tid_only_in_index_expressions`, `kernel_source_bans_threadgroup_simd_barrier_atomic` | kernel source |

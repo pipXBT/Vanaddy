@@ -2,7 +2,7 @@
 
 # Chains
 
-`Chain` trait (`src/chains/mod.rs:24`) is the per-chain contract. `ChainKind` (`mod.rs:49`) is the runtime enum. `ChainKind::search` (`mod.rs:89`) matches once per Rayon thread (`app.rs` `chain.search(.., gpu_rx.as_ref(), &health)`): EVM → `search_hybrid`; the other four → `search::<C>` and ignore both GPU args. No `dyn`.
+`Chain` trait (`src/chains/mod.rs:25`) is the per-chain contract. `ChainKind` (`mod.rs:50`) is the runtime enum. `ChainKind::search` (`mod.rs:90`) matches once per Rayon thread (`app.rs` `chain.search(.., gpu_rx.as_ref(), &health)`): EVM → `search_hybrid`; the other four → `search::<C>` and ignore both GPU args. No `dyn`.
 
 ## `Chain` Trait
 
@@ -24,7 +24,7 @@ pub trait Chain: Send + Sync + 'static {
 
 `ChainKind { Solana, Evm, Bitcoin, Ton, Monero }` (`Clone, Copy, PartialEq`): `label()`, `charset()`, `max_vanity()` forward the consts; `search(self, matcher, stop, counter, tx, gpu: Option<&GpuRx>, health: &GpuHealth)`.
 
-`Match` (`mod.rs:17`), the `mpsc` payload, no derives: `pub struct Match { pub chain, pub address, pub secret_hex, pub mnemonic: String }`.
+`Match` (`mod.rs:18`), the `mpsc` payload, no derives: `pub struct Match { pub chain, pub address, pub secret_hex, pub mnemonic: String }`.
 
 ## Per-Chain Summary
 
@@ -40,14 +40,14 @@ Prefix is matched after the skip (`addr.get(N..).unwrap_or("")`); suffix is matc
 
 ## Batch Pattern (Solana / EVM / Bitcoin)
 
-Private `from_seed(&[u8; 64])` (`solana.rs:13`, `evm.rs:36` `pub(crate)`, `bitcoin.rs:76`) is the shared tail:
+Private `from_seed(&[u8; 64])` (`solana.rs:13`, `evm.rs:35` `pub(crate)`, `bitcoin.rs:76`) is the shared tail:
 
 ```
 generate()       = Mnemonic::new(Words12, English) → seed::derive_seed (ring) → from_seed
 generate_batch() = [Mnemonic; LANES]              → seed::derive_seeds (4-lane)  → from_seed ×4 → emit
 ```
 
-`assert_batch_matches_single_path::<C, _>(from_seed)` (`mod.rs:243`, test) re-derives each emitted candidate via `derive_seed` (address + `encode_secret` must agree), checks `BATCH == LANES`, and `dedup` (adjacent-only) leaves `LANES` addresses. TON batches via `ton_mnemonic::generate_ton_wallets()`. Monero keeps the default `generate_batch`.
+`assert_batch_matches_single_path::<C, _>(from_seed)` (`mod.rs:247`, test) re-derives each emitted candidate via `derive_seed` (address + `encode_secret` must agree), checks `BATCH == LANES`, and `dedup` (adjacent-only) leaves `LANES` addresses. TON batches via `ton_mnemonic::generate_ton_wallets()`. Monero keeps the default `generate_batch`.
 
 ## Matcher — `src/matcher.rs`
 
@@ -72,13 +72,13 @@ pub enum MatchPosition { StartsWith, EndsWith, StartsAndEndsWith }   // UI state
 
 | Chain | `matches_raw` encode | Prefix target | Suffix target |
 |-------|----------------------|---------------|---------------|
-| Solana | `bs58::encode().into_string()` (heap) | full addr | full addr |
+| Solana | `bs58::encode().into(&mut [u8; 44])` (stack) | full addr | full addr |
 | EVM | none: `matches_evm_raw`; case-sensitive adds `eip55_encode` → `[u8; 40]` | raw bytes / EIP-55 str | raw bytes / EIP-55 str |
 | Bitcoin | `expand_5bit` early-reject, then `bech32::encode_to_fmt` into stack `AddrBuf` (`[u8; 64]`) | `&addr[4..]` | full addr |
 | TON | `URL_SAFE_NO_PAD.encode_slice` into `[u8; 48]` | `&encoded[2..]` | full encoded |
 | Monero | `encode_address_into` → `[u8; 95]` | `&addr[1..]` | full addr |
 
-EVM case-sensitive: after the byte filter passes, runs `prefix_matches` / `suffix_matches` against the 40-char EIP-55 form (no `0x`). `eip55_encode` heap-allocates one `hex::encode` string.
+EVM case-sensitive: after the byte filter passes, runs `prefix_matches` / `suffix_matches` against the 40-char EIP-55 form (no `0x`). `eip55_encode` is stack-only: `hex::encode_to_slice` into `[u8; 40]`, Keccak of that, uppercase in place.
 
 Bitcoin: `expand_5bit` (`[u8; 32]`, no `Vec`) vs `bech32_prefix_5bit` rejects before the encode. A suffix-only search still encodes. `encode_address` (CSV / display) uses heap `bech32::encode`.
 
@@ -102,7 +102,7 @@ Bitcoin: `expand_5bit` (`[u8; 32]`, no `Vec`) vs `bech32_prefix_5bit` rejects be
 | Crates | `secp256k1` (global ctx), `sha3::Keccak256`, `hex` |
 | Pinned | EIP-55 `5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed`, `fB6916095ca1df60bB79Ce92cE3Ea74c37c5d359`; BIP-44 → `0x9858EfFD232B4033E47d90003D41EC34EcaEda94` |
 
-`eip55_encode` (`evm.rs:15`): uppercase a hex letter when the matching nibble of `Keccak256(lowercase_hex)` ≥ 8. `Evm::verify(address, secret_hex, phrase)` (`evm.rs:52`) is `#[cfg(test)]`: re-derive via `derive_seed` (ring), compare encoded address + secret; bad phrase → `false`.
+`eip55_encode` (`evm.rs:15`): uppercase a hex letter when the matching nibble of `Keccak256(lowercase_hex)` ≥ 8. `Evm::verify(address, secret_hex, phrase)` (`evm.rs:51`) is `#[cfg(test)]`: re-derive via `derive_seed` (ring), compare encoded address + secret; bad phrase → `false`.
 
 ## Bitcoin — `chains/bitcoin.rs`
 
@@ -148,44 +148,46 @@ Bitcoin: `expand_5bit` (`[u8; 32]`, no `Vec`) vs `bech32_prefix_5bit` rejects be
 | Keccak | `sha3::Keccak256` (original Keccak, not FIPS-202 SHA3-256) |
 | Address | 65 = `NETWORK_BYTE_MAINNET` `0x12` \|\| spend_pub \|\| view_pub; + `keccak256[..4]` → 69 bytes → 95-char Base58 starting `4` |
 | Base58 | 8-byte blocks → `BLOCK_SIZES = [0, 2, 3, 5, 6, 7, 9, 10, 11]` chars; `monero_base58_encode_into` writes a caller buffer |
-| Mnemonic | `monero_seed_phrase`: 8 LE u32 chunks × 3 words over `MONERO_WORDLIST` (`&[&str; 1626]`), + checksum word `words[crc32(first 3 chars each) % 24]` = 25 words |
+| Mnemonic | `monero_seed_phrase`: 8 LE u32 chunks × 3 words over `MONERO_WORDLIST` (`&[&str; 1626]`), + checksum word `words[crc32(first 3 chars each) % 24]` = 25 words; built from word indices (`Vec<usize>`) into a pre-sized `String` |
 | Secret | `"{spend_hex}:{view_hex}"` |
 | Crates | `curve25519-dalek`, `rand::OsRng`, `sha3`, `crc32fast`, `zeroize` |
-| Zeroize | `MoneroKeypair { spend_sec, view_sec }: Zeroize + ZeroizeOnDrop`; `spend_raw` / `view_raw` zeroized in `generate_keys` |
-| Test-only | `monero_base58_encode` heap wrapper; pins `keccak256("")` = `c5d24601…5d85a470`, `[0xff; 8]` → `jpXCZedGfVQ` |
+| Zeroize | `MoneroKeypair { spend_sec, view_sec }: Zeroize + ZeroizeOnDrop`; `generate_keys` wipes `spend_raw`, `view_raw` and both `Scalar`s; `monero_seed_phrase` wipes word indices and `trimmed` |
+| Test-only | `monero_base58_encode` heap wrapper; pins `keccak256("")` = `c5d24601…5d85a470`, `[0xff; 8]` → `jpXCZedGfVQ`; seed phrase pinned on all-zero and `0..32` keys (self-captured); `monero_generate_keys_are_consistent` (view = H(spend), pubs = secret·G) |
 
 ## Hot Loop
 
-`search_cpu_step::<C>` (`mod.rs:111`, `#[inline(always)]`) is the one CPU body:
+`search_cpu_step::<C>` (`mod.rs:113`, `#[inline(always)]`) is the one CPU body:
 
 ```rust
-C::generate_batch(|addr, secret, phrase| {
+C::generate_batch(|addr, secret, mut phrase| {
     if C::matches_raw(matcher, &addr) {
         let _ = tx.send(Match { chain: C::LABEL.to_string(), address: C::encode_address(&addr),
                                 secret_hex: C::encode_secret(&secret), mnemonic: phrase });
+    } else {
+        phrase.zeroize();                  // non-match: wipe the whole wallet
     }
 });
 counter.fetch_add(C::BATCH as u64, Relaxed);
 ```
 
-`search::<C>` (`mod.rs:126`): `while !stop { search_cpu_step::<C>() }`. Modules: pub `bitcoin evm monero solana ton`; private `monero_wordlist ton_cell ton_mnemonic`.
+`search::<C>` (`mod.rs:130`): `while !stop { search_cpu_step::<C>() }`. Modules: pub `bitcoin evm monero solana ton`; private `monero_wordlist ton_cell ton_mnemonic`.
 
 ## EVM GPU Path — `mod.rs`, `src/verify.rs`
 
 ```
-search_hybrid (mod.rs:146), loop until stop:
+search_hybrid (mod.rs:150), loop until stop:
   gpu Some && !health.disable && rx.try_recv() = Ok(Box<SeedBlock>)
       → drain_gpu_block; continue            (SeedBlock: ZeroizeOnDrop)
   else → search_cpu_step::<Evm>              (non-blocking, self-balancing)
 
-drain_gpu_block (mod.rs:167):
+drain_gpu_block (mod.rs:171):
   for chunk in block.chunks(Evm::BATCH * GPU_CHUNK_BATCHES)   // 4 × 16 = 64
       if stop → return                       (unfinished chunks not counted)
       for cand: (addr, _) = Evm::from_seed(&cand.seed)        // UNTRUSTED, filter only
                 if Evm::matches_raw → emit_gpu_match(tx, &cand.entropy, &addr, health)
       counter += chunk.len(); health.seeds_delivered += chunk.len()
 
-emit_gpu_match (mod.rs:194):
+emit_gpu_match (mod.rs:198):
   verify::verify_gpu(entropy, gpu_addr)
     Some((addr, secret, phrase)) → send Match built from CPU-derived values
     None → health.raise(GpuDisableReason::VerifyMismatch { address: encode(gpu_addr) }); drop candidate

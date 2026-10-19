@@ -95,7 +95,7 @@ start_search          spawn_gpu = validated_gpu && gpu_engines.is_empty()   (rea
 vanaddy-gpu thread (metal GpuEngine::start, returns at once with Initializing):
   run_guarded(health, finished, producer)   catch_unwind → Panicked; FinishGuard sets finished
   producer: QoS USER_INITIATED → MetalPbkdf2::new (device, compile, 2 pipelines, 3.5 MiB buffers)
-          → selftest::self_test(stop, derive_with_schedule)  ~300 ms, before anything is sent
+          → selftest::self_test(stop, derive_with_schedule)  ~1 s, before anything is sent
           → status Running{device}
           → per wave (WAVE=8192), until stop || health.disable:
               1. Mnemonic::new(Words12) entropy + pack_key_block      (host entropy only)
@@ -117,9 +117,9 @@ Fault handling: every fault is `GpuHealth::raise` (set-once `OnceLock` reason, t
 
 Self-test (`selftest.rs`): 510 fresh distinct entropies + canonical phrase at index 0 and 511; canonical vector checked before any `ring` cross-check; no all-zero or `0xA5`-poisoned output; every output vs `derive_seed`; ragged count 511; schedule invariance over `Production`, `IRREGULAR_SCHEDULE` `[1, 1000, 46, 1000]`, one-shot `[2047]`. Any failure → `SelfTest(..)`.
 
-Metal backend (`metal.rs`, only file naming Objective-C types): one prologue command buffer, then 2047 iterations at `ITERS_PER_DISPATCH=8`, `DISPATCHES_PER_COMMAND_BUFFER=4`, `PIPELINE_DEPTH=3` in flight, threadgroup `MAX_THREADS_PER_THREADGROUP=256` (`VANADDY_GPU_TG` overrides) clamped to the pipelines' max. `check_status` (`classify_command_buffer_status`: Completed=4 with nil error, else `CommandBuffer{..}`) at every `waitUntilCompleted`; failure discards the wave. Seeds poisoned `0xA5` before each wave; `WaveBuffers` zeroed on drop. Never calls `setMathMode`.
+Metal backend (`metal.rs`, only file naming Objective-C types): one prologue command buffer, then 2047 iterations at `ITERS_PER_DISPATCH=8`, `DISPATCHES_PER_COMMAND_BUFFER=4`, `PIPELINE_DEPTH=3` in flight, threadgroup `MAX_THREADS_PER_THREADGROUP=256` (`VANADDY_GPU_TG` overrides) clamped to the pipelines' max. `check_status` (`classify_command_buffer_status`: Completed=4 with nil error, else `CommandBuffer{..}`; message `localizedDescription [domain=…, code=…]`) at every `waitUntilCompleted`; failure discards the wave. Seeds poisoned `0xA5` before each wave; `WaveBuffers` zeroed on drop. Never calls `setMathMode`.
 
-Kernel guards (`kernel_src` tests): bans `threadgroup`, `simd_`, `barrier`, `atomic`; `tid` only on allowlisted index lines; exactly the two kernels.
+Kernel guards (`kernel_src` tests): bans `threadgroup`, `simd_`, `barrier`, `atomic`; `tid` only on allowlisted index lines; exactly the two kernels. SHA-512 rounds: Ch = `g^(e&(f^g))`, Maj = `b^((a^b)&(b^c))` with `a^b` carried as the next round's `b^c`; both round loops `#pragma unroll(16)` (full unroll of `sha512_hash64` measured 41% slower on M1).
 
 ## Concurrency Primitives
 
@@ -136,7 +136,7 @@ Kernel guards (`kernel_src` tests): bans `threadgroup`, `simd_`, `barrier`, `ato
 | `GpuEngine.finished` | `Arc<AtomicBool>` | Release in `FinishGuard`, Acquire in `is_finished` |
 | `GpuEngine.status` | `Arc<Mutex<GpuStatus>>` | poison-immune `set_status` / `read_status` |
 
-`GpuEngine`, `SeedBlock`, `GpuHealth` are asserted `Send + Sync` in `gpu/mod.rs`. `stop_search`: set stop → drop pool (non-blocking) → drain → drop `rx`, `gpu_rx` → `signal_stop` engines → CSV dev/inode check → drop file. `shutdown_gpu(deadline)` polls `is_finished` every 5 ms, then abandons the rest.
+`GpuEngine`, `SeedBlock`, `GpuHealth` are asserted `Send + Sync` in `gpu/mod.rs`. `stop_search`: set stop → drop pool (non-blocking) → `rx.iter()` until the job's only `Sender` drops (every worker returned) → drain → drop `rx`, `gpu_rx` → `signal_stop` engines → CSV dev/inode check → drop file. `shutdown_gpu(deadline)` polls `is_finished` every 5 ms, then abandons the rest.
 
 ## Build & Test
 
@@ -178,7 +178,7 @@ Kernel guards (`kernel_src` tests): bans `threadgroup`, `simd_`, `barrier`, `ato
 
 ## Output
 
-`vanity_wallets.csv` in the process CWD (`App.csv_path`, tests redirect it). Header `Chain, Address, Private Key (hex), Seed Phrase`, written by `start_search` when the file is empty; a failed open or header aborts the search back to Configuring. `open_csv_secure` is the 0o600 chokepoint (mode on create, re-assert after open). The search holds that `File` and writes via `write_match_row`; `append_match_row` is the no-handle fallback. A failed row write counts `csv_write_failures` and sets `stop`. In-memory list is a `VecDeque` capped at `MATCH_CAP` (500); `total_matches` counts every drained row.
+`vanity_wallets.csv` in the process CWD (`App.csv_path`, tests redirect it). Header `Chain, Address, Private Key (hex), Seed Phrase`, written by `start_search` when the file is empty; a failed open or header aborts the search back to Configuring. `open_csv_secure` is the 0o600 chokepoint (mode on create, then `fchmod` on the handle after every open; error propagates). The search holds that `File` and writes via `write_match_row`; `append_match_row` is the no-handle fallback. A failed row write counts `csv_write_failures` and sets `stop`. In-memory list is a `VecDeque` capped at `MATCH_CAP` (500); `total_matches` counts every drained row.
 
 ## Performance Notes
 
@@ -193,6 +193,6 @@ Apple M1 P-core, release, 4-lane PBKDF2 (`App::single_thread_rate`):
 | Monero | ~35 µs (28600/s) | two Ed25519 mults, no PBKDF2 |
 | EVM + Metal | `EVM_GPU_SEEDS_PER_SEC = 13_600` | whole machine; CPU tail `EVM_GPU_TAIL_SECS = 50.5e-6` (~0.69 core) |
 
-`estimated_rate` (pre-search only) = `gpu_rate + (threads - tail) × per_thread` when `gpu_effective()`. The stats `GPU rate:` line is `gpu_measured_rate()` = `seeds_delivered / wall time`, never modelled.
+`estimated_rate` (whenever no search runs) = `gpu_rate + (threads - tail) × per_thread` when `gpu_effective()`. The stats `GPU rate:` line is `gpu_measured_rate()` = `seeds_delivered / wall time`, never modelled.
 
-Hot loop is `search::<C>` / `search_hybrid`, no `dyn`. Bitcoin, TON and Monero `matches_raw` encode into stack buffers. Solana still heap-encodes Base58 (`bs58::encode(..).into_string()`). EVM compares raw bytes (`matches_evm_raw`); case-sensitive EIP-55 is a stack `[u8; 40]` after one `hex::encode`.
+Hot loop is `search::<C>` / `search_hybrid`, no `dyn`. Solana, Bitcoin, TON and Monero `matches_raw` encode into stack buffers (Solana: `bs58::encode(..).into(&mut [u8; 44])`). EVM compares raw bytes (`matches_evm_raw`); case-sensitive EIP-55 is a stack `[u8; 40]` (`hex::encode_to_slice`). `search_cpu_step` zeroizes every non-matching phrase.

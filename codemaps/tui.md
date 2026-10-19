@@ -61,7 +61,7 @@ CSV open/header failure → stays Configuring: no Rayon pool, no GPU thread
 | `gpu_health` | `Arc<GpuHealth>` | fault cell + `seeds_delivered`; fresh per `start_search` |
 | `gpu_rx` / `gpu_engines` | `Option<GpuRx>` / `Vec<GpuEngine>` | this run's seed channel clone; parked engines, never joined on UI thread |
 
-`App::new()` = `with_gpu_status(Unavailable("not probed"))`, so tests cannot spawn a GPU. `with_gpu_status` (`app.rs:121`) reads env once: `env_off = gpu_env_off(VANADDY_GPU, VANADDY_NO_GPU)`; `gpu_requested = !env_off && Ready`; env-off rewrites ONLY a `Ready` probe to `Disabled(UserOff)`. `gpu_env_off` (`app.rs:766`, pure): `VANADDY_NO_GPU` present, or `VANADDY_GPU` trimmed+lowercased in `0|off|false|no`.
+`App::new()` = `with_gpu_status(Unavailable("not probed"))`, so tests cannot spawn a GPU. `with_gpu_status` (`app.rs:121`) reads env once: `env_off = gpu_env_off(VANADDY_GPU, VANADDY_NO_GPU)`; `gpu_requested = !env_off && Ready`; env-off rewrites ONLY a `Ready` probe to `Disabled(UserOff)`. `gpu_env_off` (`app.rs:778`, pure): `VANADDY_NO_GPU` present, or `VANADDY_GPU` trimmed+lowercased in `0|off|false|no`.
 
 ## Field Layout
 
@@ -78,7 +78,7 @@ CSV open/header failure → stays Configuring: no Rayon pool, no GPU thread
 
 `is_text_field()` (`app.rs:205`): 2; 3 when both; last. `patterns()` (`app.rs:216`) → `(prefix, suffix)`: StartsWith `(prefix,"")`, EndsWith `("",suffix)`, both `(prefix,suffix)`; feeds `total_vanity_chars`, `validate`, `start_search`.
 
-## Key Handling (`app.rs:785`)
+## Key Handling (`app.rs:797`)
 
 Order: non-`Press` ignored → help open: any key closes → `Ctrl+C` (Searching: `stop_search`; else quit) → `h` opens help if Searching or not a text field → dispatch by state.
 
@@ -92,19 +92,19 @@ Order: non-`Press` ignored → help open: any key closes → `Ctrl+C` (Searching
 | Threads (last) | ASCII digits, max 3 chars, `Backspace` |
 | Any (Configuring) | `Tab/Down` next, `BackTab/Up` prev (both clear error), `Enter` validate → `start_search` or error, `q` quit (non-text) |
 
-Searching (`app.rs:1001`): `Up/Down` move `selected_match` (clamped), `q` stop + quit. `gpu_requested` survives chain changes.
+Searching (`app.rs:1013`): `Up/Down` move `selected_match` (clamped), `q` stop + quit. `gpu_requested` survives chain changes.
 
-## Validation (`app.rs:344`)
+## Validation (`app.rs:347`)
 
 1. Each active pattern: empty → `Vanity string cannot be empty`; `s.len() > max_vanity()` → `Must be 1-N characters`; char outside `charset()` → `'X' is not valid for this chain`. Suffix in both mode: `Suffix cannot be empty` / `Suffix must be …`.
 2. Threads: parse fail → `Invalid thread count`; outside `1..=2*num_cpus::get()` → `Threads must be 1-N`. Then `validated_gpu = gpu_effective()` — advisory, never an `Err`.
 
-`gpu_effective()` (`app.rs:196`): `gpu_requested && status ∈ {Ready, Initializing, Running} && chain == Evm`. `detect_optimal_threads` (`app.rs:781`): `get_physical().min(get())`.
+`gpu_effective()` (`app.rs:196`): `gpu_requested && status ∈ {Ready, Initializing, Running} && chain == Evm`. `detect_optimal_threads` (`app.rs:793`): `get_physical().min(get())`.
 
 ## Search Lifecycle
 
 ```
-start_search (app.rs:388):
+start_search (app.rs:391):
     reap finished engines: extract_if(is_finished).for_each(reap)   // non-blocking
     spawn_gpu = validated_gpu && gpu_engines.is_empty()
         validated_gpu && !spawn_gpu → error "GPU: previous session winding down — this run is CPU only"
@@ -120,8 +120,9 @@ start_search (app.rs:388):
     else gpu_rx = None
     Rayon pool(N).spawn: (0..N).into_par_iter → chain.search(&matcher,&stop,&counter,&tx,gpu_rx,&health); drop(tx)
 
-stop_search (app.rs:512):
-    stop = true; thread_pool = None (code comment says "join"; rayon-core 1.12 ThreadPool::drop only signals, never blocks)
+stop_search (app.rs:515):
+    stop = true; thread_pool = None  // rayon drop only signals, never joins
+    rx.iter() into a fresh channel   // ends when the job's only Sender drops = every worker returned
     drain_matches                    // queued matches still hit the CSV
     rx = None; gpu_rx = None         // producer wake-path #2
     signal_stop each engine          // no join
@@ -129,9 +130,9 @@ stop_search (app.rs:512):
     csv_file = None; state = Configuring
 ```
 
-`shutdown_gpu(deadline)` (`app.rs:571`): signal all, `gpu_rx = None`, reap finished every 5 ms until empty or deadline, then `clear()` (abandon; `GpuEngine::drop` must not join). `disable_gpu(reason)` (`app.rs:599`): `Disabled(reason)`, `gpu_requested = validated_gpu = false`, `gpu_rx = None` — sticky for the process.
+`shutdown_gpu(deadline)` (`app.rs:585`): signal all, `gpu_rx = None`, reap finished every 5 ms until empty or deadline, then `clear()` (abandon; `GpuEngine::drop` must not join). `disable_gpu(reason)` (`app.rs:613`): `Disabled(reason)`, `gpu_requested = validated_gpu = false`, `gpu_rx = None` — sticky for the process.
 
-`drain_matches` (`app.rs:606`), every tick:
+`drain_matches` (`app.rs:620`), every tick:
 
 1. Fault: `gpu_health.disable` set, status not `Disabled` → `disable_gpu(take_reason() or Panicked)`.
 2. Refresh: `gpu_rx` live, not `Disabled` → `gpu_status = gpu_engines.last().status()` (`Initializing` → `Running`). Quiet exit: Searching, `gpu_rx` live, no fault, any engine finished → `disable_gpu(Panicked)`.
@@ -141,11 +142,11 @@ stop_search (app.rs:512):
 
 | Item | Detail |
 |------|--------|
-| `CSV_PATH` (`app.rs:698`) | `"vanity_wallets.csv"` |
-| `open_csv_secure(path)` (`app.rs:709`) | create+append; `#[cfg(unix)]` `.mode(0o600)`, then `set_permissions(path, 0o600)` |
+| `CSV_PATH` (`app.rs:712`) | `"vanity_wallets.csv"` |
+| `open_csv_secure(path)` (`app.rs:723`) | create+append; `#[cfg(unix)]` `.mode(0o600)`, then `file.set_permissions(0o600)` (fchmod on the handle; error propagates) |
 | Header | `Chain, Address, Private Key (hex), Seed Phrase`; only when file len is 0 |
-| `write_match_row(file, &Match)` (`app.rs:736`) | `[chain, address, secret_hex, mnemonic]` → `write_row` (`app.rs:741`: `csv::WriterBuilder` `has_headers(false)`, one record, flush) |
-| `append_match_row(path, &Match)` (`app.rs:750`) | `open_csv_secure` + `write_match_row`; the no-handle fallback |
+| `write_match_row(file, &Match)` (`app.rs:748`) | `[chain, address, secret_hex, mnemonic]` → `write_row` (`app.rs:753`: `csv::WriterBuilder` `has_headers(false)`, one record, flush) |
+| `append_match_row(path, &Match)` (`app.rs:762`) | `open_csv_secure` + `write_match_row`; the no-handle fallback |
 
 0600 re-asserted per open, not per row. Trust boundary is upstream: a GPU candidate becomes a `Match` only after `verify::verify_gpu`.
 
@@ -157,11 +158,11 @@ stop_search (app.rs:512):
 | `GPU rate:` (inserted at index 2) | `gpu_stats_line`, see Render Layout |
 | `Matches:` / `Elapsed:` | `total_matches` (green if > 0) / `{secs}s` |
 | `Expected:` | `1 in effective_alphabet_size().powi(total_vanity_chars)`; absent when no vanity |
-| `ETA:` | `projected_seconds`: live `count / max(secs, 0.5)` (≥ 1) once started; else `estimated_rate` |
+| `ETA:` | `projected_seconds`: live `count / max(secs, 0.5)` (≥ 1) while `state == Searching`; else `estimated_rate` (`start_time` outlives the search) |
 
 `stats_height` = 4 + Expected? + ETA? + GPU row? + 2 borders. `effective_alphabet_size` (sensitive / insensitive): Solana/Monero 58/33, EVM 32/16, Bitcoin 32, TON 64/38.
 
-`single_thread_rate`: Solana 3470, EVM 3115, Bitcoin 3115, TON 38.4, Monero 28600. `estimated_rate`: `threads = thread_count.parse::<f64>().unwrap_or(1).max(1)`; with `gpu_effective()`: `13_600 + (threads - min(13_600 × 50.5e-6, threads)) × per_thread` (`EVM_GPU_SEEDS_PER_SEC`, `EVM_GPU_TAIL_SECS`). Pre-search only; `per_thread × threads` is already ~1.6× optimistic on 4P+4E. `gpu_measured_rate` (`app.rs:327`): `(seeds_delivered / max(secs, 0.5), round(min(gpu,total)/total × 100))`; `(0,0)` before start. Measured, never modelled. `format_count`: raw < 1000, then `.1` K/M/B/T. `format_duration`: `—` (non-finite/negative), `< 1s`, `Ns`, `Nm Ns`, `Nh Nm`, `Nd Nh`, `N.Ny`, `>100y`.
+`single_thread_rate`: Solana 3470, EVM 3115, Bitcoin 3115, TON 38.4, Monero 28600. `estimated_rate`: `threads = thread_count.parse::<f64>().unwrap_or(1).max(1)`; with `gpu_effective()`: `13_600 + (threads - min(13_600 × 50.5e-6, threads)) × per_thread` (`EVM_GPU_SEEDS_PER_SEC`, `EVM_GPU_TAIL_SECS`). Used whenever no search runs; `per_thread × threads` is already ~1.6× optimistic on 4P+4E. `gpu_measured_rate` (`app.rs:330`): `(seeds_delivered / max(secs, 0.5), round(min(gpu,total)/total × 100))`; `(0,0)` before start. Measured, never modelled. `format_count`: raw < 1000, then `.1` K/M/B/T. `format_duration`: `—` (non-finite/negative), `< 1s`, `Ns`, `Nm Ns`, `Nh Nm`, `Nd Nh`, `N.Ny`, `>100y`.
 
 ## Render Layout (`ui.rs:14`)
 
@@ -193,6 +194,6 @@ Match table (`ui.rs:447`): `#`, `Chain`, `Address` (cyan bold); widths 4 / 10 / 
 
 ## Tests
 
-- `app::tests` lifecycle: `start_stop_restart_does_not_leak_threads`, `stop_search_releases_everything_and_never_blocks_the_ui_thread`, `start_search_spawns_no_second_engine_while_one_winds_down`, `stop_search_drains_matches_still_queued_at_stop_time`, `stop_search_flags_a_replaced_or_deleted_csv_and_nothing_else`.
+- `app::tests` lifecycle: `start_stop_restart_does_not_leak_threads`, `stop_search_releases_everything_and_never_blocks_the_ui_thread`, `start_search_spawns_no_second_engine_while_one_winds_down`, `stop_search_drains_matches_still_queued_at_stop_time`, `stop_search_waits_for_a_send_already_past_the_stop_check`, `projected_seconds_after_stop_estimates_the_current_config_not_the_last_run`, `stop_search_flags_a_replaced_or_deleted_csv_and_nothing_else`.
 - CSV: `open_csv_secure_reasserts_0600_on_preexisting_0644`, `held_open_csv_file_takes_every_row_and_stays_0600`, `drain_falls_back_to_the_path_when_no_file_is_held`, `a_failed_csv_write_is_counted_and_never_evicts_the_only_copy`, `match_cap_evicts_oldest_and_total_keeps_counting`.
 - GPU: `gpu_field_*`, `gpu_effective_requires_user_device_and_evm`, `validate_never_returns_err_for_a_gpu_reason`, `mismatch_disables_gpu_and_leaves_app_running`, `drain_matches_flags_a_quiet_gpu_exit_only_on_a_live_faultless_run`, `gpu_env_off_*`; `main::tests::probe_result_reaches_the_app`. `ui::tests`: `one_gpu_row_per_frame_never_two`, `stats_height_counts_the_gpu_row_exactly_once`, `every_pane_survives_an_80_by_24_terminal`, `help_popup_documents_gpu_offload_and_nothing_is_clipped`, `format_count_cases`, `format_duration_cases`.
