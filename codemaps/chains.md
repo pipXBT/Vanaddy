@@ -1,193 +1,150 @@
-> Generated: 2026-08-24 | Token-lean format for LLM context
+> Generated: 2026-10-19 | Token-lean format for LLM context | Source: update-codemaps
 
 # Chains
 
-The `Chain` trait (`src/chains/mod.rs:23`) is the per-chain contract. `ChainKind` (`mod.rs:48`) is the runtime enum picked by the user; its `search()` method (`mod.rs:84`) dispatches once at thread-spawn into the monomorphized `search::<C: Chain>` hot loop (`mod.rs:101`).
+The `Chain` trait (`src/chains/mod.rs:31`) is the per-chain contract. `ChainKind` (`mod.rs:75`) is the runtime enum. `ChainKind::search` (`mod.rs:115`) matches once at thread spawn: EVM goes to `search_hybrid::<Evm>`; the other four call `search::<C>` and ignore the GPU arguments. No `dyn`.
 
 ## `Chain` Trait
 
 ```rust
 pub trait Chain: Send + Sync + 'static {
-    const LABEL: &'static str;          // "Solana", "EVM", ...
-    const CHARSET: &'static str;        // valid vanity chars for this chain
-    const MAX_VANITY: usize;            // upper bound on prefix/suffix length
-    const BATCH: usize = 1;             // candidates emitted per generate_batch call
-
+    const LABEL: &'static str;
+    const CHARSET: &'static str;
+    const MAX_VANITY: usize;
+    const BATCH: usize = 1;
     type AddressBytes: AsRef<[u8]>;
     type SecretRaw;
-
     fn generate() -> (Self::AddressBytes, Self::SecretRaw, String);
-    /// Default: one generate(). PBKDF2-bound chains override with LANES seeds at once.
-    fn generate_batch(mut emit: impl FnMut(Self::AddressBytes, Self::SecretRaw, String)) {
-        let (addr, secret, phrase) = Self::generate();
-        emit(addr, secret, phrase);
-    }
+    fn generate_batch(mut emit: impl FnMut(...)) { /* one generate() */ }
     fn encode_address(bytes: &Self::AddressBytes) -> String;
     fn encode_secret(raw: &Self::SecretRaw) -> String;
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool;
 }
 ```
 
-`Match` (chains/mod.rs:16) is the channel payload — a struct, not a tuple:
+`Bip39GpuChain` (`mod.rs:65`): `from_gpu_seed(&[u8; 64])` and `verify(address, secret_hex, phrase) -> bool`. Only `Evm` implements it. Solana and Bitcoin already have a private `from_seed` of that shape; TON (own mnemonic) and Monero (no BIP-39) cannot.
+
+`Match` (`mod.rs:16`) is the channel payload:
+
 ```rust
-pub struct Match { chain, address, secret_hex, mnemonic: String }
+pub struct Match { chain, address, secret_hex, mnemonic: String, verified: Verified }
 ```
+
+`verified` is `Verified::cpu_reference()` on the CPU path and `Verified::gpu_reverified()` after `verify_gpu`. Not `Clone`.
 
 ## Per-Chain Summary
 
-| Chain | LABEL | CHARSET | MAX_VANITY | BATCH | AddressBytes | SecretRaw | Vanity skips |
-|-------|-------|---------|-----------|-------|--------------|-----------|--------------|
-| Solana | "Solana" | Base58 (58) | 9 | 4 (`LANES`) | `[u8; 32]` | `ed25519_dalek::SigningKey` | none |
-| EVM | "EVM" | hex (0-9, a-f, A-F) | 8 | 4 | `[u8; 20]` | `secp256k1::SecretKey` | `0x` (encoded), 0 raw |
-| Bitcoin | "Bitcoin" | Bech32 (32) | 8 | 4 | `[u8; 20]` (HASH160) | `secp256k1::SecretKey` | `bc1q` (4 chars) |
-| TON | "TON" | Base64url (64) | 4 | 4 | `[u8; 36]` | `ed25519_dalek::SigningKey` | `UQ` (2 chars) |
-| Monero | "Monero" | Base58 (58) | 4 | 1 (default) | `[u8; 65]` | `MoneroKeypair` (zeroized) | `4` (1 char) |
+| Chain | LABEL | CHARSET | MAX | BATCH | AddressBytes | SecretRaw | Vanity skips |
+|-------|-------|---------|-----|-------|--------------|-----------|--------------|
+| Solana | "Solana" | Base58 (58) | 9 | 4 | `[u8; 32]` | `SigningKey` | none |
+| EVM | "EVM" | hex | 8 | 4 | `[u8; 20]` | `SecretKey` | `0x` display only |
+| Bitcoin | "Bitcoin" | Bech32 (32) | 8 | 4 | `[u8; 20]` HASH160 | `SecretKey` | `bc1q` (4 chars) |
+| TON | "TON" | Base64url (64) | 4 | 4 | `[u8; 36]` | `SigningKey` | `UQ` (2 chars) |
+| Monero | "Monero" | Base58 (58) | 4 | 1 | `[u8; 65]` | `MoneroKeypair` | `4` (1 char) |
+
+Bitcoin vanity skips `bc1q`. TON vanity skips `UQ`. Monero vanity skips `4`. Suffix checks use the full encoded address, including that fixed prefix.
 
 ## Batch Pattern (Solana / EVM / Bitcoin)
 
-Each of the three BIP-39 chains has a private `from_seed(&[u8; 64]) -> (AddressBytes, SecretRaw)` (`solana.rs:13`, `evm.rs:36`, `bitcoin.rs:46`) used by both paths:
+Private `from_seed(&[u8; 64])` (`solana.rs:13`, `evm.rs:36`, `bitcoin.rs:76`) is shared by `generate` (`derive_seed` / ring) and `generate_batch` (`derive_seeds` / 4 lanes). `Evm::from_gpu_seed` is `from_seed`. `generate_batch_emits_lane_count_candidates_matching_single_path` re-derives each emitted candidate through the single path.
 
-```rust
-fn generate() {                       // single candidate, ring PBKDF2
-    let m = Mnemonic::new(Words12, English);
-    let (addr, secret) = Self::from_seed(&derive_seed(&m));
-    (addr, secret, m.phrase().to_string())
-}
-fn generate_batch(mut emit) {         // LANES candidates, 4-lane hardware PBKDF2
-    let mnemonics: [Mnemonic; LANES] = array::from_fn(|_| Mnemonic::new(Words12, English));
-    let seeds = derive_seeds(&mnemonics);
-    for (m, seed) in mnemonics.iter().zip(seeds.iter()) {
-        let (addr, secret) = Self::from_seed(seed);
-        emit(addr, secret, m.phrase().to_string());
-    }
-}
-```
-
-`generate_batch_emits_lane_count_candidates_matching_single_path` (per chain) re-derives every emitted candidate via `Mnemonic::from_phrase → derive_seed → from_seed` and requires identical address + secret.
+TON batch is `generate_ton_wallets()` (filter, then one 4-lane 100k PBKDF2). Monero uses the default `generate_batch` (`BATCH = 1`).
 
 ## Match Logic Pattern
 
-All four Base58/Bech32/Base64 chains share the same shape in `matches_raw`:
+`prefix_matches` / `suffix_matches` stay allocation-free byte compares (`eq_ignore_ascii_case` when case-insensitive). What changed is the encode in front of them:
 
-```rust
-let addr = Self::encode_address(bytes);
-let vanity_target = if addr.len() > FIXED_PREFIX_LEN { &addr[FIXED_PREFIX_LEN..] } else { "" };
-matcher.prefix_matches(vanity_target) && matcher.suffix_matches(&addr)
-```
+| Chain | `matches_raw` encode | Prefix target | Suffix target |
+|-------|----------------------|---------------|---------------|
+| Solana | `bs58::encode().into_string()` (heap) | full addr | full addr |
+| EVM | no string; `matches_evm_raw` on `[u8; 20]` | raw bytes from index 0 | raw bytes |
+| Bitcoin | `expand_5bit` early-reject, then `encode_to_fmt` into stack `AddrBuf` (`[u8; 64]`) | `&addr[4..]` | full addr |
+| TON | `URL_SAFE_NO_PAD.encode_slice` into `[u8; 48]` | `&encoded[2..]` | full encoded |
+| Monero | `encode_address_into` → `[u8; 95]` | `&addr[1..]` | full addr |
 
-`FIXED_PREFIX_LEN` is per-chain (Bitcoin 4, TON 2, Monero 1; Solana 0 — uses `&addr` directly for both). EVM is the outlier — see below. Bitcoin additionally runs the 5-bit fast path before encoding.
+Bitcoin vanity skips `bc1q`. TON vanity skips `UQ`. Monero vanity skips `4`. Empty prefix/suffix is a pass. A too-short address yields `""` and fails a non-empty prefix.
+
+EVM case-sensitive mode, after the byte filter, builds `eip55_encode` → `[u8; 40]` and compares the user's exact prefix/suffix. It does not call `prefix_matches` / `suffix_matches`. `eip55_encode` still `hex::encode`s the lowercase form (one heap string) before the stack checksum.
+
+Bitcoin's 5-bit fast path compares `expand_5bit` (`[u8; 32]`, no `Vec`) to `Matcher::bech32_prefix_5bit` and returns before the stack encode on a prefix miss. A suffix-only search still encodes. `encode_address` (match display / CSV) still uses `bech32::encode` and allocates; only `matches_raw` is stack.
 
 ## Solana — `chains/solana.rs`
 
 | Step | Detail |
 |------|--------|
-| Mnemonic | BIP-39 12-word English (`Mnemonic::new(Words12)`) |
-| Seed | `seed::derive_seed` (single) / `seed::derive_seeds` (batch) → PBKDF2-HMAC-SHA512 × 2048 |
-| Derivation | `from_seed`: `slip10_derive_ed25519` at `PHANTOM_SOLANA_PATH = m/44'/501'/0'/0'` (all hardened) |
-| Address | 32-byte ed25519 pubkey, Base58-encoded |
-| Secret format | 64-byte hex: `secret_key (32) || public_key (32)` (Phantom keypair format) |
-| Match | `matcher.prefix_matches(&addr) && matcher.suffix_matches(&addr)` |
+| Mnemonic | BIP-39 12-word English |
+| Derivation | `slip10_derive_ed25519` at `PHANTOM_SOLANA_PATH` (all hardened) |
+| Address | 32-byte pubkey, Base58 |
+| Secret | 64-byte hex: secret (32) \|\| pubkey (32) |
+| Match | heap Base58, then prefix and suffix on the full string |
 | Pinned | "abandon...about" → `HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk` |
 
 ## EVM — `chains/evm.rs`
 
 | Step | Detail |
 |------|--------|
-| Mnemonic | BIP-39 12-word English |
-| Derivation | `from_seed`: `bip32_derive_secp256k1` at `EVM_PATH = m/44'/60'/0'/0/0`, pubkey via `PublicKey::from_secret_key_global` |
-| Address | `Keccak256(serialize_uncompressed()[1..])[12..]` → 20 bytes, displayed as `0x` + hex |
-| Secret format | 32-byte hex (`SecretKey::secret_bytes()`) |
-| Fast-path | `Matcher::matches_evm_raw` checks `evm_prefix`/`evm_suffix` byte tuples (full bytes + odd nibble). Does NOT use the `prefix_matches`/`suffix_matches` helpers. |
-| Case-sensitive | Computes `eip55_encode(addr) → [u8; 40]` then compares prefix/suffix chars (mixed case) |
-| Pinned | EIP-55 spec vectors `5aAeb6053F3E94...`, `fB6916095ca1df...`; BIP-44 "abandon...about" → `0x9858EfFD232B4033E47d90003D41EC34EcaEda94` |
+| Derivation | `bip32_derive_secp256k1` at `EVM_PATH` = m/44'/60'/0'/0/0 |
+| Address | `Keccak256(uncompressed[1..])[12..]` → 20 bytes, display `0x` + hex |
+| Secret | 32-byte hex |
+| Fast-path | `Matcher::matches_evm_raw` (full bytes + odd nibble) |
+| GPU | `from_gpu_seed` = `from_seed`. `verify` re-derives with `derive_seed` (ring) and compares encoded address + secret |
+| Pinned | EIP-55 `5aAeb6053F3E94...`, `fB6916095ca1df...`; BIP-44 → `0x9858EfFD232B4033E47d90003D41EC34EcaEda94` |
 
-`eip55_encode` (line 15) hashes the lowercase hex form, then uppercases hex letters whose corresponding nibble of `Keccak256(lower)` is ≥ 8.
+`eip55_encode` (`evm.rs:15`): uppercase a hex letter when the matching nibble of `Keccak256(lowercase)` is ≥ 8.
 
 ## Bitcoin — `chains/bitcoin.rs`
 
 | Step | Detail |
 |------|--------|
-| Mnemonic | BIP-39 12-word English |
-| Derivation | `from_seed`: `bip32_derive_secp256k1` at `BTC_BIP84_PATH = m/84'/0'/0'/0/0` |
-| Address | HASH160 (`Ripemd160(Sha256(PublicKey::serialize()))`, 33-byte compressed key) → 20 bytes |
-| Encoding | Bech32 P2WPKH: hrp=`bc`, witness version 0, program=HASH160 → `bc1q...` |
-| Secret format | 32-byte hex |
-| Fast-path | `expand_5bit(bytes) → [u8; 32]` (stack-buffer 5-bit groups) compared to `Matcher::bech32_prefix_5bit` before string encode |
-| Final match | `matcher.prefix_matches(vanity_target) && matcher.suffix_matches(&addr)` (vanity_target = `&addr[4..]`) |
-| Pinned | "abandon...about" at m/84'/0'/0'/0/0 → `bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu` |
+| Derivation | `bip32_derive_secp256k1` at `BTC_BIP84_PATH` = m/84'/0'/0'/0/0 |
+| Address | HASH160 of the 33-byte compressed pubkey |
+| Encoding | Bech32 P2WPKH, hrp `bc`, witness version 0 → `bc1q...` (42 chars) |
+| Secret | 32-byte hex |
+| Match | Bitcoin vanity skips `bc1q`. Stack `AddrBuf` + `encode_to_fmt`. Prefix on `&addr[4..]`, suffix on the full address |
+| Pinned | "abandon...about" → `bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu` |
 
-`expand_5bit` is a hand-rolled bits→u5 packer (no Vec); cross-checked against `bytes.to_base32()` in tests.
+`matches_raw_agrees_with_encode_address_for_one_char_prefix_and_suffix` pins the stack path against `encode_address`.
 
 ## TON — `chains/ton.rs`, `ton_cell.rs`, `ton_mnemonic.rs`
 
 | Step | Detail |
 |------|--------|
-| Mnemonic | TON-native 24-word (BIP-39 wordlist, **non-BIP-39** derivation) |
+| Mnemonic | TON-native 24-word (BIP-39 wordlist, not BIP-39 derivation) |
 | Entropy | `HMAC-SHA512(key=phrase, msg="")` |
-| Acceptance | `pbkdf2(entropy, "TON seed version", 390, 64)[0] == 0` (~1/256 of phrases) |
+| Filter | `pbkdf2(entropy, "TON seed version", 390, 64)[0] == 0` (~1/256) |
 | Seed | `pbkdf2(entropy, "TON default seed", 100_000, 32)` |
-| Single path | `generate_ton_wallet()` (`ton_mnemonic.rs:57`): loop until accepted, ring PBKDF2 |
-| Batch path | `generate_ton_wallets() -> [(String, SigningKey); LANES]` (`:88`): phase 1 runs the 390-iter filter on 4 trial phrases at a time until 4 are accepted; phase 2 runs the 100k-iter PBKDF2 for all 4 in one 4-lane call |
-| Address | `Ton::address_bytes(pubkey)` (`ton.rs:46`): `tag(0x51 = UQ non-bounceable mainnet) \|\| workchain(0x00) \|\| account_id(32) \|\| crc16_xmodem(2)` |
-| `account_id` | Representation hash of W5 (`wallet-v5r1`) StateInit cell |
-| Encoding | URL-safe base64 (no pad) — always 48 chars, starts with `UQ` |
-| Final match | `matcher.prefix_matches(vanity_target) && matcher.suffix_matches(&encoded)` (vanity_target = `&encoded[2..]`) |
-| Pinned | A 24-word phrase yields exact Tonkeeper-displayed `UQAkFCMtkN0Q1TNP6Gk9SqYWsBFc6Aglwckj6ES4AeBEzWja`; batch wallets must equal `mnemonic_to_signing_key(phrase)` and pass the filter |
+| Address | tag `0x51` (UQ) \|\| workchain `0x00` \|\| W5 account_id (32) \|\| crc16-xmodem (2) |
+| Encoding | URL-safe base64, no pad, 48 chars, starts with `UQ` |
+| Match | TON vanity skips `UQ`. `user_friendly_ascii` writes `[u8; 48]`. Prefix on `&encoded[2..]`, suffix on the full string |
+| Pinned | known phrase → `UQAkFCMtkN0Q1TNP6Gk9SqYWsBFc6Aglwckj6ES4AeBEzWja` |
 
-Why slow: ~256 trial phrases × 390 iters + 100k iters per wallet → ~26 ms/wallet (~38/s/thread) with 4-lane PBKDF2; was ~51 ms single-stream.
+`WALLET_V5R1_CODE.max_depth` = 6, hash `20834b7b...52d2b72f`. `W5_MAINNET_WALLET_ID` = `0x7FFF_FF11`. Data cell is 322 bits: sig-allowed, seqno 0, wallet_id, pubkey, empty extensions dict. v3r2 helpers are `#[cfg(test)]` only.
 
-### W5 cell hashing (`ton_cell.rs`)
-
-| Constant | Value | Visibility |
-|----------|-------|-----------|
-| `WALLET_V5R1_CODE.hash` | `20834b7b...52d2b72f` (root cell of `@ton/ton` v5r1 BOC) | `pub` |
-| `WALLET_V5R1_CODE.max_depth` | 6 | `pub` |
-| `W5_MAINNET_WALLET_ID` | `0x7FFF_FF11` (= `global_id(-239) ^ context_id` for mainnet defaults) | `pub` |
-| `WALLET_V3R2_CODE`, `wallet_v3r2_*` | (unchanged values) | **`#[cfg(test)]`-only** — regression coverage of the cell-hashing pipeline; no production caller |
-
-`Cell::repr` = `refs_desc || bits_desc || augmented_data || for_each_ref(max_depth_be) || for_each_ref(hash)`. `Cell::hash` = `SHA-256(repr)`.
-
-`wallet_v5r1_data_cell` packs **322 bits** MSB-first:
-`is_signature_allowed(1=true)(1) || seqno(u32=0) || wallet_id(i32) || pubkey(u256) || extensions_dict(0=empty)(1)`.
-
-## Monero — `chains/monero.rs`, `monero_wordlist.rs`
+## Monero — `chains/monero.rs`
 
 | Step | Detail |
 |------|--------|
-| Mnemonic | 25-word Electrum-style (24 from spend_sec + 1 checksum) — **not BIP-39** |
-| Wordlist | `MONERO_WORDLIST: [&str; 1626]` |
-| `spend_sec` | `Scalar::from_bytes_mod_order(OsRng.fill_bytes(32))` |
-| `view_sec` | `Scalar::from_bytes_mod_order(Keccak256(spend_sec))` |
-| Pubkeys | `spend_pub = spend_scalar · G`, `view_pub = view_scalar · G` (compressed Edwards) |
-| Keccak | Original Keccak-256 (`tiny_keccak::Keccak::v256`), **not** FIPS-202 SHA3-256 |
-| Address bytes | 65 = `network(0x12) \|\| spend_pub(32) \|\| view_pub(32)` |
-| Encoding | Append 4-byte Keccak checksum → 69 bytes → Monero Base58 (8-byte blocks → 11 chars each) |
-| Final | 95-char Base58 starting with `4` |
-| Secret format | `"{spend_hex}:{view_hex}"` (importable via `monero-wallet-cli --generate-from-keys`) |
-| Final match | `matcher.prefix_matches(vanity_target) && matcher.suffix_matches(&addr)` (vanity_target = `&addr[1..]`) |
-| Batch | default `generate_batch` (BATCH = 1) — no PBKDF2 to amortize |
-| Zeroize | `MoneroKeypair: Zeroize + ZeroizeOnDrop` — discarded candidates wiped |
+| Mnemonic | 25-word Electrum (not BIP-39). `MONERO_WORDLIST` is 1626 words |
+| Keys | `spend_sec` random mod l; `view_sec` = keccak256(spend) mod l |
+| Keccak | `tiny_keccak::Keccak::v256`, not FIPS-202 SHA3-256 |
+| Address | 65 = `0x12` \|\| spend_pub \|\| view_pub; +4 checksum → 95-char Base58 starting with `4` |
+| Secret | `"{spend_hex}:{view_hex}"` |
+| Match | Monero vanity skips `4`. `encode_address_into` writes `[u8; 95]`. Prefix on `&addr[1..]`, suffix on the full address |
+| Zeroize | `MoneroKeypair: Zeroize + ZeroizeOnDrop` |
 
-`monero_seed_phrase` (line 55): for each of 8 little-endian u32 chunks, derive 3 wordlist indices via mod-1626 arithmetic; the 25th word is the first 3 chars of the 24 trimmed words CRC32-hashed mod 24.
+`monero_base58_encode` (CSV / tests) heap-wraps the same `monero_base58_encode_into` the hot path uses. 8-byte blocks → 11 chars (`BLOCK_SIZES`).
 
 ## Hot Loop
 
-`search::<C>` (`mod.rs:101`) is the only function that runs per-candidate:
+`search_cpu_step` (`mod.rs:137`) is the one CPU body:
 
 ```rust
-while !stop.load(Relaxed) {
-    C::generate_batch(|addr_bytes, secret_raw, phrase| {
-        if C::matches_raw(matcher, &addr_bytes) {
-            let _ = tx.send(Match {
-                chain: C::LABEL.to_string(),
-                address: C::encode_address(&addr_bytes),
-                secret_hex: C::encode_secret(&secret_raw),
-                mnemonic: phrase,
-            });
-        }
-    });
-    counter.fetch_add(C::BATCH as u64, Relaxed);
-}
+C::generate_batch(|addr, secret, phrase| {
+    if C::matches_raw(matcher, &addr) {
+        tx.send(Match { ..., verified: Verified::cpu_reference() });
+    }
+});
+counter.fetch_add(C::BATCH);
 ```
 
-`encode_address` and `encode_secret` are only called on matches; the per-candidate cost is `generate_batch()` / `BATCH` + `matches_raw()`. `chains::tests::search_counts_whole_batches_and_honours_stop` pins the counter granularity and stop behaviour.
+`search` loops that until `stop`. `search_hybrid` (`mod.rs:173`) `try_recv`s a `SeedBlock` first. `drain_gpu_block` checks `stop` every `GPU_CHUNK_BATCHES` (16) batches, calls `from_gpu_seed` only to filter, and on a hit `verify_gpu`s from the 16-byte entropy. Agreement sends the CPU-derived row with `gpu_reverified()`. Disagreement raises `VerifyMismatch` and drops the candidate. The GPU seed is never a CSV field. A verified hit encodes the CPU address and secret. A mismatch still `encode_address`es the GPU bytes into `VerifyMismatch`, then drops the candidate.

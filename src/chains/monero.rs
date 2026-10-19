@@ -80,28 +80,52 @@ pub fn monero_seed_phrase(spend_sec: &[u8; 32]) -> String {
 }
 
 /// Monero Base58 encodes in 8-byte blocks → 11 chars each (last block may be shorter).
-fn monero_base58_encode(data: &[u8]) -> String {
+/// Writes into `out` (no heap) and returns the number of bytes written.
+/// `out` must hold at least `(data.len() + 7) / 8 * 11` bytes.
+fn monero_base58_encode_into(data: &[u8], out: &mut [u8]) -> usize {
     const ALPHABET: &[u8] =
         b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     const BLOCK_SIZES: &[usize] = &[0, 2, 3, 5, 6, 7, 9, 10, 11];
 
-    let mut out = String::new();
+    let mut written = 0;
     for chunk in data.chunks(8) {
         let mut num: u128 = 0;
         for &b in chunk {
             num = num * 256 + b as u128;
         }
         let enc_len = BLOCK_SIZES[chunk.len()];
-        let mut buf = vec![b'1'; enc_len];
+        // Longest block is 11 chars. Pad with '1' (alphabet index 0), same as before.
+        let mut block = [b'1'; 11];
         let mut i = enc_len;
         while num > 0 && i > 0 {
             i -= 1;
-            buf[i] = ALPHABET[(num % 58) as usize];
+            block[i] = ALPHABET[(num % 58) as usize];
             num /= 58;
         }
-        out.push_str(std::str::from_utf8(&buf).unwrap());
+        out[written..written + enc_len].copy_from_slice(&block[..enc_len]);
+        written += enc_len;
     }
-    out
+    written
+}
+
+#[cfg(test)]
+fn monero_base58_encode(data: &[u8]) -> String {
+    let cap = (data.len() + 7) / 8 * 11;
+    let mut buf = vec![0u8; cap];
+    let n = monero_base58_encode_into(data, &mut buf);
+    buf.truncate(n);
+    String::from_utf8(buf).unwrap()
+}
+
+/// 69-byte payload (65-byte address + 4-byte checksum) encodes to 95 chars.
+const MONERO_ADDRESS_LEN: usize = 95;
+
+fn encode_address_into(bytes: &[u8; 65], out: &mut [u8; MONERO_ADDRESS_LEN]) -> usize {
+    let mut full = [0u8; 69];
+    full[..65].copy_from_slice(bytes);
+    let checksum = keccak256(bytes);
+    full[65..].copy_from_slice(&checksum[..4]);
+    monero_base58_encode_into(&full, out)
 }
 
 impl Chain for Monero {
@@ -130,11 +154,9 @@ impl Chain for Monero {
     }
 
     fn encode_address(bytes: &Self::AddressBytes) -> String {
-        let mut full = [0u8; 69];
-        full[..65].copy_from_slice(bytes);
-        let checksum = keccak256(bytes);
-        full[65..].copy_from_slice(&checksum[..4]);
-        monero_base58_encode(&full)
+        let mut buf = [0u8; MONERO_ADDRESS_LEN];
+        let n = encode_address_into(bytes, &mut buf);
+        std::str::from_utf8(&buf[..n]).unwrap().to_owned()
     }
 
     fn encode_secret(raw: &Self::SecretRaw) -> String {
@@ -150,9 +172,11 @@ impl Chain for Monero {
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool {
         // Monero vanity applies after the leading "4" (mainnet network byte).
         const FIXED_PREFIX_LEN: usize = 1;
-        let addr = Monero::encode_address(bytes);
+        let mut buf = [0u8; MONERO_ADDRESS_LEN];
+        let n = encode_address_into(bytes, &mut buf);
+        let addr = std::str::from_utf8(&buf[..n]).unwrap();
         let vanity_target = addr.get(FIXED_PREFIX_LEN..).unwrap_or("");
-        matcher.prefix_matches(vanity_target) && matcher.suffix_matches(&addr)
+        matcher.prefix_matches(vanity_target) && matcher.suffix_matches(addr)
     }
 }
 
@@ -200,6 +224,33 @@ mod tests {
 
         let (payload, _, _) = Monero::generate();
         assert_prefix_suffix::<Monero>(ChainKind::Monero, &payload, 1, true);
+    }
+
+    #[test]
+    fn monero_matches_raw_agrees_with_encode_address() {
+        use super::super::super::matcher::Matcher;
+        use super::super::ChainKind;
+
+        let mut payload = [0u8; 65];
+        payload[0] = NETWORK_BYTE_MAINNET;
+        payload[1] = 0xAB;
+        payload[64] = 0xCD;
+
+        let addr = Monero::encode_address(&payload);
+        assert_eq!(addr.len(), 95);
+        assert!(addr.starts_with('4'));
+
+        let prefix = addr[1..2].to_string();
+        let suffix = addr[addr.len() - 1..].to_string();
+        let matcher = Matcher::new(prefix, suffix.clone(), true, ChainKind::Monero);
+        assert!(matcher.prefix_matches(&addr[1..]));
+        assert!(matcher.suffix_matches(&addr));
+        assert!(Monero::matches_raw(&matcher, &payload));
+
+        let missing = if addr.as_bytes()[1] == b'2' { "3" } else { "2" };
+        let missing_prefix = Matcher::new(missing.to_string(), suffix, true, ChainKind::Monero);
+        assert!(!matcher.prefix_matches(&addr[..1]));
+        assert!(!Monero::matches_raw(&missing_prefix, &payload));
     }
 
     #[test]

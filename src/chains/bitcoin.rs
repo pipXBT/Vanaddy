@@ -7,6 +7,7 @@ use bech32::{u5, ToBase32, Variant};
 use bip39::{Language, Mnemonic, MnemonicType};
 use ring::digest::{digest, SHA256};
 use ripemd::{Digest, Ripemd160};
+use std::fmt::{self, Write};
 
 pub struct Bitcoin;
 
@@ -39,6 +40,35 @@ fn expand_5bit(bytes: &[u8; 20]) -> [u8; 32] {
     debug_assert_eq!(bits, 0);
     debug_assert_eq!(i, 32);
     out
+}
+
+/// `fmt::Write` over a fixed buffer. bc1q P2WPKH addresses are 42 bytes.
+struct AddrBuf {
+    buf: [u8; 64],
+    len: usize,
+}
+
+impl AddrBuf {
+    fn new() -> Self {
+        Self { buf: [0; 64], len: 0 }
+    }
+
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.buf[..self.len]).expect("bech32 is ascii")
+    }
+}
+
+impl Write for AddrBuf {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let bytes = s.as_bytes();
+        let end = self.len + bytes.len();
+        if end > self.buf.len() {
+            return Err(fmt::Error);
+        }
+        self.buf[self.len..end].copy_from_slice(bytes);
+        self.len = end;
+        Ok(())
+    }
 }
 
 impl Bitcoin {
@@ -91,18 +121,27 @@ impl Chain for Bitcoin {
 
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool {
         // Fast-path: compare 5-bit expansion of HASH160 against user's Bech32 prefix.
+        let data_5bit = expand_5bit(bytes);
         if let Some(ref expected) = matcher.bech32_prefix_5bit {
-            if !expand_5bit(bytes).starts_with(expected) {
+            if !data_5bit.starts_with(expected) {
                 return false;
             }
         }
 
-        // Full encode for prefix + suffix string checks.
-        // Bitcoin vanity applies after "bc1q" (4 chars).
+        // One stack encode for prefix + suffix. Bitcoin vanity applies after "bc1q".
+        // HRP "bc" is already lowercase, so encode_to_fmt does not allocate it.
+        let mut data = [u5::try_from_u8(0).unwrap(); 33];
+        for (slot, group) in data[1..].iter_mut().zip(data_5bit) {
+            *slot = u5::try_from_u8(group).unwrap();
+        }
+        let mut buf = AddrBuf::new();
+        bech32::encode_to_fmt(&mut buf, "bc", &data, Variant::Bech32)
+            .expect("valid hrp")
+            .expect("bech32 fits");
         const FIXED_PREFIX_LEN: usize = 4;
-        let addr = Bitcoin::encode_address(bytes);
+        let addr = buf.as_str();
         let vanity_target = addr.get(FIXED_PREFIX_LEN..).unwrap_or("");
-        matcher.prefix_matches(vanity_target) && matcher.suffix_matches(&addr)
+        matcher.prefix_matches(vanity_target) && matcher.suffix_matches(addr)
     }
 }
 
@@ -134,6 +173,26 @@ mod tests {
         // "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu": "cr8" after "bc1q", "fyu".
         let (hash, _) = Bitcoin::from_seed(&derive_seed(&m));
         assert_prefix_suffix::<Bitcoin>(ChainKind::Bitcoin, &hash, 4, true);
+    }
+
+    #[test]
+    fn matches_raw_agrees_with_encode_address_for_one_char_prefix_and_suffix() {
+        use super::super::ChainKind;
+
+        let (bytes, _secret, _phrase) = Bitcoin::generate();
+        let addr = Bitcoin::encode_address(&bytes);
+        assert!(addr.starts_with("bc1q"), "vanity starts after bc1q");
+        assert_eq!(addr.len(), 42);
+        let prefix = addr[4..5].to_string();
+        let suffix = addr[addr.len() - 1..].to_string();
+
+        let matcher = Matcher::new(prefix.clone(), suffix.clone(), true, ChainKind::Bitcoin);
+        assert!(matcher.prefix_matches(&addr[4..]) && matcher.suffix_matches(&addr));
+        assert!(Bitcoin::matches_raw(&matcher, &bytes));
+
+        let absent = if prefix == "q" { "p" } else { "q" };
+        let reject = Matcher::new(absent.to_string(), suffix, true, ChainKind::Bitcoin);
+        assert!(!Bitcoin::matches_raw(&reject, &bytes));
     }
 
     #[test]

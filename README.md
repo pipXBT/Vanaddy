@@ -1,174 +1,111 @@
 # Vanaddy
 
-A multi-threaded, multi-chain vanity wallet address generator written in Rust.
+Vanity addresses for Solana, EVM, Bitcoin, TON, and Monero. One binary, a terminal UI, local key generation. The seed or private key it prints imports into the wallet named below.
 
-Generates wallet-compatible seed phrases and keypairs for five chains, each using the correct native derivation scheme so vanity addresses import directly into their respective wallets (Phantom, MetaMask, Tonkeeper, Monero CLI, etc.).
+EVM addresses are not tied to one network. The same key works on Ethereum, Base, Arbitrum, Optimism, Polygon, BSC, Avalanche, and any other EVM chain.
 
-EVM addresses are chain-agnostic — the same vanity address works on Ethereum, Base, Arbitrum, Optimism, Polygon, BSC, Avalanche, HyperEVM, and any other EVM chain.
+## Chains
 
-## Supported Chains
+| Chain | Address | Seed | Path | Imports into |
+|-------|---------|------|------|----------------|
+| Solana | Base58 | BIP-39, 12 words | SLIP-0010 `m/44'/501'/0'/0'` | Phantom, Solflare |
+| EVM | `0x` + hex | BIP-39, 12 words | BIP-44 `m/44'/60'/0'/0/0` | MetaMask, Rabby, any EVM wallet |
+| Bitcoin | `bc1q…` | BIP-39, 12 words | BIP-84 `m/84'/0'/0'/0/0` | Sparrow, Electrum, any BIP-84 wallet |
+| TON | `UQ…`, 48 chars | TON native, 24 words | wallet-v5r1 (W5) | Tonkeeper, MyTonWallet |
+| Monero | `4…`, 95 chars | 25-word Electrum | spend key random; view key = Keccak(spend) | `monero-wallet-cli --restore-deterministic-wallet`, Cake, Feather |
 
-- **Solana** — Ed25519 / Base58; BIP-39 12-word phrase; **Phantom-compatible** SLIP-0010 derivation at `m/44'/501'/0'/0'` (verified against SLIP-0010 spec vectors)
-- **EVM** — secp256k1 / `0x` + hex (Ethereum, Base, Arbitrum, Optimism, Polygon, BSC, Avalanche, HyperEVM, etc.); BIP-39 12-word phrase; BIP-44 `m/44'/60'/0'/0/0`; **EIP-55 checksum matching** when case-sensitive
-- **Bitcoin** — secp256k1 / Native SegWit Bech32 (`bc1q...`); BIP-39 12-word phrase; BIP-84 `m/84'/0'/0'/0/0`; vanity applies after `bc1q`
-- **TON** — Ed25519 / user-friendly Base64 (`UQ...`, non-bounceable mainnet); native TON 24-word mnemonic (not BIP-39); **wallet-v5r1 (W5)** addresses using proper TVM cell hashing per TON whitepaper §3.1.5 — verified against Tonkeeper's own computation via pinned round-trip vector. W5 is Tonkeeper's current default, so no "Versions" switch is needed when importing.
-- **Monero** — Ed25519 / Base58 (`4...`); **25-word Electrum-style seed phrase** (not BIP-39); standard spend/view key derivation; prefix matching only, and generation is intrinsically slower than other chains
+Bitcoin vanity starts after `bc1q`. TON starts after `UQ`. Monero starts after `4`. Solana and EVM start at the first character.
 
-## Features
+Match the start, the end, or both. Case-sensitive EVM uses the EIP-55 checksum. Monero and TON cap the pattern at 4 characters.
 
-- **Multi-chain**: Solana, EVM, Bitcoin, TON, and Monero — one tool, one workflow
-- **Wallet-compatible seed phrases**: 12-word BIP-39 (Solana/EVM/Bitcoin), 24-word TON native, or 25-word Monero Electrum — each importable into the native wallet
-- **Flexible matching**: Starts with, ends with, or starts _and_ ends with
-- **Case-sensitive or insensitive** search; EVM case-sensitive uses EIP-55 checksum matching
-- **Multi-threaded**: Rayon work-stealing thread pool with auto-detected optimal core count
-- **Optimized crypto**: 4-lane PBKDF2 on the ARMv8.2 SHA-512 instructions (`ring` fallback elsewhere), bitcoin-core's C `secp256k1`, stack-buffer Bech32 expansion, byte-wise case-insensitive matching — zero hot-loop heap allocations
-- **Fast-path matching**: EVM compares Keccak-256 hash bytes before hex-encoding; Bitcoin compares 5-bit Bech32 groups before full encoding — expensive string formatting only happens on candidates that pass the byte-level filter
-- **Full TUI**: Ratatui-powered terminal UI with config form, live stats dashboard, scrollable match table, and detail view — all at 10fps
-- **Graceful shutdown**: Press Ctrl+C to stop search and return to config, `q` to quit — all matches saved
-- **Continuous search**: Finds multiple matching addresses until you stop
-- **Secrets hygiene**: CSV output created with `chmod 0600` (owner-only); Monero secret key material zeroized on drop
+## Build
 
-## Installation
-
-Requires [Rust](https://rustup.rs/).
+Rust stable. Release build:
 
 ```bash
 git clone https://github.com/pipXBT/Vanaddy.git
 cd Vanaddy
 cargo build --release
-```
-
-## Usage
-
-```bash
 ./target/release/vanaddy
 ```
 
-The TUI launches with a config form on the left and results panel on the right:
+`cargo run` is a debug build. It is several times slower. Do not use it to judge speed.
 
-```
-┌──────────────────── Vanaddy ─────────────────────┐
-│         VANADDY v0.6 — Multi-Chain               │
-├──────────┬───────────────────────────────────────┤
-│ Config   │ Matches                               │
-│          │ #  Chain   Address                    │
-│ Chain:   │ 1  Solana  ABcF7k...xyz               │
-│ [Solana] │ 2  Solana  ABcD9m...qrs               │
-│ Match:   │───────────────────────────────────────│
-│ [Starts] │ Detail                                │
-│ Prefix:  │ Address: ABcF7k9...full...xyz         │
-│ ABC      │ Key:     a1b2c3...                    │
-│ Case:[No]│ Phrase:  word1 word2 ... word12       │
-│ Threads: │                                       │
-│ 8        │                                       │
-│──────────│                                       │
-│ Stats    │                                       │
-│ Checked: │                                       │
-│ 1.2M     │                                       │
-│ Rate:    │                                       │
-│ 160K/s   │                                       │
-├──────────┴───────────────────────────────────────┤
+CPU-only binary, no Metal linked:
 
+```bash
+cargo build --release --no-default-features
 ```
 
-**Keybindings:**
+## Keys
 
 | Key | Action |
 |-----|--------|
-| **Up/Down** | Move between fields |
-| **Left/Right** | Toggle options (chain, match position, case) |
-| **Tab / Shift-Tab** | Next/previous field |
-| **1-5** | Select chain directly (1=Solana, 2=EVM, 3=Bitcoin, 4=TON, 5=Monero); 1-3 for match position |
-| **y/n** | Case sensitivity |
-| **Enter** | Start search |
-| **Ctrl+C** | Stop search (return to config) |
-| **Up/Down** | Browse found matches (during search) |
-| **h** | Show/dismiss help popup |
-| **q** | Quit (not in text input fields) |
+| Up / Down | Move between fields. During a search, move through hits. |
+| Left / Right | Change chain, match mode, case, GPU. |
+| Tab / Shift-Tab | Next / previous field. |
+| 1–5 | Chain: Solana, EVM, Bitcoin, TON, Monero. On the match field, 1–3 picks the mode. |
+| y / n | Case, and the GPU toggle. |
+| Enter | Start. |
+| Ctrl+C | Stop and return to the form. Hits already found are kept. |
+| h | Help. |
+| q | Quit. Ignored while a text field is focused. |
 
-Results are saved to `vanity_wallets.csv`:
+## Output
 
-| Chain | Address | Private Key (hex) | Seed Phrase |
-|-------|---------|-------------------|-------------|
-| Solana | ABcF7k...xyz | a1b2c3... | word1 word2 word3 ... |
-| EVM | 0xdead...beef | d4e5f6... | word1 word2 word3 ... |
+Matches append to `vanity_wallets.csv` in the current directory.
 
-## Performance
+```
+Chain, Address, Private Key (hex), Seed Phrase
+```
 
-The generator uses several optimizations:
+The file is mode `0600`. It contains the seed phrase in plaintext. Anyone who can read it owns the wallet. On exit, if anything was saved, the program says so.
 
-- **4-lane hardware PBKDF2**: BIP-39 and TON seeds are derived four at a time on the ARMv8.2 SHA-512 instructions (`sha512h`/`sha512h2`/`sha512su0`/`sha512su1`), interleaving four independent streams so the core's crypto unit never waits on a single dependency chain — ~2× per core over single-stream `ring` on M1 (which already used the hardware path). Runtime-detected; other targets fall back to `ring`
-- **C `secp256k1`**: BIP-32 public-key steps and address derivation use bitcoin-core's libsecp256k1 (~17 µs per fixed-base multiply vs ~38 µs for the pure-Rust `libsecp256k1` it replaced)
-- **Byte-level fast-paths**: EVM compares Keccak-256 hash bytes with nibble-level precision before hex-encoding; Bitcoin compares 5-bit Bech32 groups via a stack-buffer expansion — the encoder is only called on candidates that pass the byte-level filter
-- **Zero hot-loop allocations**: Byte-wise ASCII case comparison via `eq_ignore_ascii_case` (no `to_lowercase()` per candidate); fixed-size arrays in BIP-32/SLIP-0010 derivation; secrets are raw structs until `encode_secret()` is called on a match
-- **Monomorphized generics**: Each chain's search loop is monomorphized by the compiler (`search::<C: Chain>`) — no trait-object dispatch, no v-table lookups in the hot loop
-- **Auto-detected thread count**: Detects physical vs logical cores, recommends optimal count for Apple Silicon (all cores) or x86 with hyperthreading (physical cores only)
-- **Rayon work-stealing** thread pool with atomic counters — no lock contention between threads
+## GPU
 
-### Per-chain throughput (Apple M1 P-core, release build)
+On Apple Silicon, EVM seed stretching (BIP-39 PBKDF2) runs on the Metal GPU. Entropy is generated on the CPU. A hit is written only after the CPU re-derives that seed with `ring` and the address matches. The CSV never stores a GPU-produced key.
 
-| Chain    | Mean / generation  | Notes |
-|----------|-------------------|-------|
-| Solana   | ~288 µs          | SLIP-0010 at `m/44'/501'/0'/0'` (Phantom-compat) |
-| EVM      | ~321 µs          | Keccak-256 + optional EIP-55 for case-sensitive |
-| Bitcoin  | ~321 µs          | BIP-84 Bech32 with stack-buffer 5-bit fast-path |
-| TON      | ~26 ms           | Native 24-word mnemonic; PBKDF2-dominated (~100k iters/wallet) |
-| Monero   | ~35 µs           | Two Ed25519 scalars + Keccak; no PBKDF2 |
+The GPU toggle is EVM-only. `VANADDY_GPU=0` or `VANADDY_NO_GPU=1` forces CPU. `--no-default-features` builds the CPU binary.
 
-Per-candidate cost is ~90% PBKDF2 on the mnemonic chains; the 4-lane derivation roughly halved it versus the previous single-stream numbers (570 / 655 / 645 µs, 51 ms).
+With the terminal window open, a release EVM search on an M1 is a few thousand candidates per second. One performance core, CPU only, is about 3,100/s. Eight threads, CPU only, is about 12,000–15,000/s. The GPU's offline seed rate is higher than the number the window shows. The window is the number that matters while you are watching it.
 
-### Difficulty scaling
+Other chains do not use the GPU.
 
-Each additional character in your vanity makes the search exponentially harder. Approximate attempts per match:
+| Chain | One M1 performance core, release |
+|-------|----------------------------------|
+| Solana | ~288 µs (~3,500/s) |
+| EVM | ~321 µs (~3,100/s) |
+| Bitcoin | ~321 µs (~3,100/s) |
+| TON | ~26 ms (~38/s) |
+| Monero | ~35 µs (~29,000/s) |
 
-| Chars | Solana / Monero (Base58) | EVM (hex) | Bitcoin (Bech32) | TON (Base64url) |
-|-------|-------------------------|-----------|------------------|-----------------|
-| 1 | ~58 | ~16 | ~32 | ~64 |
-| 2 | ~3,364 | ~256 | ~1,024 | ~4,096 |
-| 3 | ~195,112 | ~4,096 | ~32,768 | ~262,144 |
-| 4 | ~11.3M | ~65,536 | ~1M | ~16.7M |
-| 5 | ~656M | ~1M | ~33M | ~1B |
-| 6 | ~38B | ~16.7M | ~1B | — |
+Solana, EVM, Bitcoin, and TON spend most of that time in PBKDF2. Monero does not.
 
-**TON note:** TON's `MAX_VANITY = 4` because each wallet takes ~50 ms to generate; a 4-char vanity is roughly a full day of multi-threaded search. Longer prefixes would take months.
+## How long a pattern takes
 
-**Monero note:** Prefix-only matching (no suffix). `MAX_VANITY = 4` after the fixed leading `4` character.
+Attempts per hit, roughly. Case-insensitive Solana/Monero is a smaller alphabet than the table.
+
+| Chars | Solana / Monero | EVM | Bitcoin | TON |
+|-------|-----------------|-----|---------|-----|
+| 1 | 58 | 16 | 32 | 64 |
+| 2 | 3.4K | 256 | 1.0K | 4.1K |
+| 3 | 195K | 4.1K | 33K | 262K |
+| 4 | 11M | 66K | 1.0M | 17M |
+| 5 | 656M | 1.0M | 33M | 1.1B |
+| 6 | 38B | 17M | 1.1B | — |
+
+A 4-character TON pattern is about a day on 8 threads. Longer than the cap is not offered.
 
 ## Security
 
-- **No network requests** — all key generation is local, nothing leaves your machine.
-- **OS CSPRNG** for entropy (`ring`'s PBKDF2 with OS-supplied seed; `rand::rngs::OsRng` for Monero scalars).
-- **Industry-standard derivations** matching wallet implementations:
-  - Solana → SLIP-0010 Ed25519 at `m/44'/501'/0'/0'` (verified against SLIP-0010 spec test vectors)
-  - EVM → BIP-44 secp256k1 at `m/44'/60'/0'/0/0` (standard MetaMask path)
-  - Bitcoin → BIP-84 at `m/84'/0'/0'/0/0` (verified against the BIP-84 canonical vector `bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu`)
-  - TON → `@ton/crypto`-compatible HMAC+PBKDF2 scheme with wallet-v5r1 TVM cell hashing (verified against real Tonkeeper-generated addresses)
-  - Monero → standard `spend_sec = reduce32(random)`, `view_sec = reduce32(Keccak(spend_sec))`, 25-word Electrum phrase
-- **CSV file is created with `chmod 0600`** (owner read/write only). On quit, a warning prints reminding you the file contains plaintext secrets.
-- **Monero secret key material is zeroized on drop** (only generated keys that match are kept; discarded candidates have their secrets wiped).
-- **Solana/TON secrets** rely on `ed25519-dalek`'s zeroize-on-drop. **EVM/Bitcoin** `secp256k1::SecretKey` is `Copy` and is not wiped automatically; discarded candidates only live on the stack for the duration of one 4-candidate batch.
+No network. Entropy comes from the OS.
 
-**Keep your `vanity_wallets.csv` file secure.** Anyone with the seed phrase or private key has full control of the wallet. After transferring vanity addresses to their final wallet, consider moving the CSV to an encrypted location and removing the original.
+Derivations are pinned to known vectors: SLIP-0010, BIP-39, BIP-44 (first MetaMask account of the standard phrase), BIP-84 (`bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu`), EIP-55, and a Tonkeeper W5 round-trip.
 
-## Supported Address Formats
+Monero secret keys are wiped on drop. Solana and TON signing keys are wiped by `ed25519-dalek`. EVM and Bitcoin secret keys are `Copy` and are not wiped. They live on the stack for one batch.
 
-| Chain | Key Type | Address Format | Seed Phrase | Derivation | Compatible With |
-|-------|----------|---------------|-------------|------------|-----------------|
-| Solana | Ed25519 | Base58 (32-44 chars) | BIP-39 12-word | SLIP-0010 `m/44'/501'/0'/0'` | Phantom, Solflare |
-| EVM | secp256k1 | Hex, 0x-prefixed (42 chars) | BIP-39 12-word | BIP-44 `m/44'/60'/0'/0/0` | MetaMask, Rabby, any EVM wallet |
-| Bitcoin | secp256k1 | Native SegWit Bech32 (`bc1q...`) | BIP-39 12-word | BIP-84 `m/84'/0'/0'/0/0` | Sparrow, Electrum, any BIP-84 wallet |
-| TON | Ed25519 | User-friendly Base64 (`UQ...`, 48 chars) | TON native 24-word | `@ton/crypto` HMAC+PBKDF2, wallet-v5r1 cell hash | Tonkeeper (default W5), MyTonWallet |
-| Monero | Ed25519 | Base58 (`4...`, 95 chars) | 25-word Electrum English | Random spend key; `view_sec = Keccak(spend_sec)` | `monero-wallet-cli --restore-deterministic-wallet`, Cake, Feather |
+Move the CSV off the disk you search on once the address is in a wallet. Deleting the file is not enough if the disk is backed up.
 
 ## License
 
 MIT
-
-## Architecture Reference
-
-Token-lean architecture maps for agents and contributors live in [`codemaps/`](codemaps/). They cover the module graph, per-chain implementation detail, the TUI state machine, and pinned cryptographic vectors — kept in sync with the source via `/cc-codemaps:update-codemaps`.
-
-## Ratatui UI
-
-<img width="1084" height="1162" alt="Screenshot 2026-04-11 at 4 08 22 am" src="https://github.com/user-attachments/assets/cbb77e73-f775-4f6c-b158-07072459b7af" />
-

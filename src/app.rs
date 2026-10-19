@@ -76,11 +76,7 @@ pub struct App {
     /// this open, as on every other, so it is re-asserted once per search, not
     /// once per row.
     csv_file: Option<File>,
-    /// How many rows failed to reach the CSV this run. Nothing in this codebase
-    /// checks that a row was actually written, so eviction cannot claim "it is
-    /// already durably in the CSV" without this counter: while it is non-zero
-    /// the in-memory list is the ONLY copy of those seed phrases, so eviction
-    /// stops and the exit summary must not claim they were saved.
+    /// Failed CSV rows this run. Eviction still applies; the exit summary must not claim they were saved.
     pub csv_write_failures: u64,
     pub selected_match: usize,
     pub counter: Arc<AtomicU64>,
@@ -436,6 +432,7 @@ impl App {
         // open_csv_secure. No `expect`: a panic here now runs inside the
         // alternate screen, and a search that cannot write its CSV should
         // report that in the UI, not take the process down.
+        let mut csv_failed = false;
         match open_csv_secure(&self.csv_path) {
             Ok(mut file) => {
                 let needs_header = file.metadata().map(|m| m.len() == 0).unwrap_or(true);
@@ -449,14 +446,27 @@ impl App {
                         self.error_message = Some(format!(
                             "Failed to write CSV header ({e}); the file may be missing its header row"
                         ));
+                        csv_failed = true;
                     }
                 }
-                self.csv_file = Some(file);
+                if !csv_failed {
+                    self.csv_file = Some(file);
+                }
             }
             Err(e) => {
                 self.csv_file = None;
                 self.error_message = Some(format!("Cannot open {}: {e}", self.csv_path.display()));
+                csv_failed = true;
             }
+        }
+        // A CSV that cannot be opened or headed must not start a search: no
+        // GPU thread, no Rayon pool. The error string above is the one the UI
+        // already shows.
+        if csv_failed {
+            self.rx = None;
+            self.csv_file = None;
+            self.state = AppState::Configuring;
+            return;
         }
 
         // A FRESH health cell per run, UNCONDITIONALLY — outside the branch on
@@ -500,22 +510,11 @@ impl App {
     }
 
     pub fn stop_search(&mut self) {
-        // Signal FIRST, then drain. Everything still in the mpsc queue is a
-        // match a worker already found and verified; dropping the receiver
-        // below would discard it silently — never written to the CSV, never
-        // counted in total_matches. `drain_matches` is a `try_recv` loop, so it
-        // is bounded and non-blocking, and the CSV handle is still open here
-        // (it closes at the bottom of this function).
-        //
-        // Setting `stop` before the drain rather than after narrows, but does
-        // not close, a race: a worker between its last stop check and its
-        // `send` can still enqueue a match after the final `try_recv` returns
-        // Empty, and `Receiver::drop` discards it while the sender saw Ok.
-        // The window is one worker batch wide and cannot be closed without
-        // blocking the UI thread on the producers, which this function exists
-        // to avoid. Draining after the signal at least catches the final flush
-        // instead of racing ongoing production.
+        // Set stop, join the workers, drain, then drop the receiver. Joining
+        // waits out a send that passed the last stop check, so that match is
+        // still queued. The GPU threads are only signalled below and never joined.
         self.stop.store(true, Ordering::Relaxed);
+        self.thread_pool = None;
         self.drain_matches();
         self.rx = None;
         // Dropping App's Receiver clone is producer wake-path #2: once App and
@@ -531,8 +530,6 @@ impl App {
         for engine in &self.gpu_engines {
             engine.signal_stop();
         }
-        // Drops the pool handle; workers will exit on the next stop check.
-        self.thread_pool = None;
 
         // Is the file this handle points at still the file at `csv_path`?
         // start_search holds the handle for the whole search, so if the file
@@ -675,21 +672,23 @@ impl App {
                     self.error_message = Some(format!(
                         "CSV write failed ({e}); matches are NOT being saved"
                     ));
+                    self.stop.store(true, Ordering::Relaxed);
                 }
 
                 self.total_matches += 1;
+                let following_end = self.matches.is_empty()
+                    || self.selected_match + 1 == self.matches.len();
                 self.matches.push_back(payload);
-                // Evict from the FRONT: the newest matches are the ones on
-                // screen. Eviction is only a RENDER budget while every row is
-                // durably on disk. Once a write has failed, the in-memory list
-                // is the ONLY copy of those seed phrases, so stop evicting
-                // rather than destroying a found wallet.
-                if self.csv_write_failures == 0 {
-                    while self.matches.len() > MATCH_CAP {
-                        self.matches.pop_front();
+                // Drop the oldest row once the list passes MATCH_CAP, including after a failed write.
+                while self.matches.len() > MATCH_CAP {
+                    self.matches.pop_front();
+                    if self.selected_match > 0 {
+                        self.selected_match -= 1;
                     }
                 }
-                self.selected_match = self.matches.len().saturating_sub(1);
+                if following_end {
+                    self.selected_match = self.matches.len().saturating_sub(1);
+                }
             }
         }
     }
@@ -722,7 +721,7 @@ fn open_csv_secure(path: &Path) -> io::Result<File> {
         if let Ok(metadata) = file.metadata() {
             let mut perms = metadata.permissions();
             perms.set_mode(0o600);
-            let _ = std::fs::set_permissions(path, perms);
+            std::fs::set_permissions(path, perms)?;
         }
     }
     Ok(file)
@@ -2071,6 +2070,10 @@ mod tests {
             app.error_message.is_some(),
             "the user must be told the CSV is not being written"
         );
+        assert!(
+            app.stop.load(Ordering::Relaxed),
+            "a failed CSV write stops the search"
+        );
     }
 
     #[test]
@@ -2723,5 +2726,98 @@ mod tests {
             hybrid < cpu,
             "the GPU must shorten the pre-search ETA: {hybrid} vs {cpu}"
         );
+    }
+
+    #[test]
+    fn gpu_env_off_recognises_every_documented_spelling() {
+        // VANADDY_GPU: value-based, case-insensitive, trimmed.
+        assert!(gpu_env_off(Some("0"), None));
+        assert!(gpu_env_off(Some("off"), None));
+        assert!(gpu_env_off(Some("OFF"), None));
+        assert!(gpu_env_off(Some("false"), None));
+        assert!(gpu_env_off(Some("no"), None));
+        assert!(gpu_env_off(Some(" 0 "), None));
+
+        // VANADDY_NO_GPU: presence-based, matching gpu_for_test's var_os().is_some().
+        assert!(gpu_env_off(None, Some("1")));
+        assert!(gpu_env_off(None, Some("")));
+        assert!(gpu_env_off(None, Some("0")));
+
+        // Neither set, or set to something affirmative: GPU stays on.
+        assert!(!gpu_env_off(None, None));
+        assert!(!gpu_env_off(Some("1"), None));
+        assert!(!gpu_env_off(Some("on"), None));
+        assert!(!gpu_env_off(Some("yes"), None));
+    }
+
+    #[test]
+    fn gpu_env_off_makes_gpu_effective_false_on_evm() {
+        let mut app = App::new();
+        app.chain = crate::chains::ChainKind::Evm;
+        app.gpu_status = crate::gpu::GpuStatus::Ready {
+            device: "Apple M1".to_string(),
+        };
+        app.gpu_requested = true;
+        assert!(app.gpu_effective(), "precondition: EVM + Ready + requested");
+
+        // Exactly what App::with_gpu_status applies when the env lever is pulled.
+        if gpu_env_off(Some("0"), None) {
+            app.gpu_requested = false;
+            app.gpu_status = crate::gpu::GpuStatus::Disabled(crate::gpu::GpuDisableReason::UserOff);
+        }
+
+        assert!(!app.gpu_effective());
+        assert_eq!(
+            app.gpu_status,
+            crate::gpu::GpuStatus::Disabled(crate::gpu::GpuDisableReason::UserOff)
+        );
+    }
+
+    #[test]
+    fn ends_with_search_uses_vanity_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new();
+        app.csv_path = dir.path().join("vanity_wallets.csv");
+        app.chain = crate::chains::ChainKind::Solana;
+        app.match_position = MatchPosition::EndsWith;
+        app.vanity_prefix = String::new();
+        app.vanity_suffix = "zzzzzzzzz".into();
+        app.thread_count = "1".into();
+
+        app.validate().unwrap();
+        app.start_search();
+        // A debug Solana batch finishes between ~40 ms and ~80 ms. 40 ms often
+        // stops before `counter` moves, so 0 matches would not prove the suffix.
+        thread::sleep(Duration::from_millis(80));
+        app.stop_search();
+
+        assert_eq!(app.total_matches, 0);
+        assert_eq!(app.total_vanity_chars(), app.vanity_suffix.chars().count());
+    }
+
+    #[test]
+    fn selection_stays_when_not_following_the_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new();
+        app.csv_path = dir.path().join("vanity_wallets.csv");
+
+        let (tx, rx) = mpsc::channel();
+        app.rx = Some(rx);
+        for i in 0..3 {
+            tx.send(fake_match(&format!("0x{i:040x}"))).unwrap();
+        }
+        drop(tx);
+        app.drain_matches();
+        app.selected_match = 0;
+
+        let (tx, rx) = mpsc::channel();
+        app.rx = Some(rx);
+        tx.send(fake_match(&format!("0x{:040x}", 3))).unwrap();
+        drop(tx);
+        app.drain_matches();
+
+        assert!(app.matches.len() < MATCH_CAP, "cap not hit");
+        assert_eq!(app.matches.len(), 4);
+        assert_eq!(app.selected_match, 0);
     }
 }
