@@ -235,16 +235,21 @@ impl App {
         self.chain.max_vanity()
     }
 
+    /// `(prefix, suffix)` for the current match position. Ends-with types into
+    /// `vanity_suffix`, so that is the buffer it searches.
+    fn patterns(&self) -> (&str, &str) {
+        match self.match_position {
+            MatchPosition::StartsWith => (&self.vanity_prefix, ""),
+            MatchPosition::EndsWith => ("", &self.vanity_suffix),
+            MatchPosition::StartsAndEndsWith => (&self.vanity_prefix, &self.vanity_suffix),
+        }
+    }
+
     /// Total number of vanity characters the user is searching for
     /// (prefix + suffix, depending on match position).
     pub fn total_vanity_chars(&self) -> usize {
-        match self.match_position {
-            MatchPosition::StartsWith => self.vanity_prefix.chars().count(),
-            MatchPosition::EndsWith => self.vanity_prefix.chars().count(),
-            MatchPosition::StartsAndEndsWith => {
-                self.vanity_prefix.chars().count() + self.vanity_suffix.chars().count()
-            }
-        }
+        let (prefix, suffix) = self.patterns();
+        prefix.chars().count() + suffix.chars().count()
     }
 
     /// Effective alphabet size for probability calculations. Case-insensitive
@@ -375,29 +380,25 @@ impl App {
         let charset = self.valid_charset();
         let max_len = self.max_vanity_len();
 
-        let input_str = match self.match_position {
-            MatchPosition::EndsWith => &self.vanity_suffix,
-            _ => &self.vanity_prefix,
+        let check = |s: &str, empty: &str, too_long: &str| {
+            if s.is_empty() {
+                return Err(empty.to_string());
+            }
+            if s.len() > max_len {
+                return Err(format!("{too_long} 1-{max_len} characters"));
+            }
+            if let Some(c) = s.chars().find(|c| !charset.contains(*c)) {
+                return Err(format!("'{c}' is not valid for this chain"));
+            }
+            Ok(())
         };
-        if input_str.is_empty() {
-            return Err("Vanity string cannot be empty".to_string());
-        }
-        if input_str.len() > max_len {
-            return Err(format!("Must be 1-{} characters", max_len));
-        }
-        if let Some(c) = input_str.chars().find(|c| !charset.contains(*c)) {
-            return Err(format!("'{}' is not valid for this chain", c));
-        }
-
-        if matches!(self.match_position, MatchPosition::StartsAndEndsWith) {
-            if self.vanity_suffix.is_empty() {
-                return Err("Suffix cannot be empty".to_string());
-            }
-            if self.vanity_suffix.len() > max_len {
-                return Err(format!("Suffix must be 1-{} characters", max_len));
-            }
-            if let Some(c) = self.vanity_suffix.chars().find(|c| !charset.contains(*c)) {
-                return Err(format!("'{}' is not valid for this chain", c));
+        let (prefix, suffix) = self.patterns();
+        match self.match_position {
+            MatchPosition::StartsWith => check(prefix, "Vanity string cannot be empty", "Must be")?,
+            MatchPosition::EndsWith => check(suffix, "Vanity string cannot be empty", "Must be")?,
+            MatchPosition::StartsAndEndsWith => {
+                check(prefix, "Vanity string cannot be empty", "Must be")?;
+                check(suffix, "Suffix cannot be empty", "Suffix must be")?;
             }
         }
 
@@ -450,13 +451,13 @@ impl App {
         self.start_time = Some(Instant::now());
         self.state = AppState::Searching;
 
-        let (prefix, suffix) = match self.match_position {
-            MatchPosition::StartsWith => (self.vanity_prefix.clone(), String::new()),
-            MatchPosition::EndsWith => (String::new(), self.vanity_prefix.clone()),
-            MatchPosition::StartsAndEndsWith => (self.vanity_prefix.clone(), self.vanity_suffix.clone()),
-        };
-
-        let matcher = Matcher::new(prefix, suffix, self.case_sensitive, self.chain);
+        let (prefix, suffix) = self.patterns();
+        let matcher = Matcher::new(
+            prefix.into(),
+            suffix.into(),
+            self.case_sensitive,
+            self.chain,
+        );
         let chain = self.chain;
         let stop = self.stop.clone();
         let counter = self.counter.clone();
@@ -1213,6 +1214,40 @@ mod tests {
         app.shutdown_gpu(Duration::from_millis(600));
         assert!(before.elapsed() < Duration::from_millis(50));
         assert!(app.gpu_engines.is_empty());
+    }
+
+    /// Ends-with types into `vanity_suffix`. If the search reads the other
+    /// buffer, the Matcher is empty, accepts every candidate, and every wallet
+    /// lands in the CSV.
+    #[test]
+    fn ends_with_searches_for_the_typed_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new();
+        app.csv_path = dir.path().join("vanity_wallets.csv");
+        app.chain = ChainKind::Evm;
+        app.match_position = MatchPosition::EndsWith;
+        app.thread_count = "1".into();
+        app.active_field = 2;
+        for c in "aaaaaaaa".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        app.validate().unwrap();
+
+        app.start_search();
+        // `counter` moves only after a batch's matches are sent, so once it has
+        // moved an empty Matcher has already queued a whole batch.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while app.counter.load(Ordering::Relaxed) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        app.stop_search();
+
+        assert!(
+            app.counter.load(Ordering::Relaxed) > 0,
+            "the search never ran"
+        );
+        assert_eq!(app.total_matches, 0, "an 8-char suffix matched at once");
+        assert_eq!(app.total_vanity_chars(), 8, "the ETA must count the suffix");
     }
 
     /// Field identity in this form is a bare integer, and three places do
