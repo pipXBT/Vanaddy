@@ -71,8 +71,8 @@ pub struct App {
     /// `set_current_dir` is therefore racy.
     pub csv_path: PathBuf,
     /// The CSV handle held open for the whole search. At a 1-character EVM
-    /// vanity the match rate reaches ~1,700/s; reopening per row costs ~5,100
-    /// syscalls/s (open + fstat + chmod) on the UI thread. 0600 is asserted on
+    /// vanity the match rate reaches ~1,700/s; reopening per row costs ~3,400
+    /// syscalls/s (open + fchmod) on the UI thread. 0600 is asserted on
     /// this open, as on every other, so it is re-asserted once per search, not
     /// once per row.
     csv_file: Option<File>,
@@ -274,8 +274,8 @@ impl App {
         }
     }
 
-    /// Pre-search throughput estimate, attempts/sec. `projected_seconds` uses
-    /// this ONLY until a search has actually started; after that it uses the
+    /// Configuring-screen throughput estimate, attempts/sec. `projected_seconds`
+    /// uses this whenever no search is running; while one runs it uses the
     /// live measured rate, which is automatically correct because GPU
     /// candidates increment the same `counter`.
     ///
@@ -308,12 +308,15 @@ impl App {
     /// otherwise estimates from chain throughput × thread count (× GPU).
     pub fn projected_seconds(&self) -> Option<f64> {
         let expected = self.expected_attempts()? as f64;
-        let rate = if let Some(start) = self.start_time {
-            let secs = start.elapsed().as_secs_f64().max(0.5);
-            let count = self.counter.load(Ordering::Relaxed) as f64;
-            (count / secs).max(1.0)
-        } else {
-            self.estimated_rate()
+        // `start_time` outlives the search (the Stats pane still shows the
+        // last run), so it is not "searching"; `state` is.
+        let rate = match self.start_time {
+            Some(start) if self.state == AppState::Searching => {
+                let secs = start.elapsed().as_secs_f64().max(0.5);
+                let count = self.counter.load(Ordering::Relaxed) as f64;
+                (count / secs).max(1.0)
+            }
+            _ => self.estimated_rate(),
         };
         Some(expected / rate)
     }
@@ -726,11 +729,9 @@ fn open_csv_secure(path: &Path) -> io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Ok(metadata) = file.metadata() {
-            let mut perms = metadata.permissions();
-            perms.set_mode(0o600);
-            std::fs::set_permissions(path, perms)?;
-        }
+        // On the handle (fchmod), not the path: a path swapped after the open
+        // would otherwise leave the file we write to loose. Never swallowed.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(file)
 }
@@ -2759,6 +2760,41 @@ mod tests {
         assert!(
             hybrid < cpu,
             "the GPU must shorten the pre-search ETA: {hybrid} vs {cpu}"
+        );
+    }
+
+    #[test]
+    fn projected_seconds_after_stop_estimates_the_current_config_not_the_last_run() {
+        let mut app = App::new();
+        app.chain = ChainKind::Evm;
+        app.thread_count = "8".to_string();
+        app.vanity_prefix = "abc".to_string();
+        // A run that checked 10 candidates in 10 s: measured rate clamps to 1/s.
+        app.state = AppState::Searching;
+        app.start_time = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(10))
+                .expect("the monotonic clock is at least 10 s past boot"),
+        );
+        app.counter.store(10, Ordering::Relaxed);
+        let evm = app.expected_attempts().unwrap() as f64;
+        assert_eq!(
+            app.projected_seconds(),
+            Some(evm / 1.0),
+            "searching: measured rate"
+        );
+
+        app.stop_search();
+        app.chain = ChainKind::Solana;
+        assert!(
+            app.start_time.is_some(),
+            "the Stats pane still shows the last run"
+        );
+        let solana = app.expected_attempts().unwrap() as f64;
+        assert_eq!(
+            app.projected_seconds(),
+            Some(solana / app.estimated_rate()),
+            "configuring: the estimate for the config on screen, not the stale run"
         );
     }
 
