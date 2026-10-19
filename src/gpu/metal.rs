@@ -449,9 +449,8 @@ impl MetalPbkdf2 {
                     return Err(e);
                 }
             };
-            // objc2's `Retained` IS the retain the Objective-C prototype had to
-            // take by hand inside the pool: it is +1 owned, so moving it out
-            // here keeps the command buffer alive past the pool drain.
+            // objc2's `Retained` is +1 owned, so moving it out here keeps the
+            // command buffer alive past the pool drain.
             ring[slot_ix] = Some(cb);
             slot_ix = (slot_ix + 1) % PIPELINE_DEPTH;
             if remaining == 0 {
@@ -659,7 +658,8 @@ pub(crate) fn gpu_for_test() -> Option<MetalPbkdf2> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpu::selftest::{ring_reference, CANONICAL_PHRASE, CANONICAL_SEED_HEX};
+    use crate::gpu::selftest::ring_reference;
+    use crate::seed::{CANONICAL_PHRASE, CANONICAL_SEED_HEX};
     use bip39::{Language, Mnemonic};
     use rand::{RngCore, SeedableRng};
     use rand_chacha::ChaCha20Rng;

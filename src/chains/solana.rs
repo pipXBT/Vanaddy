@@ -66,6 +66,7 @@ impl Chain for Solana {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::seed::CANONICAL_PHRASE;
     use bip39::{Language, Mnemonic};
 
     /// Pinned Phantom derivation test: if this breaks, the derivation has changed.
@@ -73,10 +74,7 @@ mod tests {
     /// m/44'/501'/0'/0' (Phantom's default Solana path).
     #[test]
     fn solana_phantom_derivation_from_canonical_phrase() {
-        let m = Mnemonic::from_phrase(
-            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-            Language::English,
-        ).unwrap();
+        let m = Mnemonic::from_phrase(CANONICAL_PHRASE, Language::English).unwrap();
         let seed = derive_seed(&m);
         let key = slip10_derive_ed25519(&seed, &PHANTOM_SOLANA_PATH);
         let sk = SigningKey::from_bytes(&key);
@@ -97,10 +95,7 @@ mod tests {
         use super::super::{assert_prefix_suffix, ChainKind};
 
         // Derive the canonical pinned address as a reliable test payload.
-        let m = Mnemonic::from_phrase(
-            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-            Language::English,
-        ).unwrap();
+        let m = Mnemonic::from_phrase(CANONICAL_PHRASE, Language::English).unwrap();
         let (pubkey, _) = Solana::from_seed(&derive_seed(&m));
         assert_prefix_suffix::<Solana>(ChainKind::Solana, &pubkey, 0, false);
     }

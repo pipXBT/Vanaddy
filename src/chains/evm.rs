@@ -140,10 +140,7 @@ mod tests {
     #[test]
     fn bip44_canonical_vector() {
         use bip39::{Language, Mnemonic};
-        let m = Mnemonic::from_phrase(
-            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-            Language::English,
-        ).unwrap();
+        let m = Mnemonic::from_phrase(crate::seed::CANONICAL_PHRASE, Language::English).unwrap();
         let seed = derive_seed(&m);
         let (addr, _sk) = Evm::from_seed(&seed);
         assert_eq!(hex::encode(addr), "9858effd232b4033e47d90003d41ec34ecaeda94");
@@ -177,7 +174,7 @@ mod tests {
     /// mnemonic at all.
     #[test]
     fn from_seed_and_verify_agree_with_the_bip44_canonical_vector() {
-        const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        use crate::seed::CANONICAL_PHRASE as PHRASE;
         let m = Mnemonic::from_phrase(PHRASE, Language::English).unwrap();
         let seed = derive_seed(&m);
 

@@ -90,34 +90,12 @@ mod tests {
 
     #[test]
     fn ton_starts_and_ends_with_both_required() {
-        use super::super::super::matcher::Matcher;
-        use super::super::ChainKind;
+        use super::super::{assert_prefix_suffix, ChainKind};
 
-        let (_phrase, sk) = super::super::ton_mnemonic::generate_ton_wallet();
+        let (_phrase, sk) = generate_ton_wallet();
         let addr = Ton::address_bytes(&sk.verifying_key().to_bytes());
-
-        let encoded = Ton::encode_address(&addr);
-        // encoded starts with "UQ" — vanity target begins after that.
-        let vanity_target = &encoded[2..];
-        let actual_prefix = &vanity_target[..3];
-        let actual_suffix = &encoded[encoded.len() - 3..];
-
-        let wrong_suffix = if actual_suffix == "zzz" { "aaa" } else { "zzz" };
-        let m = Matcher::new(
-            actual_prefix.to_string(),
-            wrong_suffix.to_string(),
-            true,
-            ChainKind::Ton,
-        );
-        assert!(!Ton::matches_raw(&m, &addr), "must reject wrong suffix");
-
-        let m = Matcher::new(
-            actual_prefix.to_string(),
-            actual_suffix.to_string(),
-            true,
-            ChainKind::Ton,
-        );
-        assert!(Ton::matches_raw(&m, &addr), "must accept both correct");
+        // Vanity starts after "UQ".
+        assert_prefix_suffix::<Ton>(ChainKind::Ton, &addr, 2, true);
     }
 
     #[test]

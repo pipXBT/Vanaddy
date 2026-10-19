@@ -11,6 +11,7 @@
 //! `ring`, i.e. ~300 ms one-time on the GPU thread, off the UI thread.
 
 use crate::gpu::{GpuError, Schedule};
+use crate::seed::{CANONICAL_PHRASE, CANONICAL_SEED_HEX};
 use bip39::{Language, Mnemonic, MnemonicType};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,12 +27,6 @@ pub const SELF_TEST_COUNT: usize = 512;
 /// Deliberately not a multiple of 256 (the threadgroup size) or of 32 (the
 /// SIMD width), so the non-uniform tail of `dispatchThreads` is exercised.
 pub const SELF_TEST_RAGGED_COUNT: usize = 511;
-
-/// BIP-39 canonical vector — the same phrase and the same hex constant already
-/// pinned at src/seed.rs:37 and src/seed.rs:41.
-pub const CANONICAL_PHRASE: &str =
-    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-pub const CANONICAL_SEED_HEX: &str = "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4";
 
 /// 1 + 1000 + 46 + 1000 = 2047: the same total, cut nothing like the production
 /// schedule.

@@ -42,8 +42,7 @@ pub const HMAC_BLOCK_LEN: usize = 128;
 
 /// Longest salt for which `salt || INT(1) || padding` fits one 128-byte block:
 /// `HMAC_BLOCK_LEN - 4 (INT(1)) - 1 (0x80) - 16 (128-bit length field)`.
-/// `pub` so `gpu::pack::pack_salt_block` rejects exactly what this path rejects.
-pub const MAX_SALT_LEN: usize = 107;
+const MAX_SALT_LEN: usize = 107;
 
 /// Single-stream PBKDF2-HMAC-SHA512 via `ring`: the portable path, and the
 /// reference the lanes are tested against. `iterations` must be at least 1.
@@ -303,14 +302,14 @@ mod hw {
 mod tests {
     use super::*;
 
-    const BIP39_VECTOR_PHRASE: &[u8] = b"abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-    const BIP39_VECTOR_SEED: &str = "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4";
+    use crate::seed::{CANONICAL_PHRASE, CANONICAL_SEED_HEX};
 
     #[test]
     fn every_lane_matches_bip39_canonical_vector() {
-        let out = pbkdf2_hmac_sha512::<LANES>([BIP39_VECTOR_PHRASE; LANES], b"mnemonic", 2048);
+        let out =
+            pbkdf2_hmac_sha512::<LANES>([CANONICAL_PHRASE.as_bytes(); LANES], b"mnemonic", 2048);
         for lane in out {
-            assert_eq!(hex::encode(lane), BIP39_VECTOR_SEED);
+            assert_eq!(hex::encode(lane), CANONICAL_SEED_HEX);
         }
     }
 
@@ -318,7 +317,7 @@ mod tests {
     fn distinct_lanes_match_ring_reference() {
         // Lane 2 is a 24-word phrase (> 128 bytes), which forces HMAC key pre-hashing.
         let pws: [&[u8]; 4] = [
-            BIP39_VECTOR_PHRASE,
+            CANONICAL_PHRASE.as_bytes(),
             b"legal winner thank year wave sausage worth useful legal winner thank yellow",
             b"letter advice cage absurd amount doctor acoustic avoid letter advice cage absurd amount doctor acoustic avoid letter advice cage absurd amount doctor acoustic bless",
             b"zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong",

@@ -59,7 +59,7 @@ pub const BIP39_SALT_BLOCK: [u64; 16] = [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpu::selftest::CANONICAL_PHRASE as CANONICAL;
+    use crate::seed::CANONICAL_PHRASE as CANONICAL;
     use bip39::{Language, Mnemonic, MnemonicType};
 
     fn words_to_bytes(words: &[u64; 16]) -> [u8; 128] {

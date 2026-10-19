@@ -109,6 +109,7 @@ impl Chain for Bitcoin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::seed::CANONICAL_PHRASE;
     use bip39::{Language, Mnemonic};
 
     /// BIP-84 canonical test vector from the BIP-84 specification itself.
@@ -116,10 +117,7 @@ mod tests {
     /// bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu.
     #[test]
     fn bip84_canonical_vector() {
-        let m = Mnemonic::from_phrase(
-            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-            Language::English,
-        ).unwrap();
+        let m = Mnemonic::from_phrase(CANONICAL_PHRASE, Language::English).unwrap();
         let seed = derive_seed(&m);
         let sk = bip32_derive_secp256k1(&seed, &BTC_BIP84_PATH);
         let pk = secp256k1::PublicKey::from_secret_key_global(&sk);
@@ -132,10 +130,7 @@ mod tests {
     fn bitcoin_starts_and_ends_with_both_required() {
         use super::super::{assert_prefix_suffix, ChainKind};
 
-        let m = Mnemonic::from_phrase(
-            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-            Language::English,
-        ).unwrap();
+        let m = Mnemonic::from_phrase(CANONICAL_PHRASE, Language::English).unwrap();
         // "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu": "cr8" after "bc1q", "fyu".
         let (hash, _) = Bitcoin::from_seed(&derive_seed(&m));
         assert_prefix_suffix::<Bitcoin>(ChainKind::Bitcoin, &hash, 4, true);

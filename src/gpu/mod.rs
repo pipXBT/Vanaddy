@@ -192,16 +192,9 @@ impl SeedBlock {
     /// deliberately no `remove`, `sort`, `retain` or `iter_mut`: the entropy
     /// <-> seed pairing established by the single `zip` in the producer must
     /// never be re-ordered afterwards.
-    // no production consumer on the stub leg as of Milestone 6: the only
-    // production caller is `producer::carve_and_send`, which is metal-only;
-    // `chains::mod`'s own `#[cfg(test)]` fixtures call this directly.
-    #[allow(dead_code)]
     pub(crate) fn with_capacity(n: usize) -> Self {
         SeedBlock(Vec::with_capacity(n))
     }
-    // no production consumer on the stub leg as of Milestone 6: same
-    // reasoning as `with_capacity` above.
-    #[allow(dead_code)]
     pub(crate) fn push(&mut self, candidate: GpuCandidate) {
         assert!(
             self.0.len() < self.0.capacity(),

@@ -49,10 +49,7 @@ mod tests {
             hex::encode(addr),
             "9858effd232b4033e47d90003d41ec34ecaeda94"
         );
-        assert_eq!(
-            phrase,
-            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
-        );
+        assert_eq!(phrase, crate::seed::CANONICAL_PHRASE);
         assert!(Evm::verify(
             &Evm::encode_address(&addr),
             &Evm::encode_secret(&secret),

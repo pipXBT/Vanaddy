@@ -1383,7 +1383,6 @@ dependencies = [
  "ring",
  "ripemd",
  "secp256k1",
- "sha2 0.10.8",
  "sha3",
  "tempfile",
  "tiny-bip39",
