@@ -236,7 +236,15 @@ impl MetalPbkdf2 {
             }
         }
         let status = cb.status().0 as i64;
-        let message = cb.error().map(|e| e.localizedDescription().to_string());
+        // Domain and code tell a macOS watchdog kill apart from a real fault.
+        let message = cb.error().map(|e| {
+            format!(
+                "{} [domain={}, code={}]",
+                e.localizedDescription(),
+                e.domain(),
+                e.code()
+            )
+        });
         classify_command_buffer_status(status, message)
     }
 
