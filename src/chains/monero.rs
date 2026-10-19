@@ -155,11 +155,7 @@ impl Chain for Monero {
         // Monero vanity applies after the leading "4" (mainnet network byte).
         const FIXED_PREFIX_LEN: usize = 1;
         let addr = Monero::encode_address(bytes);
-        let vanity_target = if addr.len() > FIXED_PREFIX_LEN {
-            &addr[FIXED_PREFIX_LEN..]
-        } else {
-            ""
-        };
+        let vanity_target = addr.get(FIXED_PREFIX_LEN..).unwrap_or("");
         matcher.prefix_matches(vanity_target) && matcher.suffix_matches(&addr)
     }
 }

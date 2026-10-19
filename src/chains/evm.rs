@@ -90,20 +90,7 @@ impl Chain for Evm {
         if matcher.case_sensitive {
             let eip55 = eip55_encode(bytes);
             let eip55_str = std::str::from_utf8(&eip55).expect("ascii");
-
-            if !matcher.prefix.is_empty() {
-                let ok = eip55_str.len() >= matcher.prefix.len()
-                    && &eip55_str[..matcher.prefix.len()] == matcher.prefix;
-                if !ok {
-                    return false;
-                }
-            }
-            if !matcher.suffix.is_empty() {
-                let start = eip55_str.len() - matcher.suffix.len();
-                if &eip55_str[start..] != matcher.suffix {
-                    return false;
-                }
-            }
+            return matcher.prefix_matches(eip55_str) && matcher.suffix_matches(eip55_str);
         }
 
         true
@@ -172,6 +159,21 @@ mod tests {
         assert_eq!(hex::encode(addr), "9858effd232b4033e47d90003d41ec34ecaeda94");
         let eip55 = eip55_encode(&addr);
         assert_eq!(std::str::from_utf8(&eip55).unwrap(), "9858EfFD232B4033E47d90003D41EC34EcaEda94");
+    }
+
+    /// Case-sensitive matching must compare against the EIP-55 casing exactly.
+    #[test]
+    fn case_sensitive_match_uses_eip55_casing() {
+        use super::super::ChainKind;
+        let addr: [u8; 20] = hex::decode("9858effd232b4033e47d90003d41ec34ecaeda94")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let m = |pre: &str, suf: &str| Matcher::new(pre.into(), suf.into(), true, ChainKind::Evm);
+        assert!(Evm::matches_raw(&m("9858EfFD", "EcaEda94"), &addr));
+        assert!(Evm::matches_raw(&m("", "Eda94"), &addr));
+        assert!(!Evm::matches_raw(&m("9858effd", ""), &addr));
+        assert!(!Evm::matches_raw(&m("9858EfFD", "ecaeda94"), &addr));
     }
 
     #[test]

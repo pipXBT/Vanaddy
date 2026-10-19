@@ -1,5 +1,5 @@
-use super::chains::ChainKind;
-use bech32::u5;
+use super::chains::bitcoin::Bitcoin;
+use super::chains::{Chain, ChainKind};
 
 #[derive(Clone, Copy)]
 pub enum MatchPosition {
@@ -16,48 +16,23 @@ pub struct Matcher {
     pub(crate) evm_prefix: Option<(Vec<u8>, Option<u8>)>, // (full_bytes, extra_high_nibble)
     pub(crate) evm_suffix: Option<(Vec<u8>, Option<u8>)>, // (full_bytes, extra_low_nibble)
     /// For Bitcoin Bech32: pre-computed 5-bit groups of the user's vanity prefix
-    pub(crate) bech32_prefix_5bit: Option<Vec<u5>>,
+    pub(crate) bech32_prefix_5bit: Option<Vec<u8>>,
 }
 
 /// Parse a hex string into full bytes + optional trailing high nibble (for prefix matching).
 /// e.g. "dead" -> ([0xde, 0xad], None), "dea" -> ([0xde], Some(0x0a))
 fn hex_prefix_to_bytes(hex: &str) -> (Vec<u8>, Option<u8>) {
-    let hex_lower = hex.to_lowercase();
-    let nibbles: Vec<u8> = hex_lower
-        .chars()
-        .map(|c| c.to_digit(16).unwrap() as u8)
-        .collect();
-    let full_count = nibbles.len() / 2;
-    let mut bytes = Vec::with_capacity(full_count);
-    for i in 0..full_count {
-        bytes.push((nibbles[i * 2] << 4) | nibbles[i * 2 + 1]);
-    }
-    let extra = if nibbles.len() % 2 == 1 {
-        Some(nibbles[nibbles.len() - 1])
-    } else {
-        None
-    };
-    (bytes, extra)
+    let (full, odd) = hex.split_at(hex.len() & !1);
+    let extra = odd.chars().next().map(|c| c.to_digit(16).unwrap() as u8);
+    (hex::decode(full).unwrap(), extra)
 }
 
 /// Parse a hex string into full bytes + optional leading low nibble (for suffix matching).
 /// e.g. "beef" -> ([0xbe, 0xef], None), "def" -> ([0xef], Some(0x0d))
 fn hex_suffix_to_bytes(hex: &str) -> (Vec<u8>, Option<u8>) {
-    let hex_lower = hex.to_lowercase();
-    let nibbles: Vec<u8> = hex_lower
-        .chars()
-        .map(|c| c.to_digit(16).unwrap() as u8)
-        .collect();
-    let has_extra = nibbles.len() % 2 == 1;
-    let start = if has_extra { 1 } else { 0 };
-    let full_count = (nibbles.len() - start) / 2;
-    let mut bytes = Vec::with_capacity(full_count);
-    for i in 0..full_count {
-        let idx = start + i * 2;
-        bytes.push((nibbles[idx] << 4) | nibbles[idx + 1]);
-    }
-    let extra = if has_extra { Some(nibbles[0]) } else { None };
-    (bytes, extra)
+    let (odd, full) = hex.split_at(hex.len() % 2);
+    let extra = odd.chars().next().map(|c| c.to_digit(16).unwrap() as u8);
+    (hex::decode(full).unwrap(), extra)
 }
 
 impl Matcher {
@@ -78,18 +53,12 @@ impl Matcher {
         };
 
         let bech32_prefix_5bit = match chain {
-            ChainKind::Bitcoin if !prefix.is_empty() => {
-                let charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
-                Some(
-                    prefix
-                        .chars()
-                        .map(|c| {
-                            let idx = charset.find(c).expect("validated in TUI") as u8;
-                            u5::try_from_u8(idx).unwrap()
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            }
+            ChainKind::Bitcoin if !prefix.is_empty() => Some(
+                prefix
+                    .chars()
+                    .map(|c| Bitcoin::CHARSET.find(c).expect("validated in TUI") as u8)
+                    .collect(),
+            ),
             _ => None,
         };
 
@@ -144,7 +113,7 @@ impl Matcher {
 
     /// Match EVM address bytes directly — no hex encoding needed.
     pub fn matches_evm_raw(&self, addr_bytes: &[u8; 20]) -> bool {
-        let prefix_ok = if let Some((ref full, ref extra)) = self.evm_prefix {
+        if let Some((ref full, ref extra)) = self.evm_prefix {
             if !addr_bytes[..full.len()].starts_with(full) {
                 return false;
             }
@@ -153,13 +122,6 @@ impl Matcher {
                     return false;
                 }
             }
-            true
-        } else {
-            true
-        };
-
-        if !prefix_ok {
-            return false;
         }
 
         if let Some((ref full, ref extra)) = self.evm_suffix {
@@ -212,5 +174,14 @@ mod tests {
         addr[18] = 0xbe;
         addr[19] = 0xef;
         assert!(m.matches_evm_raw(&addr));
+    }
+
+    #[test]
+    fn hex_to_bytes_splits_odd_nibble() {
+        assert_eq!(hex_prefix_to_bytes("dEa"), (vec![0xde], Some(0x0a)));
+        assert_eq!(hex_suffix_to_bytes("dEf"), (vec![0xef], Some(0x0d)));
+        assert_eq!(hex_prefix_to_bytes("a"), (vec![], Some(0x0a)));
+        assert_eq!(hex_suffix_to_bytes("BEEF"), (vec![0xbe, 0xef], None));
+        assert_eq!(hex_prefix_to_bytes(""), (vec![], None));
     }
 }

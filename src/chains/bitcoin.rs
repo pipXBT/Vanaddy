@@ -92,14 +92,8 @@ impl Chain for Bitcoin {
     fn matches_raw(matcher: &Matcher, bytes: &Self::AddressBytes) -> bool {
         // Fast-path: compare 5-bit expansion of HASH160 against user's Bech32 prefix.
         if let Some(ref expected) = matcher.bech32_prefix_5bit {
-            let data_5bit = expand_5bit(bytes);
-            if data_5bit.len() < expected.len() {
+            if !expand_5bit(bytes).starts_with(expected) {
                 return false;
-            }
-            for (a, b) in data_5bit.iter().zip(expected.iter()) {
-                if *a != b.to_u8() {
-                    return false;
-                }
             }
         }
 
@@ -107,11 +101,7 @@ impl Chain for Bitcoin {
         // Bitcoin vanity applies after "bc1q" (4 chars).
         const FIXED_PREFIX_LEN: usize = 4;
         let addr = Bitcoin::encode_address(bytes);
-        let vanity_target = if addr.len() > FIXED_PREFIX_LEN {
-            &addr[FIXED_PREFIX_LEN..]
-        } else {
-            ""
-        };
+        let vanity_target = addr.get(FIXED_PREFIX_LEN..).unwrap_or("");
         matcher.prefix_matches(vanity_target) && matcher.suffix_matches(&addr)
     }
 }
