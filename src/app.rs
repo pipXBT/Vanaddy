@@ -510,11 +510,19 @@ impl App {
     }
 
     pub fn stop_search(&mut self) {
-        // Set stop, join the workers, drain, then drop the receiver. Joining
-        // waits out a send that passed the last stop check, so that match is
-        // still queued. The GPU threads are only signalled below and never joined.
+        // Set stop, wait for the workers, drain, then drop the receiver.
+        // Dropping a rayon pool does NOT join it. The spawned job owns the only
+        // Sender and drops it after every worker returns, so `rx.iter()` ends
+        // exactly then: a send that passed the last stop check still lands.
+        // Bounded by one batch per worker. The GPU threads are only signalled
+        // below and never joined.
         self.stop.store(true, Ordering::Relaxed);
         self.thread_pool = None;
+        if let Some(rx) = self.rx.take() {
+            let (tx, rest) = mpsc::channel();
+            rx.iter().for_each(|m| tx.send(m).expect("rest is held"));
+            self.rx = Some(rest);
+        }
         self.drain_matches();
         self.rx = None;
         // Dropping App's Receiver clone is producer wake-path #2: once App and
@@ -1495,6 +1503,32 @@ mod tests {
             5,
             "every queued match reached the CSV: {csv}"
         );
+    }
+
+    #[test]
+    fn stop_search_waits_for_a_send_already_past_the_stop_check() {
+        // A worker that passed its last stop check is still deriving when the
+        // user stops. Its send lands after stop_search starts; dropping the
+        // receiver before it does destroys a found wallet.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vanity_wallets.csv");
+        let mut app = App::new();
+        app.csv_path = path.clone();
+        app.csv_file = Some(open_csv_secure(&path).unwrap());
+        app.state = AppState::Searching;
+
+        let (tx, rx) = mpsc::channel();
+        app.rx = Some(rx);
+        let late = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            tx.send(fake_match("0xlate")).unwrap();
+        });
+
+        app.stop_search();
+        late.join().unwrap();
+
+        assert_eq!(app.total_matches, 1, "late match is a found wallet");
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
     }
 
     #[test]
